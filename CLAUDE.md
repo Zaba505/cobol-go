@@ -107,7 +107,10 @@ with `errors.As`.
 
 `Parse(r io.Reader) (*File, error)` converts the push-based tokenizer to
 pull-based with `iter.Pull2(Tokenize(r))` (`defer stop()`), then runs the
-top-level action loop against a `*File`. The root AST node is `File`.
+top-level action loop against a `*File`. The root AST node is `File`, a thin
+container of `Programs []*Program` (a COBOL source file holds one or more
+programs); each `Program` carries `Divisions []Division`. Every node below
+`File` carries a `Pos`, mirroring `go/ast`, where every node is position-aware.
 
 ### `expect`
 
@@ -120,7 +123,10 @@ tok, err := p.expect(TokenIdentifier, TokenSymbol)
 It pulls the next token and checks its type against the given types, returning
 `UnexpectedEndOfTokensError` if the stream is exhausted or `UnexpectedTokenError`
 otherwise. Use it everywhere the grammar requires a specific token; never inline
-the type check.
+the type check. Its sibling `expectKeyword(kw ...string)` requires an identifier
+whose value matches one of `kw` (case-insensitively, since COBOL reserved words
+are case-insensitive), returning `UnexpectedKeywordError` on mismatch; use it
+wherever the grammar requires a specific keyword rather than a token type.
 
 ### The inner action loop rule (the one that matters)
 
@@ -129,7 +135,7 @@ data items — implementations **must** use an inner action loop, **not** an
 inline `for` with a `switch`:
 
 ```go
-func parseDivision(p *parser, f *File) (parserAction[*File], error) {
+func parseDivision(p *parser, prog *Program) (parserAction[*Program], error) {
     div := &SomeDivision{}
     var err error
     for action := parseDivisionHeader; action != nil && err == nil; {
@@ -138,8 +144,8 @@ func parseDivision(p *parser, f *File) (parserAction[*File], error) {
     if err != nil {
         return nil, err
     }
-    f.Divisions = append(f.Divisions, div)
-    return parseFile, nil
+    prog.Divisions = append(prog.Divisions, div)
+    return parseNextDivision, nil // dispatch the next division, or nil to end the program
 }
 ```
 
@@ -180,11 +186,11 @@ them right early saves debugging later.
 ### Parser tests
 
 Source string in, `*File` out via the public `Parse()`. **Drive `Parse()` with
-real source strings; never hand-construct AST nodes for the expected value.**
-The zero-value `&File{}` for the empty-input case is the only exception.
-Hand-built ASTs bypass the parser, mask regressions, and rewrite the test every
-time the AST shape changes. Failure-path subtests use `require.ErrorAs` for
-typed errors and `require.ErrorIs` for sentinels.
+real source strings, then assert the result against a hand-built expected
+`*File` with `require.Equal`** — positions included, in the avro-go/idl
+parser-test style this package is modeled on. Specify exact `Pos` for every node
+(copy them from the matching tokenizer test). Failure-path subtests use
+`require.ErrorAs` for typed errors and `require.ErrorIs` for sentinels.
 
 ### Printer tests
 
@@ -192,9 +198,11 @@ Two shapes, both required for every printer method once real ones exist:
 
 1. **Direct** — explicit `*File` in, expected string out. Pins down formatting
    (whitespace, punctuation, fixed-format columns) the round-trip can't see.
-2. **Round-trip** — `Parse → Print → Parse → require.Equal`. The cheapest
-   end-to-end correctness check; a mismatch is almost always a parser dropping a
-   token or a printer omitting punctuation the parser made optional.
+2. **Round-trip** — `Parse → Print → Parse`, comparing the two ASTs **ignoring
+   `Pos`** (the printer reformats canonically, as `go/printer` does, so positions
+   shift). The cheapest end-to-end correctness check; a mismatch is almost always
+   a parser dropping a token or a printer omitting punctuation the parser made
+   optional.
 
 ## Why this shape
 
