@@ -345,6 +345,43 @@ can match.
 Terminals written as bare UPPERCASE words are reserved words. `.` in a
 production means a **separator period** token.
 
+### Names and Terminals
+
+The productions reference these leaf terminals, all resolving to lexical token
+classes from [Lexical Elements](#lexical-elements-tokens):
+
+```ebnf
+user-defined-word = Word            « a Word that is not a reserved word »
+data-name         = user-defined-word
+file-name         = user-defined-word
+computer-name     = user-defined-word
+mnemonic-name     = user-defined-word
+condition-name    = user-defined-word
+index-name        = user-defined-word
+alphabet-name     = user-defined-word
+assignment-name   = user-defined-word
+device-name       = Word            « an implementor-defined name, e.g. CONSOLE »
+paragraph-name    = user-defined-word | NumericLiteral   « may be all digits »
+section-name      = user-defined-word | NumericLiteral
+procedure-name    = paragraph-name [ ( "IN" | "OF" ) section-name ]
+                  | section-name
+
+literal             = AlphanumericLiteral | NumericLiteral | figurative-constant
+figurative-constant = "ZERO"  | "ZEROS"  | "ZEROES"
+                    | "SPACE" | "SPACES"
+                    | "HIGH-VALUE" | "HIGH-VALUES"
+                    | "LOW-VALUE"  | "LOW-VALUES"
+                    | "QUOTE" | "QUOTES" | "NULL" | "NULLS"
+                    | "ALL" literal
+comment-entry       = « free-form text up to the next header; not tokenized as
+                        COBOL words — see the ambiguity note under Identification »
+```
+
+Structural placeholders left in prose (e.g. `« object-computer-clause »`,
+`« file-clause »`, `« i-o-control-clause »`, `« use-spec »`, `« alphabet-spec »`)
+are clause sets elaborated by the story that implements them; only the clauses
+needed for the core slice are spelled out in the productions below.
+
 ### Top-Level Structure
 
 A free-format source file is a sequence of one or more **programs**. A program
@@ -424,7 +461,7 @@ source-computer-paragraph =
       "SOURCE-COMPUTER" "." [ computer-name [ "WITH" "DEBUGGING" "MODE" ] "." ]
 
 object-computer-paragraph =
-      "OBJECT-COMPUTER" "." [ computer-name { object-computer-clause } "." ]
+      "OBJECT-COMPUTER" "." [ computer-name { « object-computer-clause » } "." ]
 
 special-names-paragraph =
       "SPECIAL-NAMES" "." { special-names-clause } [ "." ]
@@ -433,7 +470,7 @@ special-names-clause =
         "DECIMAL-POINT" [ "IS" ] "COMMA"
       | "CURRENCY" "SIGN" [ "IS" ] AlphanumericLiteral
       | device-name "IS" mnemonic-name
-      | "ALPHABET" alphabet-name "IS" alphabet-spec
+      | "ALPHABET" alphabet-name "IS" « alphabet-spec »
       | « other implementor associations »
 
 input-output-section =
@@ -478,7 +515,7 @@ file-section =
       { file-description-entry { data-description-entry } }
 
 file-description-entry =
-      ( "FD" | "SD" ) file-name { file-clause } "."
+      ( "FD" | "SD" ) file-name { « file-clause » } "."
 
 working-storage-section =
       "WORKING-STORAGE" "SECTION" "." { data-description-entry }
@@ -609,10 +646,13 @@ perform-statement =
       [ { statement } "END-PERFORM" ]
 
 evaluate-statement =
-      "EVALUATE" subject { "ALSO" subject } "."
+      "EVALUATE" subject { "ALSO" subject }
       { "WHEN" object { "ALSO" object } { statement } }
       [ "WHEN" "OTHER" { statement } ]
       "END-EVALUATE"
+subject = operand | condition | "TRUE" | "FALSE"
+object  = "ANY" | "TRUE" | "FALSE"
+        | [ "NOT" ] ( operand [ ( "THROUGH" | "THRU" ) operand ] | condition )
 
 call-statement =
       "CALL" ( AlphanumericLiteral | identifier )
