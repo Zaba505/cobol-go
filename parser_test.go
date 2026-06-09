@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Parser tests must drive the public Parse with real source strings; never
-// hand-construct AST nodes for the expected value. The zero-value &File{} used
-// by the empty-input case below is the only exception (see CLAUDE.md).
+// Parser tests drive the public Parse with real source strings and assert the
+// resulting AST, positions included, against a hand-built expected *File (the
+// avro-go/idl parser-test style this package is modeled on).
 func TestParser(t *testing.T) {
 	t.Parallel()
 
@@ -28,6 +28,42 @@ func TestParser(t *testing.T) {
 			src:      "",
 			expected: &File{},
 		},
+		{
+			name: "minimal free-format program",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    DISPLAY \"Hello, world!\".\n" +
+				"    STOP RUN.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "HELLO"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Statements: []Statement{
+									&DisplayStatement{
+										Pos: Pos{Line: 4, Column: 5},
+										Operands: []Type{
+											&StringLiteral{Pos: Pos{Line: 4, Column: 13}, Value: `"Hello, world!"`},
+										},
+									},
+									&StopStatement{Pos: Pos{Line: 5, Column: 5}, Run: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -38,6 +74,83 @@ func TestParser(t *testing.T) {
 
 			require.NoError(t, err)
 			require.Equal(t, tc.expected, f)
+		})
+	}
+}
+
+// TestParserErrors pins the position-aware typed errors the parser reports.
+func TestParserErrors(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		src    string
+		assert func(t *testing.T, err error)
+	}{
+		{
+			name: "misspelled division keyword",
+			src:  "FOO DIVISION.",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 1, Column: 1}, target.Actual.Pos)
+				// The message names the keyword and surfaces its spelling.
+				require.Contains(t, err.Error(), "unexpected keyword")
+				require.Contains(t, err.Error(), `"FOO"`)
+			},
+		},
+		{
+			name: "non-identifier where a division is expected",
+			src:  ".",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 1, Column: 1}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "missing DIVISION after IDENTIFICATION",
+			src:  "IDENTIFICATION.\nPROGRAM-ID. HELLO.",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 1, Column: 15}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "misspelled verb in procedure body",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    FOO.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 5}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "non-identifier where a statement is expected",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    .\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 5}, target.Actual.Pos)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := Parse(strings.NewReader(tc.src))
+
+			require.Error(t, err)
+			tc.assert(t, err)
 		})
 	}
 }
