@@ -395,7 +395,7 @@ program           = identification-division
                     [ environment-division ]
                     [ data-division ]
                     [ procedure-division ]
-                    [ nested-program ]
+                    [ « nested-program » ]
                     [ "END" "PROGRAM" program-name "." ]
 
 program-name      = user-defined-word | AlphanumericLiteral
@@ -527,15 +527,22 @@ linkage-section =
       "LINKAGE" "SECTION" "." { data-description-entry }
 
 data-description-entry =
-        level-number [ entry-name ] { data-clause } "."     (* 01–49, 77 *)
-      | "66" data-name "RENAMES" data-name
-            [ ( "THROUGH" | "THRU" ) data-name ] "."        (* renames    *)
-      | "88" condition-name "VALUE" [ "IS" ] value-spec
-            { value-spec } "."                              (* cond-name  *)
+        level-number [ entry-name ] { data-clause } "."
+      | renames-entry
+      | condition-name-entry
 
-level-number   = NumericLiteral   « 01–49, 66, 77, or 88 »
-entry-name     = data-name | "FILLER"
-value-spec     = literal [ ( "THROUGH" | "THRU" ) literal ]
+level-number = NumericLiteral   « an integer 01–49 or 77 »
+entry-name   = data-name | "FILLER"
+
+renames-entry =
+        NumericLiteral « 66 » data-name "RENAMES" data-name
+        [ ( "THROUGH" | "THRU" ) data-name ] "."
+
+condition-name-entry =
+        NumericLiteral « 88 » condition-name "VALUE" [ "IS" ]
+        value-spec { value-spec } "."
+
+value-spec = literal [ ( "THROUGH" | "THRU" ) literal ]
 
 data-clause =
         "REDEFINES" data-name
@@ -582,12 +589,12 @@ returning-phrase = "RETURNING" data-name
 
 declaratives =
       "DECLARATIVES" "."
-      { section-header "USE" « use-spec » "." paragraph }
+      { section-name "SECTION" "." "USE" « use-spec » "." { paragraph } }
       "END" "DECLARATIVES" "."
 
 procedure-body =
-        { paragraph }            (* a program with no explicit sections *)
-      | { section }              (* a program organized into sections   *)
+        { paragraph }            « a program with no explicit sections »
+      | { section }              « a program organized into sections »
 
 section =
       section-name "SECTION" [ NumericLiteral ] "." { paragraph }
@@ -626,7 +633,7 @@ compute-statement =
       ( "=" | "EQUAL" ) arithmetic-expression
       [ on-size-error ] [ "END-COMPUTE" ]
 
-arithmetic-statement =                  (* ADD / SUBTRACT / MULTIPLY / DIVIDE *)
+arithmetic-statement =                  « ADD / SUBTRACT / MULTIPLY / DIVIDE »
       ( "ADD" | "SUBTRACT" | "MULTIPLY" | "DIVIDE" ) « operands »
       [ "GIVING" identifier ] [ "ROUNDED" ] [ on-size-error ]
       [ "END-ADD" | "END-SUBTRACT" | "END-MULTIPLY" | "END-DIVIDE" ]
@@ -687,6 +694,8 @@ combinable-condition =
 simple-condition =
         relation-condition | class-condition | condition-name-reference
         | sign-condition
+condition-name-reference =
+        condition-name { ( "IN" | "OF" ) data-name } [ subscript ]
 relation-condition =
         operand relational-operator operand
 relational-operator =
