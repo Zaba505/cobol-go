@@ -118,9 +118,14 @@ The **separators** of COBOL (a string of one or more of these characters):
 > period** only when immediately followed by a space, newline, or end of input;
 > a period embedded in a numeric literal (`3.14`) or a PICTURE string
 > (`ZZ9.99`) is **not** a separator. The tokenizer must use the trailing-space
-> rule to decide. Symmetrically, a comma/semicolon is a separator only when
-> followed by a space; under `DECIMAL-POINT IS COMMA` the roles of `.` and `,`
-> swap inside numeric literals and PICTURE strings (see Semantics).
+> rule to decide. Symmetrically, a comma or semicolon is a **separator** only
+> when followed by a space, and is then consumed like whitespace (not emitted as
+> a token) — so even in list contexts such as subscripts the operands are
+> effectively space-separated: `(2, 3)` and `(2 3)` tokenize identically, while
+> `(2,3)` (no space) is *not* a separator comma. Under `DECIMAL-POINT IS COMMA`
+> the separator comma is unavailable — a `,` is then a decimal point inside
+> numeric literals and PICTURE strings — so a semicolon or space must separate
+> list items (see Semantics).
 
 ### Comments
 
@@ -345,6 +350,12 @@ can match.
 Terminals written as bare UPPERCASE words are reserved words. `.` in a
 production means a **separator period** token.
 
+`Comment` and `CompilerDirective` tokens are **trivia**: they may appear between
+any two tokens of any production and are not written into the productions below.
+The tokenizer emits them (so they can be preserved for round-tripping) but they
+do not affect phrase structure — with one exception, a leading
+`>>SOURCE FORMAT IS FREE`, which selects the source format.
+
 ### Names and Terminals
 
 The productions reference these leaf terminals, all resolving to lexical token
@@ -389,7 +400,7 @@ begins with an IDENTIFICATION DIVISION and contains the four divisions in fixed
 order; only IDENTIFICATION (with its `PROGRAM-ID`) is mandatory.
 
 ```ebnf
-source-file       = { CompilerDirective } program { program }
+source-file       = program { program }
 
 program           = identification-division
                     [ environment-division ]
@@ -404,9 +415,11 @@ program-name      = user-defined-word | AlphanumericLiteral
 - The divisions must appear in the order ID → ENVIRONMENT → DATA → PROCEDURE.
 - `END PROGRAM` is required only when programs are nested or concatenated; a
   lone program may omit it.
-- Document start: an optional leading run of `>>` compiler-directing lines
-  (notably `>>SOURCE FORMAT IS FREE`). Document end: end of input after the last
-  program.
+- `>>` compiler-directing lines (`CompilerDirective` tokens) are trivia: they
+  may appear between any tokens — before, between, or inside programs (e.g.
+  `>>PAGE`, conditional-compilation directives), not only in a leading preamble.
+  By convention `>>SOURCE FORMAT IS FREE`, when present, appears first. Document
+  end: end of input after the last program.
 
 > **Ambiguity:** Nested programs, and non-program compilation units (functions,
 > classes, interfaces), are recognized structurally but their full grammar is
@@ -681,10 +694,13 @@ Other recognized verbs (grammar deferred to their stories): `INITIALIZE`,
 `WRITE`, `REWRITE`, `DELETE`, `START`, `CONTINUE`.
 
 ```ebnf
-operand    = identifier | literal | figurative-constant
+operand    = identifier | literal           « literal includes figurative-constant »
 identifier = qualified-name [ subscript ] [ reference-modifier ]
 qualified-name   = data-name { ( "IN" | "OF" ) data-name }
-subscript        = "(" operand { ( "," | ";" )? operand } ")"
+subscript        = "(" operand { operand } ")"
+        « operands are space-separated; an optional separator comma or semicolon
+          — each requiring a following space — may appear between them and is
+          consumed by the tokenizer as a separator »
 reference-modifier = "(" arithmetic-expression ":" [ arithmetic-expression ] ")"
 
 condition =
