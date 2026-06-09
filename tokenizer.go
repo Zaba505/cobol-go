@@ -12,6 +12,7 @@ import (
 	"io"
 	"iter"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Pos represents the position of a token in the input.
@@ -155,11 +156,14 @@ func skipWhitespace(next tokenizerAction) tokenizerAction {
 	}
 }
 
-// tokenizeCOBOL is the entry-point action. It dispatches on the next rune to a
-// specific tokenizer. For now it is a stub: empty input produces no tokens, and
-// any other input yields an [UnexpectedCharacterError] rather than silently
-// tokenizing as empty. The implementer wires up the dispatch switch (comments,
-// identifiers, symbols, literals) here.
+// tokenizeCOBOL is the entry-point action. It skips leading whitespace, then
+// dispatches on the next rune to a specific sub-tokenizer. Empty (or
+// whitespace-only) input produces no tokens; any rune that begins no known
+// token class yields an [UnexpectedCharacterError].
+//
+// This minimal free-format slice recognizes three token classes — COBOL words,
+// the separator period, and alphanumeric literals. Comments, numeric literals,
+// and the remaining symbols/operators are tokenized by later stories.
 func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
 	return skipWhitespace(
 		func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
@@ -169,13 +173,87 @@ func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction 
 				return yieldErrorOr(err, nil)
 			}
 
-			// TODO: dispatch on r to the appropriate sub-tokenizer. Until the
-			// dispatch switch exists, no rune is recognized, so surface the
-			// failure instead of dropping the rune.
-			yield(Token{}, UnexpectedCharacterError{Pos: pos, R: r})
-			return nil
+			switch {
+			case r == '.':
+				return yieldTokenThen(
+					Token{Pos: pos, Type: TokenSymbol, Value: []byte{'.'}},
+					tokenizeCOBOL,
+				)
+			case r == '"' || r == '\'':
+				return tokenizeString(pos, r)
+			case isWordStart(r):
+				return tokenizeWord(pos, r)
+			default:
+				yield(Token{}, UnexpectedCharacterError{Pos: pos, R: r})
+				return nil
+			}
 		},
 	)
+}
+
+// tokenizeWord accumulates a maximal run of COBOL word runes, beginning with the
+// already-read first rune at start. A non-word rune is backed up so the next
+// action re-reads it; end of input simply ends the word. All COBOL words emit as
+// [TokenIdentifier] — the parser's keyword table distinguishes reserved words
+// from user-defined names.
+func tokenizeWord(start Pos, first rune) tokenizerAction {
+	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		value := utf8.AppendRune(nil, first)
+		for {
+			pos := t.pos
+			r, err := t.next()
+			if err != nil {
+				tok := Token{Pos: start, Type: TokenIdentifier, Value: value}
+				return yieldTokenThen(tok, yieldErrorOr(err, nil))
+			}
+			if !isWordContinue(r) {
+				tok := Token{Pos: start, Type: TokenIdentifier, Value: value}
+				return yieldErrorOr(t.backup(pos), yieldTokenThen(tok, tokenizeCOBOL))
+			}
+			value = utf8.AppendRune(value, r)
+		}
+	}
+}
+
+// tokenizeString accumulates an alphanumeric literal delimited by delim (a
+// double or single quote), which has already been consumed at start. The raw lexeme —
+// including both delimiters — becomes the token value. End of input before the
+// matching delimiter is an [UnterminatedStringError]; any other read error
+// propagates unchanged. Doubled-delimiter escaping is deferred to a later story.
+func tokenizeString(start Pos, delim rune) tokenizerAction {
+	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		value := utf8.AppendRune(nil, delim)
+		for {
+			r, err := t.next()
+			if err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					err = UnterminatedStringError{Pos: start}
+				}
+				yield(Token{}, err)
+				return nil
+			}
+			value = utf8.AppendRune(value, r)
+			if r == delim {
+				tok := Token{Pos: start, Type: TokenString, Value: value}
+				return yieldTokenThen(tok, tokenizeCOBOL)
+			}
+		}
+	}
+}
+
+// isWordStart reports whether r may begin a COBOL word. Word start is restricted
+// to an ASCII letter in this slice so the dispatch stays unambiguous before
+// numeric literals (which also begin with a digit) are tokenized.
+func isWordStart(r rune) bool {
+	return ('A' <= r && r <= 'Z') || ('a' <= r && r <= 'z')
+}
+
+// isWordContinue reports whether r may appear after the first rune of a COBOL
+// word: ASCII letters, digits, hyphen, and underscore (SPEC §"User-defined
+// word"). The "must contain a letter" and "may not begin or end with a hyphen or
+// underscore" rules are semantic concerns left to the parser.
+func isWordContinue(r rune) bool {
+	return isWordStart(r) || ('0' <= r && r <= '9') || r == '-' || r == '_'
 }
 
 // UnexpectedCharacterError is returned by the tokenizer when it encounters a
@@ -188,4 +266,15 @@ type UnexpectedCharacterError struct {
 // Error implements the [error] interface.
 func (e UnexpectedCharacterError) Error() string {
 	return fmt.Sprintf("unexpected character '%c' at line %d, column %d", e.R, e.Pos.Line, e.Pos.Column)
+}
+
+// UnterminatedStringError is returned by the tokenizer when an alphanumeric
+// literal is not closed by its matching delimiter before end of input.
+type UnterminatedStringError struct {
+	Pos Pos // position of the opening delimiter
+}
+
+// Error implements the [error] interface.
+func (e UnterminatedStringError) Error() string {
+	return fmt.Sprintf("unterminated string literal starting at line %d, column %d", e.Pos.Line, e.Pos.Column)
 }
