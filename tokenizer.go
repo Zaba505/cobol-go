@@ -217,16 +217,19 @@ func tokenizeWord(start Pos, first rune) tokenizerAction {
 
 // tokenizeString accumulates an alphanumeric literal delimited by delim (a
 // double or single quote), which has already been consumed at start. The raw lexeme —
-// including both delimiters — becomes the token value. Reaching end of input
-// before the matching delimiter is an [UnterminatedStringError]. Doubled-
-// delimiter escaping is deferred to a later story.
+// including both delimiters — becomes the token value. End of input before the
+// matching delimiter is an [UnterminatedStringError]; any other read error
+// propagates unchanged. Doubled-delimiter escaping is deferred to a later story.
 func tokenizeString(start Pos, delim rune) tokenizerAction {
 	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
 		value := utf8.AppendRune(nil, delim)
 		for {
 			r, err := t.next()
 			if err != nil {
-				yield(Token{}, UnterminatedStringError{Pos: start})
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					err = UnterminatedStringError{Pos: start}
+				}
+				yield(Token{}, err)
 				return nil
 			}
 			value = utf8.AppendRune(value, r)
@@ -247,8 +250,8 @@ func isWordStart(r rune) bool {
 
 // isWordContinue reports whether r may appear after the first rune of a COBOL
 // word: ASCII letters, digits, hyphen, and underscore (SPEC §"User-defined
-// word"). The "must contain a letter" and "may not end with a hyphen" rules are
-// semantic concerns left to the parser.
+// word"). The "must contain a letter" and "may not begin or end with a hyphen or
+// underscore" rules are semantic concerns left to the parser.
 func isWordContinue(r rune) bool {
 	return isWordStart(r) || ('0' <= r && r <= '9') || r == '-' || r == '_'
 }

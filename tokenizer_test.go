@@ -6,6 +6,7 @@
 package cobol
 
 import (
+	"errors"
 	"iter"
 	"strings"
 	"testing"
@@ -153,4 +154,40 @@ func TestTokenizerErrors(t *testing.T) {
 			tc.assert(t, err)
 		})
 	}
+}
+
+// errReader yields data, then fails every subsequent read with err. It drives a
+// non-EOF I/O failure partway through a literal.
+type errReader struct {
+	data []byte
+	err  error
+}
+
+func (r *errReader) Read(p []byte) (int, error) {
+	if len(r.data) > 0 {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		return n, nil
+	}
+	return 0, r.err
+}
+
+// A genuine read error inside a literal must propagate unchanged, not be
+// reclassified as an UnterminatedStringError (which is reserved for EOF).
+func TestTokenizerPropagatesReadError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("boom")
+
+	var got error
+	for _, err := range Tokenize(&errReader{data: []byte(`"ab`), err: wantErr}) {
+		if err != nil {
+			got = err
+			break
+		}
+	}
+
+	require.ErrorIs(t, got, wantErr)
+	var unterminated UnterminatedStringError
+	require.NotErrorAs(t, got, &unterminated)
 }
