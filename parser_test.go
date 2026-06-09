@@ -88,10 +88,22 @@ func TestParserErrors(t *testing.T) {
 		assert func(t *testing.T, err error)
 	}{
 		{
-			name: "unknown division keyword",
+			name: "misspelled division keyword",
 			src:  "FOO DIVISION.",
 			assert: func(t *testing.T, err error) {
 				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 1, Column: 1}, target.Actual.Pos)
+				// The message names the keyword and surfaces its spelling.
+				require.Contains(t, err.Error(), "unexpected keyword")
+				require.Contains(t, err.Error(), `"FOO"`)
+			},
+		},
+		{
+			name: "non-identifier where a division is expected",
+			src:  ".",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 1, Column: 1}, target.Actual.Pos)
 			},
@@ -103,6 +115,30 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedTokenError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 1, Column: 15}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "misspelled verb in procedure body",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    FOO.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 5}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "non-identifier where a statement is expected",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    .\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 5}, target.Actual.Pos)
 			},
 		},
 	}

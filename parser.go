@@ -182,6 +182,18 @@ func keywordIs(tok Token, kws ...string) bool {
 	return false
 }
 
+// unexpectedKeyword builds the error for tok read where one of the keywords in
+// expected was required. An identifier of the wrong spelling yields
+// [UnexpectedKeywordError]; any other token type is a structural mismatch (an
+// identifier was expected) and yields [UnexpectedTokenError], so callers using
+// errors.As can tell a misspelled keyword from a wrong token class.
+func unexpectedKeyword(tok Token, expected ...string) error {
+	if tok.Type != TokenIdentifier {
+		return UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+	}
+	return UnexpectedKeywordError{Expected: expected, Actual: tok}
+}
+
 // valueNode wraps an identifier or alphanumeric-literal token as the
 // corresponding value AST node.
 func valueNode(tok Token) Type {
@@ -232,10 +244,7 @@ func dispatchDivision(kw Token) parserAction[*Program] {
 		return parseProcedureDivision(kw)
 	default:
 		return func(_ *parser, _ *Program) (parserAction[*Program], error) {
-			return nil, UnexpectedKeywordError{
-				Expected: []string{"IDENTIFICATION", "ID", "PROCEDURE"},
-				Actual:   kw,
-			}
+			return nil, unexpectedKeyword(kw, "IDENTIFICATION", "ID", "PROCEDURE")
 		}
 	}
 }
@@ -353,7 +362,7 @@ func parseProcedureBody(p *parser, _ *ProcedureDivision) (parserAction[*Procedur
 	case keywordIs(tok, "STOP"):
 		return parseStopStatement(tok), nil
 	default:
-		return nil, UnexpectedKeywordError{Expected: []string{"DISPLAY", "STOP"}, Actual: tok}
+		return nil, unexpectedKeyword(tok, "DISPLAY", "STOP")
 	}
 }
 
@@ -425,5 +434,5 @@ type UnexpectedKeywordError struct {
 
 // Error implements the [error] interface.
 func (e UnexpectedKeywordError) Error() string {
-	return fmt.Sprintf("unexpected token %s at line %d, column %d, expected one of %v", e.Actual, e.Actual.Pos.Line, e.Actual.Pos.Column, e.Expected)
+	return fmt.Sprintf("unexpected keyword %q at line %d, column %d, expected one of %v", string(e.Actual.Value), e.Actual.Pos.Line, e.Actual.Pos.Column, e.Expected)
 }
