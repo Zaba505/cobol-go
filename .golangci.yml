@@ -1,0 +1,11 @@
+version: "2"
+
+# Uses golangci-lint v2's default ("standard") linter set:
+# errcheck, govet, ineffassign, staticcheck, unused.
+linters:
+  disable:
+    # `unused` is intentionally disabled for now: the scaffold ships
+    # building-block helpers (see CLAUDE.md) that are wired up as the
+    # tokenizer/parser/printer pipeline is implemented. Re-enable it once the
+    # pipeline is fleshed out.
+    - unused
