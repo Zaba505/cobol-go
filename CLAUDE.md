@@ -68,8 +68,8 @@ method — named values pay for themselves the first time a test fails.
 - `yieldTokenThen(tok, next)` — yield a token, then continue with `next`. The
   most common ending of an action.
 - `yieldErrorOr(err, next)` — continue with `next` on a nil error, terminate
-  cleanly on `io.ErrUnexpectedEOF`, otherwise yield the error then continue.
-  Use it after any operation that may fail.
+  cleanly at end of input (`io.EOF` or `io.ErrUnexpectedEOF`), otherwise yield
+  the error then continue. Use it after any operation that may fail.
 - `skipWhitespace(next)` — consume leading whitespace, then run `next`.
 
 ### Entry point pattern

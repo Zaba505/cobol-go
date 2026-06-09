@@ -84,11 +84,11 @@ type tokenizer struct {
 }
 
 func (t *tokenizer) next() (rune, error) {
-	r, size, err := t.buf.ReadRune()
+	r, _, err := t.buf.ReadRune()
 	if err != nil {
 		return 0, err
 	}
-	t.pos.Column += size
+	t.pos.Column++
 	if r == '\n' {
 		t.pos.Line++
 		t.pos.Column = 1
@@ -156,9 +156,10 @@ func skipWhitespace(next tokenizerAction) tokenizerAction {
 }
 
 // tokenizeCOBOL is the entry-point action. It dispatches on the next rune to a
-// specific tokenizer. For now it is a stub: it reads a single rune and stops,
-// so empty input produces no tokens. The implementer wires up the dispatch
-// switch (comments, identifiers, symbols, literals) here.
+// specific tokenizer. For now it is a stub: empty input produces no tokens, and
+// any other input yields an [UnexpectedCharacterError] rather than silently
+// tokenizing as empty. The implementer wires up the dispatch switch (comments,
+// identifiers, symbols, literals) here.
 func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
 	return skipWhitespace(
 		func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
@@ -168,9 +169,10 @@ func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction 
 				return yieldErrorOr(err, nil)
 			}
 
-			// TODO: dispatch on r to the appropriate sub-tokenizer.
-			_ = pos
-			_ = r
+			// TODO: dispatch on r to the appropriate sub-tokenizer. Until the
+			// dispatch switch exists, no rune is recognized, so surface the
+			// failure instead of dropping the rune.
+			yield(Token{}, UnexpectedCharacterError{Pos: pos, R: r})
 			return nil
 		},
 	)
