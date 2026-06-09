@@ -352,7 +352,7 @@ begins with an IDENTIFICATION DIVISION and contains the four divisions in fixed
 order; only IDENTIFICATION (with its `PROGRAM-ID`) is mandatory.
 
 ```ebnf
-source-file       = { compiler-directive } program { program }
+source-file       = { CompilerDirective } program { program }
 
 program           = identification-division
                     [ environment-division ]
@@ -870,5 +870,3 @@ MAIN-PARAGRAPH.
 - GnuCOBOL Programmer's Guide, Chapter 2 — *COBOL Fundamentals*.
   <https://superbol.eu/gnucobol/gnucobpg/chapter2.html>
 - GnuCOBOL project documentation. <https://gnucobol.sourceforge.io/>
-</content>
-</invoke>
