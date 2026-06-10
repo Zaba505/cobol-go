@@ -529,6 +529,70 @@ func TestTokenizer(t *testing.T) {
 				{Pos: Pos{Line: 5, Column: 13}, Type: TokenSymbol, Value: []byte(".")},
 			},
 		},
+		{
+			name: "full-line comment",
+			src:  "*> a full-line comment",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenComment, Value: []byte("*> a full-line comment")},
+			},
+		},
+		{
+			name: "inline comment after code",
+			src:  `DISPLAY "hi".  *> say hi`,
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("DISPLAY")},
+				{Pos: Pos{Line: 1, Column: 9}, Type: TokenString, Value: []byte(`"hi"`)},
+				{Pos: Pos{Line: 1, Column: 13}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 1, Column: 16}, Type: TokenComment, Value: []byte("*> say hi")},
+			},
+		},
+		{
+			// The line terminator is not part of the comment; it is consumed as
+			// whitespace, and the next physical line tokenizes normally.
+			name: "comment ends at the newline and the next line tokenizes",
+			src:  "*> note\nSTOP RUN.\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenComment, Value: []byte("*> note")},
+				{Pos: Pos{Line: 2, Column: 1}, Type: TokenIdentifier, Value: []byte("STOP")},
+				{Pos: Pos{Line: 2, Column: 6}, Type: TokenIdentifier, Value: []byte("RUN")},
+				{Pos: Pos{Line: 2, Column: 9}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			name: "bare comment introducer",
+			src:  "*>",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenComment, Value: []byte("*>")},
+			},
+		},
+		{
+			// *> has no meaning inside an alphanumeric literal (SPEC §Comments):
+			// "a*>b" is one literal whose body is a*>b, not a comment.
+			name: "comment introducer inside a literal is not a comment",
+			src:  `"a*>b"`,
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenString, Value: []byte(`"a*>b"`)},
+			},
+		},
+		{
+			name: "concatenation operator",
+			src:  "&",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("&")},
+			},
+		},
+		{
+			// Free-format continuation: a long literal is split across physical
+			// lines and joined with &. Tokens may span lines; the & carries the
+			// continuation. Joining the fragments is left to the parser.
+			name: "alphanumeric literal continued with the concatenation operator",
+			src:  "\"This is a long literal that \"\n    & \"spans two source lines.\"",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenString, Value: []byte(`"This is a long literal that "`)},
+				{Pos: Pos{Line: 2, Column: 5}, Type: TokenSymbol, Value: []byte("&")},
+				{Pos: Pos{Line: 2, Column: 7}, Type: TokenString, Value: []byte(`"spans two source lines."`)},
+			},
+		},
 	}
 
 	for _, tc := range testCases {

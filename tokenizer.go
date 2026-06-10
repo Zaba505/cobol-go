@@ -37,7 +37,7 @@ func (t Token) String() string {
 type TokenType int
 
 const (
-	TokenComment    TokenType = iota // e.g. * in column 7, or *> inline comment
+	TokenComment    TokenType = iota // e.g. *> inline or full-line comment
 	TokenIdentifier                  // e.g. IDENTIFICATION, DIVISION, a data name
 	TokenSymbol                      // e.g. ".", "(", ")"
 	TokenString                      // e.g. "literal"
@@ -272,10 +272,11 @@ func skipWhitespace(next tokenizerAction) tokenizerAction {
 //
 // This free-format slice recognizes COBOL words, alphanumeric literals, numeric
 // literals, the separator period, the readability separators comma and
-// semicolon, the parenthesis and colon separators, and the special-character
-// operators (+ - * / ** = < > <= >= <>). The comment introducer *>, the
-// compiler-directive introducer >>, and the concatenation operator & are
-// tokenized by later stories; until then *> lexes as * then >, and >> as two >.
+// semicolon, the parenthesis and colon separators, the special-character
+// operators (+ - * / ** = < > <= >= <>), the concatenation operator & (the
+// free-format literal-continuation mechanism), and the inline/full-line comment
+// introducer *>. The compiler-directive introducer >> is tokenized by a later
+// story; until then >> lexes as two > operators.
 func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
 	return skipWhitespace(
 		func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
@@ -286,7 +287,7 @@ func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction 
 			}
 
 			switch {
-			case r == '.' || r == '(' || r == ')' || r == ':' || r == '=' || r == '/':
+			case r == '.' || r == '(' || r == ')' || r == ':' || r == '=' || r == '/' || r == '&':
 				return yieldSymbol(pos, utf8.AppendRune(nil, r))
 			case r == ',' || r == ';':
 				return tokenizeSeparatorPunct(pos, r)
@@ -300,7 +301,15 @@ func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction 
 				return tokenizeNumber(pos, utf8.AppendRune(nil, r))
 			case r == '+' || r == '-':
 				return yieldSymbol(pos, utf8.AppendRune(nil, r))
-			case r == '*' || r == '<' || r == '>':
+			case r == '*':
+				// *> introduces a comment; a bare * is multiply and ** is
+				// exponentiation, both handled by tokenizeOperator.
+				if b, ok := t.peekByte(); ok && b == '>' {
+					gt, _ := t.next()
+					return tokenizeComment(pos, []byte{byte(r), byte(gt)})
+				}
+				return tokenizeOperator(pos, r)
+			case r == '<' || r == '>':
 				return tokenizeOperator(pos, r)
 			case isWordStart(r):
 				return tokenizeWord(pos, r)
@@ -564,6 +573,42 @@ func tokenizeString(start Pos, delim rune) tokenizerAction {
 				tok := Token{Pos: start, Type: TokenString, Value: value}
 				return yieldTokenThen(tok, tokenizeCOBOL)
 			}
+		}
+	}
+}
+
+// tokenizeComment accumulates a free-format inline or full-line comment into a
+// single [TokenComment]. The comment is introduced by *> (SPEC §Comments) and
+// runs to the end of the physical line; value already holds the *> introducer,
+// consumed at start. The raw lexeme — the *> marker and the comment text, case
+// and spacing preserved — becomes the token value, so the printer can reproduce
+// it verbatim. This mirrors go/ast's Comment.Text (markers kept, terminator
+// excluded) and is consistent with how [tokenizeString] keeps its delimiters and
+// [tokenizePictureString] keeps its raw lexeme.
+//
+// Like [tokenizePictureString] it peeks each candidate rune before consuming it,
+// stopping at the line terminator ('\n' or '\r') without consuming it, so the
+// next dispatch skips it as whitespace. value always holds at least *>, so the
+// token is never empty. At end of input the comment is emitted, then the next
+// read surfaces the condition (a clean EOF stops the stream).
+func tokenizeComment(start Pos, value []byte) tokenizerAction {
+	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		emit := func(next tokenizerAction) tokenizerAction {
+			return yieldTokenThen(Token{Pos: start, Type: TokenComment, Value: value}, next)
+		}
+		for {
+			r, ok := t.peekRune()
+			if !ok {
+				return emit(func(t *tokenizer, _ func(Token, error) bool) tokenizerAction {
+					_, err := t.next()
+					return yieldErrorOr(err, nil)
+				})
+			}
+			if r == '\n' || r == '\r' {
+				return emit(tokenizeCOBOL)
+			}
+			r, _ = t.next()
+			value = utf8.AppendRune(value, r)
 		}
 	}
 }
