@@ -351,6 +351,16 @@ func TestTokenizer(t *testing.T) {
 			},
 		},
 		{
+			// A multi-byte Unicode space (U+00A0 NBSP) is a boundary, the same
+			// as skipWhitespace treats it, so the comma is a valid separator.
+			name: "separator comma followed by unicode whitespace",
+			src:  "A,\u00A0B",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("A")},
+				{Pos: Pos{Line: 1, Column: 4}, Type: TokenIdentifier, Value: []byte("B")},
+			},
+		},
+		{
 			name: "subscripts with a separator comma",
 			src:  "(2, 3)",
 			expected: []Token{

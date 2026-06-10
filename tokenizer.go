@@ -140,6 +140,20 @@ func (t *tokenizer) peekByte() (byte, bool) {
 	return b[0], true
 }
 
+// peekRune returns the next unread rune without consuming it (so position is
+// unchanged), reporting false at end of input. Unlike [tokenizer.peekByte] it
+// decodes a full UTF-8 rune, so multi-byte Unicode whitespace is recognized the
+// same way [skipWhitespace] recognizes it. As with peekByte, peeking and then
+// [tokenizer.backup]-ing the same rune is not allowed.
+func (t *tokenizer) peekRune() (rune, bool) {
+	b, _ := t.buf.Peek(utf8.UTFMax)
+	if len(b) == 0 {
+		return 0, false
+	}
+	r, _ := utf8.DecodeRune(b)
+	return r, true
+}
+
 // peekIsDigit reports whether the next unread byte is an ASCII digit.
 func (t *tokenizer) peekIsDigit() bool {
 	b, ok := t.peekByte()
@@ -317,7 +331,9 @@ func tokenizeSeparatorPunct(start Pos, r rune) tokenizerAction {
 			yield(Token{}, UnexpectedCharacterError{Pos: start, R: r})
 			return nil
 		}
-		if b, ok := t.peekByte(); ok && !unicode.IsSpace(rune(b)) {
+		// A full rune is decoded so multi-byte Unicode whitespace counts as a
+		// boundary, consistent with skipWhitespace.
+		if next, ok := t.peekRune(); ok && !unicode.IsSpace(next) {
 			yield(Token{}, UnexpectedCharacterError{Pos: start, R: r})
 			return nil
 		}
