@@ -96,7 +96,9 @@ func TestPrinter(t *testing.T) {
 								},
 							},
 							&ProcedureDivision{
-								Statements: []Statement{&StopStatement{Run: true}},
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}},
+								},
 							},
 						},
 					},
@@ -133,13 +135,19 @@ func TestPrinter(t *testing.T) {
 								ProgramID: &ProgramID{Name: &Word{Value: "hello"}},
 							},
 							&ProcedureDivision{
-								Statements: []Statement{
-									&DisplayStatement{
-										Operands: []Type{
-											&StringLiteral{Value: `"Hello, world!"`},
+								Paragraphs: []*Paragraph{
+									{
+										Sentences: []*Sentence{
+											{Statements: []Statement{
+												&DisplayStatement{
+													Operands: []Type{
+														&StringLiteral{Value: `"Hello, world!"`},
+													},
+												},
+											}},
+											{Statements: []Statement{&StopStatement{Run: true}}},
 										},
 									},
-									&StopStatement{Run: true},
 								},
 							},
 						},
@@ -204,7 +212,9 @@ func TestPrinter(t *testing.T) {
 								},
 							},
 							&ProcedureDivision{
-								Statements: []Statement{&StopStatement{Run: true}},
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}},
+								},
 							},
 						},
 					},
@@ -401,18 +411,7 @@ func withoutPos(f *File) *File {
 			case *DataDivision:
 				clearDataDivisionPos(d)
 			case *ProcedureDivision:
-				d.Pos = Pos{}
-				for _, stmt := range d.Statements {
-					switch s := stmt.(type) {
-					case *DisplayStatement:
-						s.Pos = Pos{}
-						for _, op := range s.Operands {
-							clearTypePos(op)
-						}
-					case *StopStatement:
-						s.Pos = Pos{}
-					}
-				}
+				clearProcedurePos(d)
 			}
 		}
 	}
@@ -443,6 +442,49 @@ func clearWordPos(w *Word) {
 func clearNumericPos(n *NumericLiteral) {
 	if n != nil {
 		n.Pos = Pos{}
+	}
+}
+
+// clearProcedurePos zeroes every Pos beneath a PROCEDURE DIVISION so round-trip
+// comparisons ignore the positions the printer is free to choose.
+func clearProcedurePos(div *ProcedureDivision) {
+	div.Pos = Pos{}
+	for _, para := range div.Paragraphs {
+		clearParagraphPos(para)
+	}
+	for _, sec := range div.Sections {
+		sec.Pos = Pos{}
+		clearWordPos(sec.Name)
+		clearNumericPos(sec.Segment)
+		for _, para := range sec.Paragraphs {
+			clearParagraphPos(para)
+		}
+	}
+}
+
+// clearParagraphPos zeroes the Pos of a paragraph, its optional name, and every
+// statement in its sentences.
+func clearParagraphPos(para *Paragraph) {
+	para.Pos = Pos{}
+	clearWordPos(para.Name)
+	for _, sent := range para.Sentences {
+		sent.Pos = Pos{}
+		for _, stmt := range sent.Statements {
+			clearStatementPos(stmt)
+		}
+	}
+}
+
+// clearStatementPos zeroes the Pos of a statement and its value operands.
+func clearStatementPos(stmt Statement) {
+	switch s := stmt.(type) {
+	case *DisplayStatement:
+		s.Pos = Pos{}
+		for _, op := range s.Operands {
+			clearTypePos(op)
+		}
+	case *StopStatement:
+		s.Pos = Pos{}
 	}
 }
 
@@ -653,14 +695,18 @@ func TestPrinterErrors(t *testing.T) {
 		{
 			name: "unknown statement type",
 			input: &File{Programs: []*Program{{Divisions: []Division{
-				&ProcedureDivision{Statements: []Statement{fakeStatement{}}},
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{fakeStatement{}}}}},
+				}},
 			}}}},
 		},
 		{
 			name: "unsupported display operand type",
 			input: &File{Programs: []*Program{{Divisions: []Division{
-				&ProcedureDivision{Statements: []Statement{
-					&DisplayStatement{Operands: []Type{fakeValue{}}},
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&DisplayStatement{Operands: []Type{fakeValue{}}},
+					}}}},
 				}},
 			}}}},
 		},
@@ -679,13 +725,17 @@ func TestPrinterErrors(t *testing.T) {
 		{
 			name: "typed-nil display statement",
 			input: &File{Programs: []*Program{{Divisions: []Division{
-				&ProcedureDivision{Statements: []Statement{(*DisplayStatement)(nil)}},
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{(*DisplayStatement)(nil)}}}},
+				}},
 			}}}},
 		},
 		{
 			name: "typed-nil stop statement",
 			input: &File{Programs: []*Program{{Divisions: []Division{
-				&ProcedureDivision{Statements: []Statement{(*StopStatement)(nil)}},
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{(*StopStatement)(nil)}}}},
+				}},
 			}}}},
 		},
 		{

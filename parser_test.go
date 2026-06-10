@@ -261,8 +261,18 @@ func TestParser(t *testing.T) {
 							},
 							&ProcedureDivision{
 								Pos: Pos{Line: 28, Column: 1},
-								Statements: []Statement{
-									&StopStatement{Pos: Pos{Line: 29, Column: 5}, Run: true},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 29, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 29, Column: 5},
+												Statements: []Statement{
+													&StopStatement{Pos: Pos{Line: 29, Column: 5}, Run: true},
+												},
+											},
+										},
+									},
 								},
 							},
 						},
@@ -291,14 +301,29 @@ func TestParser(t *testing.T) {
 							},
 							&ProcedureDivision{
 								Pos: Pos{Line: 3, Column: 1},
-								Statements: []Statement{
-									&DisplayStatement{
+								Paragraphs: []*Paragraph{
+									{
 										Pos: Pos{Line: 4, Column: 5},
-										Operands: []Type{
-											&StringLiteral{Pos: Pos{Line: 4, Column: 13}, Value: `"Hello, world!"`},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&DisplayStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Operands: []Type{
+															&StringLiteral{Pos: Pos{Line: 4, Column: 13}, Value: `"Hello, world!"`},
+														},
+													},
+												},
+											},
+											{
+												Pos: Pos{Line: 5, Column: 5},
+												Statements: []Statement{
+													&StopStatement{Pos: Pos{Line: 5, Column: 5}, Run: true},
+												},
+											},
 										},
 									},
-									&StopStatement{Pos: Pos{Line: 5, Column: 5}, Run: true},
 								},
 							},
 						},
@@ -390,8 +415,18 @@ func TestParser(t *testing.T) {
 							},
 							&ProcedureDivision{
 								Pos: Pos{Line: 17, Column: 1},
-								Statements: []Statement{
-									&StopStatement{Pos: Pos{Line: 18, Column: 5}, Run: true},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 18, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 18, Column: 5},
+												Statements: []Statement{
+													&StopStatement{Pos: Pos{Line: 18, Column: 5}, Run: true},
+												},
+											},
+										},
+									},
 								},
 							},
 						},

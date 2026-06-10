@@ -610,23 +610,110 @@ func occursClauseText(c *OccursClause) (string, bool) {
 }
 
 // printProcedureDivision prints the PROCEDURE DIVISION header followed by its
-// statements, one sentence per line. A typed-nil division is rejected with an
-// [UnsupportedNodeError] rather than panicking.
+// body — either its paragraphs or its sections. A typed-nil division, or one with
+// both Paragraphs and Sections set (the two body forms are mutually exclusive), is
+// rejected with an [UnsupportedNodeError] rather than panicking.
 func printProcedureDivision(div *ProcedureDivision, next printerAction) printerAction {
-	if div == nil {
+	if div == nil || (len(div.Paragraphs) > 0 && len(div.Sections) > 0) {
 		return failPrint(UnsupportedNodeError{Node: div})
 	}
-	return writeThen("PROCEDURE DIVISION.\n", printStatementAt(div, 0, next))
+	return writeThen("PROCEDURE DIVISION.\n",
+		printParagraphAt(div.Paragraphs, 0,
+			printSectionAt(div.Sections, 0, next)))
 }
 
-// printStatementAt prints div's statement at index i, then continues with the
-// statement after it; once i is past the last statement it continues with next.
-func printStatementAt(div *ProcedureDivision, i int, next printerAction) printerAction {
+// printSectionAt prints the section at index i, then continues with the section
+// after it; once i is past the last section it continues with next.
+func printSectionAt(secs []*Section, i int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
-		if i >= len(div.Statements) {
+		if i >= len(secs) {
 			return next
 		}
-		return printStatement(div.Statements[i], printStatementAt(div, i+1, next))
+		return printSection(secs[i], printSectionAt(secs, i+1, next))
+	}
+}
+
+// printSection prints a section-name header (with its optional segment number)
+// followed by the section's paragraphs. A typed-nil section or one missing its
+// name is rejected with an [UnsupportedNodeError].
+func printSection(sec *Section, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if sec == nil || sec.Name == nil {
+			return failPrint(UnsupportedNodeError{Node: sec})
+		}
+		header := sec.Name.Value + " SECTION"
+		if sec.Segment != nil {
+			header += " " + sec.Segment.Value
+		}
+		return writeThen(header+".\n", printParagraphAt(sec.Paragraphs, 0, next))
+	}
+}
+
+// printParagraphAt prints the paragraph at index i, then continues with the
+// paragraph after it; once i is past the last paragraph it continues with next.
+func printParagraphAt(paras []*Paragraph, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(paras) {
+			return next
+		}
+		return printParagraph(paras[i], printParagraphAt(paras, i+1, next))
+	}
+}
+
+// printParagraph prints an optional paragraph-name header followed by the
+// paragraph's sentences. The anonymous leading paragraph (nil Name) prints no
+// header. A typed-nil paragraph is rejected with an [UnsupportedNodeError].
+func printParagraph(para *Paragraph, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if para == nil {
+			return failPrint(UnsupportedNodeError{Node: para})
+		}
+		body := printSentenceAt(para.Sentences, 0, next)
+		if para.Name == nil {
+			return body
+		}
+		return writeThen(para.Name.Value+".\n", body)
+	}
+}
+
+// printSentenceAt prints the sentence at index i, then continues with the
+// sentence after it; once i is past the last sentence it continues with next.
+func printSentenceAt(sents []*Sentence, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(sents) {
+			return next
+		}
+		return printSentence(sents[i], printSentenceAt(sents, i+1, next))
+	}
+}
+
+// printSentence prints a sentence's statements, the last terminated by the
+// separator period that ends the sentence. A typed-nil or empty sentence is
+// rejected rather than emitting a bare period.
+func printSentence(sent *Sentence, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if sent == nil || len(sent.Statements) == 0 {
+			return failPrint(UnsupportedNodeError{Node: sent})
+		}
+		return printSentenceStatementAt(sent, 0, next)
+	}
+}
+
+// printSentenceStatementAt prints sent's statement at index j on its own line.
+// The final statement is followed by the sentence-terminating period; all others
+// by a newline. The period belongs to the sentence, not the statement, so a
+// statement printer never emits it (it may emit its own scope terminator, e.g.
+// END-IF, which is separate from the sentence period).
+func printSentenceStatementAt(sent *Sentence, j int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if j >= len(sent.Statements) {
+			return next
+		}
+		sep := "\n"
+		if j == len(sent.Statements)-1 {
+			sep = ".\n"
+		}
+		return printStatement(sent.Statements[j], writeThen(sep, printSentenceStatementAt(sent, j+1, next)))
 	}
 }
 
@@ -645,11 +732,11 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 	}
 }
 
-// printDisplayStatement prints a DISPLAY statement: the verb followed by its
-// space-separated operands, indented and terminated with a separator period. The
-// operand slice is a leaf walked with a local loop, not the action machinery. A
-// typed-nil statement (a nil *DisplayStatement element) is rejected with an
-// [UnsupportedNodeError] rather than panicking.
+// printDisplayStatement prints a DISPLAY statement: the indented verb followed by
+// its space-separated operands. The sentence-terminating period is emitted by the
+// enclosing sentence, not here. The operand slice is a leaf walked with a local
+// loop, not the action machinery. A typed-nil statement (a nil *DisplayStatement
+// element) is rejected with an [UnsupportedNodeError] rather than panicking.
 func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil {
@@ -664,14 +751,14 @@ func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAc
 			pr.write(" ")
 			pr.write(text)
 		}
-		pr.write(".\n")
 		return next
 	}
 }
 
-// printStopStatement prints a STOP statement. Only the STOP RUN form is produced
-// by the parser today; the bare-STOP branch is forward-looking and harmless. A
-// typed-nil statement (a nil *StopStatement element) is rejected with an
+// printStopStatement prints a STOP statement (the indented verb; the sentence
+// emits the terminating period). Only the STOP RUN form is produced by the parser
+// today; the bare-STOP branch is forward-looking and harmless. A typed-nil
+// statement (a nil *StopStatement element) is rejected with an
 // [UnsupportedNodeError] rather than panicking.
 func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
@@ -679,9 +766,9 @@ func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
 		if stmt.Run {
-			pr.write("    STOP RUN.\n")
+			pr.write("    STOP RUN")
 		} else {
-			pr.write("    STOP.\n")
+			pr.write("    STOP")
 		}
 		return next
 	}

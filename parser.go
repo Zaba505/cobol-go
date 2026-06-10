@@ -65,13 +65,45 @@ type ProgramID struct {
 }
 
 // ProcedureDivision is the PROCEDURE DIVISION. Pos is the position of the
-// PROCEDURE keyword; Statements are its sentences in source order.
+// PROCEDURE keyword. Its body is either a sequence of paragraphs (Paragraphs,
+// with Sections nil) or a sequence of sections (Sections, with Paragraphs nil) —
+// the two forms are mutually exclusive. Statements that appear directly under the
+// division header, before any paragraph-name, form an anonymous leading paragraph
+// (a [Paragraph] with a nil Name).
 type ProcedureDivision struct {
 	Pos        Pos
-	Statements []Statement
+	Paragraphs []*Paragraph
+	Sections   []*Section
 }
 
 func (*ProcedureDivision) division() {}
+
+// Section is a named section in the PROCEDURE DIVISION body. Pos is the position
+// of the section-name; Segment is the optional priority number; Paragraphs are
+// the section's paragraphs in source order.
+type Section struct {
+	Pos        Pos
+	Name       *Word
+	Segment    *NumericLiteral
+	Paragraphs []*Paragraph
+}
+
+// Paragraph is a paragraph in the PROCEDURE DIVISION body. Name is nil for the
+// anonymous leading paragraph (statements that appear before any paragraph-name);
+// otherwise Pos is the position of the paragraph-name. Sentences are the
+// paragraph's sentences in source order.
+type Paragraph struct {
+	Pos       Pos
+	Name      *Word
+	Sentences []*Sentence
+}
+
+// Sentence is one or more statements terminated by a separator period. Pos is the
+// position of its first statement.
+type Sentence struct {
+	Pos        Pos
+	Statements []Statement
+}
 
 // DisplayStatement is a DISPLAY statement. Pos is the position of the DISPLAY
 // keyword; Operands are the values to display.
@@ -606,6 +638,24 @@ func (p *parser) expectKeyword(kw ...string) (Token, error) {
 		return Token{}, UnexpectedKeywordError{Expected: kw, Actual: tok}
 	}
 	return tok, nil
+}
+
+// expectPeriod consumes the separator period that ends a sentence or header,
+// returning [UnexpectedTokenError] when the next token is not a period symbol.
+func (p *parser) expectPeriod() (Token, error) {
+	tok, err := p.expect(TokenSymbol)
+	if err != nil {
+		return Token{}, err
+	}
+	if !isPeriod(tok) {
+		return Token{}, UnexpectedTokenError{Expected: []TokenType{TokenSymbol}, Actual: tok}
+	}
+	return tok, nil
+}
+
+// isPeriod reports whether tok is the separator-period symbol.
+func isPeriod(tok Token) bool {
+	return tok.Type == TokenSymbol && string(tok.Value) == "."
 }
 
 // keywordIs reports whether tok is an identifier whose value matches one of kws
@@ -1931,16 +1981,17 @@ func parseProcedureHeader(p *parser, _ *ProcedureDivision) (parserAction[*Proced
 	if _, err := p.expectKeyword("DIVISION"); err != nil {
 		return nil, err
 	}
-	if _, err := p.expect(TokenSymbol); err != nil {
+	if _, err := p.expectPeriod(); err != nil {
 		return nil, err
 	}
 	return parseProcedureBody, nil
 }
 
-// parseProcedureBody reads one verb and dispatches to its statement parser,
-// looping until the token stream is exhausted.
-func parseProcedureBody(p *parser, _ *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
-	tok, err, ok := p.advance()
+// parseProcedureBody parses the procedure body. For this slice the body is a
+// single anonymous paragraph of sentences (named paragraphs and sections are
+// added by a later step); it runs to end of input.
+func parseProcedureBody(p *parser, div *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
+	tok, err, ok := p.peek()
 	if err != nil {
 		return nil, err
 	}
@@ -1948,50 +1999,144 @@ func parseProcedureBody(p *parser, _ *ProcedureDivision) (parserAction[*Procedur
 		return nil, nil
 	}
 
+	para := &Paragraph{Pos: tok.Pos}
+	for action := parseSentenceOpt; action != nil && err == nil; {
+		action, err = action(p, para)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	div.Paragraphs = append(div.Paragraphs, para)
+	return nil, nil
+}
+
+// parseSentenceOpt parses one sentence — a statement list terminated by a
+// separator period — and appends it to para, then returns itself to parse the
+// next sentence. It ends the paragraph at end of input.
+func parseSentenceOpt(p *parser, para *Paragraph) (parserAction[*Paragraph], error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	sent := &Sentence{Pos: tok.Pos}
+	stmts, err := parseStatementList(p, stopAtSentenceEnd)
+	if err != nil {
+		return nil, err
+	}
+	if len(stmts) == 0 {
+		// A separator period with no preceding statement is an empty sentence; a
+		// statement verb was required where tok (the period) appears.
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+	}
+	if _, err := p.expectPeriod(); err != nil {
+		return nil, err
+	}
+	sent.Statements = stmts
+	para.Sentences = append(para.Sentences, sent)
+	return parseSentenceOpt, nil
+}
+
+// stopFunc reports whether a statement list is complete before the next token.
+// It peeks, never consuming, so the terminating token (period, scope terminator,
+// next verb) remains for the caller.
+type stopFunc func(p *parser) (bool, error)
+
+// stopAtSentenceEnd stops a top-level statement list at the sentence-terminating
+// separator period or end of input.
+func stopAtSentenceEnd(p *parser) (bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return true, nil
+	}
+	return isPeriod(tok), nil
+}
+
+// parseStatementList parses statements until stop reports the list is complete,
+// returning them in source order. It drives an inner action loop so each
+// statement kind stays its own small action, per the parser's state-machine
+// style; nested statement lists (an IF branch, a PERFORM body) recurse through
+// this same helper with a different stop.
+func parseStatementList(p *parser, stop stopFunc) ([]Statement, error) {
+	var stmts []Statement
+	var err error
+	for action := parseStatementOpt(stop); action != nil && err == nil; {
+		action, err = action(p, &stmts)
+	}
+	return stmts, err
+}
+
+// parseStatementOpt parses one statement and appends it, then returns itself to
+// parse the next; it ends the list when stop fires.
+func parseStatementOpt(stop stopFunc) parserAction[*[]Statement] {
+	return func(p *parser, stmts *[]Statement) (parserAction[*[]Statement], error) {
+		done, err := stop(p)
+		if err != nil {
+			return nil, err
+		}
+		if done {
+			return nil, nil
+		}
+		stmt, err := parseStatement(p)
+		if err != nil {
+			return nil, err
+		}
+		*stmts = append(*stmts, stmt)
+		return parseStatementOpt(stop), nil
+	}
+}
+
+// parseStatement reads one statement's verb and dispatches to its parser. The
+// statement parsers leave the sentence-terminating period for the enclosing
+// sentence loop and the next verb for the enclosing statement list.
+func parseStatement(p *parser) (Statement, error) {
+	tok, err := p.expect(TokenIdentifier)
+	if err != nil {
+		return nil, err
+	}
 	switch {
 	case keywordIs(tok, "DISPLAY"):
-		return parseDisplayStatement(tok), nil
+		return parseDisplayStatement(p, tok)
 	case keywordIs(tok, "STOP"):
-		return parseStopStatement(tok), nil
+		return parseStopStatement(p, tok)
 	default:
 		return nil, unexpectedKeyword(tok, "DISPLAY", "STOP")
 	}
 }
 
 // parseDisplayStatement parses a DISPLAY statement whose verb kw has already been
-// read, collecting operands up to the separator period. Only literal operands
-// are recognized in this slice; UPON and NO ADVANCING are deferred.
-func parseDisplayStatement(kw Token) parserAction[*ProcedureDivision] {
-	return func(p *parser, div *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
-		stmt := &DisplayStatement{Pos: kw.Pos}
-		for {
-			tok, err := p.expect(TokenString, TokenSymbol)
-			if err != nil {
-				return nil, err
-			}
-			if tok.Type == TokenSymbol {
-				break
-			}
-			stmt.Operands = append(stmt.Operands, valueNode(tok))
+// read, collecting operands. Only literal operands are recognized in this slice;
+// identifier operands, UPON, and NO ADVANCING are added by a later step.
+func parseDisplayStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &DisplayStatement{Pos: kw.Pos}
+	for {
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
 		}
-		div.Statements = append(div.Statements, stmt)
-		return parseProcedureBody, nil
+		if !ok || tok.Type != TokenString {
+			break
+		}
+		p.consume()
+		stmt.Operands = append(stmt.Operands, valueNode(tok))
 	}
+	return stmt, nil
 }
 
 // parseStopStatement parses a STOP RUN statement whose verb kw has already been
-// read. The STOP <literal> form is deferred to a later story.
-func parseStopStatement(kw Token) parserAction[*ProcedureDivision] {
-	return func(p *parser, div *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
-		if _, err := p.expectKeyword("RUN"); err != nil {
-			return nil, err
-		}
-		if _, err := p.expect(TokenSymbol); err != nil {
-			return nil, err
-		}
-		div.Statements = append(div.Statements, &StopStatement{Pos: kw.Pos, Run: true})
-		return parseProcedureBody, nil
+// read. The STOP <literal> form is added by a later step.
+func parseStopStatement(p *parser, kw Token) (Statement, error) {
+	if _, err := p.expectKeyword("RUN"); err != nil {
+		return nil, err
 	}
+	return &StopStatement{Pos: kw.Pos, Run: true}, nil
 }
 
 // UnexpectedEndOfTokensError is returned when the parser needs another token
