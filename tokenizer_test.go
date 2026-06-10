@@ -499,6 +499,7 @@ func TestTokenizerErrors(t *testing.T) {
 	testCases := []struct {
 		name   string
 		src    string
+		opts   []TokenizeOption
 		assert func(t *testing.T, err error)
 	}{
 		{
@@ -548,13 +549,24 @@ func TestTokenizerErrors(t *testing.T) {
 				require.Equal(t, Pos{Line: 1, Column: 2}, target.Pos)
 			},
 		},
+		{
+			name: "separator comma is unavailable under DECIMAL-POINT IS COMMA",
+			src:  "1, 2",
+			opts: []TokenizeOption{WithDecimalComma()},
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedCharacterError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, ',', target.R)
+				require.Equal(t, Pos{Line: 1, Column: 2}, target.Pos)
+			},
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := collect(Tokenize(strings.NewReader(tc.src)))
+			err := collect(Tokenize(strings.NewReader(tc.src), tc.opts...))
 
 			require.Error(t, err)
 			tc.assert(t, err)

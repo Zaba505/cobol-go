@@ -305,10 +305,18 @@ func tokenizeOperator(start Pos, first rune) tokenizerAction {
 // by whitespace or end of input, and are then consumed like whitespace (no token
 // emitted) — so "(2, 3)" and "(2 3)" tokenize identically. A ',' or ';' followed
 // by anything else is not a separator and yields an [UnexpectedCharacterError].
-// (Under DECIMAL-POINT IS COMMA a ',' between digits is consumed by
-// [tokenizeNumber] and never reaches here.)
+//
+// Under DECIMAL-POINT IS COMMA the separator comma is unavailable — a ',' is a
+// decimal point there (a ',' between digits is consumed by [tokenizeNumber]), so
+// a ',' reaching here is never a separator and is rejected; list items must be
+// separated by a semicolon or space. The semicolon stays a separator in either
+// mode. (SPEC §"Whitespace and Delimiters".)
 func tokenizeSeparatorPunct(start Pos, r rune) tokenizerAction {
 	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		if r == ',' && t.decimalPoint == ',' {
+			yield(Token{}, UnexpectedCharacterError{Pos: start, R: r})
+			return nil
+		}
 		if b, ok := t.peekByte(); ok && !unicode.IsSpace(rune(b)) {
 			yield(Token{}, UnexpectedCharacterError{Pos: start, R: r})
 			return nil
