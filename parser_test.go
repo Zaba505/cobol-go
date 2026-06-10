@@ -512,6 +512,65 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "anonymous and named paragraphs",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    DISPLAY \"a\".\n" +
+				"MAIN.\n" +
+				"    DISPLAY \"b\".\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&DisplayStatement{
+														Pos:      Pos{Line: 4, Column: 5},
+														Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 13}, Value: `"a"`}},
+													},
+												},
+											},
+										},
+									},
+									{
+										Pos:  Pos{Line: 5, Column: 1},
+										Name: &Word{Pos: Pos{Line: 5, Column: 1}, Value: "MAIN"},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 6, Column: 5},
+												Statements: []Statement{
+													&DisplayStatement{
+														Pos:      Pos{Line: 6, Column: 5},
+														Operands: []Type{&StringLiteral{Pos: Pos{Line: 6, Column: 13}, Value: `"b"`}},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "environment division with both sections",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. ENV.\n" +
@@ -668,15 +727,17 @@ func TestParserErrors(t *testing.T) {
 			},
 		},
 		{
-			name: "misspelled verb in procedure body",
+			name: "misspelled verb in statement position",
+			// A bare "FOO." is a (valid, empty) paragraph named FOO; an unknown verb
+			// only errors where a statement is required, e.g. inside an IF branch.
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. HELLO.\n" +
 				"PROCEDURE DIVISION.\n" +
-				"    FOO.\n",
+				"    IF X = 0 FOO.\n",
 			assert: func(t *testing.T, err error) {
 				var target UnexpectedKeywordError
 				require.ErrorAs(t, err, &target)
-				require.Equal(t, Pos{Line: 4, Column: 5}, target.Actual.Pos)
+				require.Equal(t, Pos{Line: 4, Column: 14}, target.Actual.Pos)
 			},
 		},
 		{
@@ -737,6 +798,21 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedTokenError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 7}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "section after loose paragraphs",
+			// Once the body is paragraph-form, a SECTION cannot follow.
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    DISPLAY \"a\".\n" +
+				"MY-SEC SECTION.\n" +
+				"    STOP RUN.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 5, Column: 8}, target.Actual.Pos)
 			},
 		},
 		{

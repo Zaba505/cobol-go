@@ -799,10 +799,13 @@ type parser struct {
 	// next pulls the next (Token, error) pair from the tokenizer; the final
 	// bool reports whether a value was produced (false once exhausted).
 	next func() (Token, error, bool)
-	// peeked holds a token read by peek but not yet consumed, giving the parser
-	// one-token lookahead (the go/parser current-token model this package
-	// mirrors). advance drains it before pulling from next.
-	peeked *peekedToken
+	// peeked and peeked2 hold up to two tokens read by peek/peekSecond but not yet
+	// consumed, giving the parser two-token lookahead. One token suffices almost
+	// everywhere (the go/parser current-token model this package mirrors); the
+	// second is needed only to distinguish a section header (name SECTION) from a
+	// paragraph header (name .). advance drains them before pulling from next.
+	peeked  *peekedToken
+	peeked2 *peekedToken
 }
 
 // peekedToken is a single (Token, error, ok) triple buffered by peek.
@@ -812,15 +815,80 @@ type peekedToken struct {
 	ok  bool
 }
 
-// advance returns the next (Token, error, ok) triple, draining the peek buffer
+// advance returns the next (Token, error, ok) triple, draining the peek buffers
 // first so a peeked token is consumed exactly once.
 func (p *parser) advance() (Token, error, bool) {
 	if p.peeked != nil {
 		pk := p.peeked
-		p.peeked = nil
+		p.peeked = p.peeked2
+		p.peeked2 = nil
 		return pk.tok, pk.err, pk.ok
 	}
 	return p.next()
+}
+
+// peekSecond returns the token after the next without consuming either, buffering
+// both. It is the parser's only two-token lookahead, used to tell a section header
+// (name SECTION) from a paragraph header (name .).
+func (p *parser) peekSecond() (Token, error, bool) {
+	if p.peeked == nil {
+		tok, err, ok := p.next()
+		p.peeked = &peekedToken{tok: tok, err: err, ok: ok}
+	}
+	if p.peeked2 == nil {
+		tok, err, ok := p.next()
+		p.peeked2 = &peekedToken{tok: tok, err: err, ok: ok}
+	}
+	return p.peeked2.tok, p.peeked2.err, p.peeked2.ok
+}
+
+// atSectionHeader reports whether the parser is positioned at a section header: a
+// non-verb name (an identifier or an all-digit word) followed by the SECTION
+// keyword.
+func (p *parser) atSectionHeader() (bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if !ok || !isProcedureName(tok) {
+		return false, nil
+	}
+	second, err, ok2 := p.peekSecond()
+	if err != nil {
+		return false, err
+	}
+	return ok2 && keywordIs(second, "SECTION"), nil
+}
+
+// atParagraphHeader reports whether the parser is positioned at a paragraph header:
+// a non-verb name followed by a separator period.
+func (p *parser) atParagraphHeader() (bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if !ok || !isProcedureName(tok) {
+		return false, nil
+	}
+	second, err, ok2 := p.peekSecond()
+	if err != nil {
+		return false, err
+	}
+	return ok2 && isPeriod(second), nil
+}
+
+// isProcedureName reports whether tok can name a paragraph or section: an
+// identifier that is not a reserved verb, or an all-digit word (a numeric
+// paragraph/section name).
+func isProcedureName(tok Token) bool {
+	switch tok.Type {
+	case TokenNumber:
+		return true
+	case TokenIdentifier:
+		return !isStatementVerb(tok)
+	default:
+		return false
+	}
 }
 
 // consume discards the next token. It is used only after peek has already
@@ -2321,10 +2389,34 @@ func parseProcedureHeader(p *parser, _ *ProcedureDivision) (parserAction[*Proced
 	return parseProcedureBody, nil
 }
 
-// parseProcedureBody parses the procedure body. For this slice the body is a
-// single anonymous paragraph of sentences (named paragraphs and sections are
-// added by a later step); it runs to end of input.
+// parseProcedureBody parses the procedure body. The body is either paragraph-form
+// (loose paragraphs, possibly led by an anonymous one) or section-form (a sequence
+// of sections); the first header decides which, and the two forms are mutually
+// exclusive.
 func parseProcedureBody(p *parser, div *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
+	if _, _, ok := p.peek(); !ok {
+		return nil, nil
+	}
+
+	section, err := p.atSectionHeader()
+	if err != nil {
+		return nil, err
+	}
+
+	action := parseParagraphOpt
+	if section {
+		action = parseSectionOpt
+	}
+	for action != nil && err == nil {
+		action, err = action(p, div)
+	}
+	return nil, err
+}
+
+// parseParagraphOpt parses one paragraph of the paragraph-form body and appends it,
+// then returns itself; it ends the body at end of input. A SECTION header in this
+// form (sections cannot follow loose paragraphs) is an error.
+func parseParagraphOpt(p *parser, div *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
 	tok, err, ok := p.peek()
 	if err != nil {
 		return nil, err
@@ -2333,45 +2425,158 @@ func parseProcedureBody(p *parser, div *ProcedureDivision) (parserAction[*Proced
 		return nil, nil
 	}
 
-	para := &Paragraph{Pos: tok.Pos}
-	for action := parseSentenceOpt; action != nil && err == nil; {
-		action, err = action(p, para)
-	}
+	section, err := p.atSectionHeader()
 	if err != nil {
 		return nil, err
 	}
+	if section {
+		second, _, _ := p.peekSecond()
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenSymbol}, Actual: second}
+	}
 
+	header, err := p.atParagraphHeader()
+	if err != nil {
+		return nil, err
+	}
+	if !header && !isStatementVerb(tok) {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+	}
+
+	para, err := parseParagraph(p)
+	if err != nil {
+		return nil, err
+	}
 	div.Paragraphs = append(div.Paragraphs, para)
-	return nil, nil
+	return parseParagraphOpt, nil
 }
 
-// parseSentenceOpt parses one sentence — a statement list terminated by a
-// separator period — and appends it to para, then returns itself to parse the
-// next sentence. It ends the paragraph at end of input.
+// parseSectionOpt parses one section of the section-form body and appends it, then
+// returns itself; it ends the body at end of input. A non-section construct at the
+// top level of a section-form body is an error.
+func parseSectionOpt(p *parser, div *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	section, err := p.atSectionHeader()
+	if err != nil {
+		return nil, err
+	}
+	if !section {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+	}
+
+	sec, err := parseSection(p)
+	if err != nil {
+		return nil, err
+	}
+	div.Sections = append(div.Sections, sec)
+	return parseSectionOpt, nil
+}
+
+// parseSection parses a section header (name SECTION [segment-number] .) and its
+// paragraphs, which run until the next section header or end of input.
+func parseSection(p *parser) (*Section, error) {
+	name, err := p.expect(TokenIdentifier, TokenNumber)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("SECTION"); err != nil {
+		return nil, err
+	}
+	sec := &Section{Pos: name.Pos, Name: &Word{Pos: name.Pos, Value: string(name.Value)}}
+
+	if seg, terr, ok := p.peek(); terr != nil {
+		return nil, terr
+	} else if ok && seg.Type == TokenNumber {
+		p.consume()
+		sec.Segment = &NumericLiteral{Pos: seg.Pos, Value: string(seg.Value)}
+	}
+
+	if _, err := p.expectPeriod(); err != nil {
+		return nil, err
+	}
+
+	for action := parseSectionParagraphOpt; action != nil && err == nil; {
+		action, err = action(p, sec)
+	}
+	return sec, err
+}
+
+// parseSectionParagraphOpt parses one paragraph of a section and appends it, then
+// returns itself; it ends the section at the next section header or end of input.
+func parseSectionParagraphOpt(p *parser, sec *Section) (parserAction[*Section], error) {
+	if _, _, ok := p.peek(); !ok {
+		return nil, nil
+	}
+	section, err := p.atSectionHeader()
+	if err != nil {
+		return nil, err
+	}
+	if section {
+		return nil, nil
+	}
+
+	para, err := parseParagraph(p)
+	if err != nil {
+		return nil, err
+	}
+	sec.Paragraphs = append(sec.Paragraphs, para)
+	return parseSectionParagraphOpt, nil
+}
+
+// parseParagraph parses an optional paragraph-name header (name .) followed by the
+// paragraph's sentences. With no header it is the anonymous paragraph (its
+// statements begin immediately).
+func parseParagraph(p *parser) (*Paragraph, error) {
+	para := &Paragraph{}
+
+	header, err := p.atParagraphHeader()
+	if err != nil {
+		return nil, err
+	}
+	if header {
+		name, _, _ := p.advance()
+		if _, err := p.expectPeriod(); err != nil {
+			return nil, err
+		}
+		para.Pos = name.Pos
+		para.Name = &Word{Pos: name.Pos, Value: string(name.Value)}
+	} else {
+		tok, _, _ := p.peek()
+		para.Pos = tok.Pos
+	}
+
+	for action := parseSentenceOpt; action != nil && err == nil; {
+		action, err = action(p, para)
+	}
+	return para, err
+}
+
+// parseSentenceOpt parses one sentence — a statement list terminated by a separator
+// period — and appends it to para, then returns itself. The paragraph ends when the
+// next token is not a statement verb (a paragraph/section header or end of input).
 func parseSentenceOpt(p *parser, para *Paragraph) (parserAction[*Paragraph], error) {
 	tok, err, ok := p.peek()
 	if err != nil {
 		return nil, err
 	}
-	if !ok {
+	if !ok || !isStatementVerb(tok) {
 		return nil, nil
 	}
 
-	sent := &Sentence{Pos: tok.Pos}
 	stmts, err := parseStatementList(p, stopAtSentenceEnd)
 	if err != nil {
 		return nil, err
 	}
-	if len(stmts) == 0 {
-		// A separator period with no preceding statement is an empty sentence; a
-		// statement verb was required where tok (the period) appears.
-		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
-	}
 	if _, err := p.expectPeriod(); err != nil {
 		return nil, err
 	}
-	sent.Statements = stmts
-	para.Sentences = append(para.Sentences, sent)
+	para.Sentences = append(para.Sentences, &Sentence{Pos: tok.Pos, Statements: stmts})
 	return parseSentenceOpt, nil
 }
 

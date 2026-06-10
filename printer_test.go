@@ -380,6 +380,48 @@ func TestPrinter(t *testing.T) {
 				"    END-PERFORM.\n",
 		},
 		{
+			name: "procedure division sections",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "P"}},
+							},
+							&ProcedureDivision{
+								Sections: []*Section{
+									{
+										Name: &Word{Value: "S1"},
+										Paragraphs: []*Paragraph{
+											{Sentences: []*Sentence{{Statements: []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"x"`}}}}}}},
+											{Name: &Word{Value: "P1"}, Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}},
+										},
+									},
+									{
+										Name:    &Word{Value: "S2"},
+										Segment: &NumericLiteral{Value: "10"},
+										Paragraphs: []*Paragraph{
+											{Name: &Word{Value: "P2"}, Sentences: []*Sentence{{Statements: []Statement{&ContinueStatement{}}}}},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"S1 SECTION.\n" +
+				"    DISPLAY \"x\".\n" +
+				"P1.\n" +
+				"    STOP RUN.\n" +
+				"S2 SECTION 10.\n" +
+				"P2.\n" +
+				"    CONTINUE.\n",
+		},
+		{
 			name: "environment division",
 			input: &File{
 				Programs: []*Program{
@@ -589,6 +631,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_arithmetic_cob", fixture: "procedure_arithmetic.cob"},
 		{name: "procedure_conditional_cob", fixture: "procedure_conditional.cob"},
 		{name: "procedure_perform_cob", fixture: "procedure_perform.cob"},
+		{name: "procedure_sections_cob", fixture: "procedure_sections.cob"},
 	}
 
 	for _, tc := range testCases {
@@ -1217,6 +1260,26 @@ func TestPrinterErrors(t *testing.T) {
 				&ProcedureDivision{Paragraphs: []*Paragraph{
 					{Sentences: []*Sentence{{Statements: []Statement{&PerformStatement{}}}}},
 				}},
+			}}}},
+		},
+		{
+			name: "nil section element",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Sections: []*Section{nil}},
+			}}}},
+		},
+		{
+			name: "section with no name",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Sections: []*Section{{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}},
+				}}}},
+			}}}},
+		},
+		{
+			name: "nil paragraph element",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{nil}},
 			}}}},
 		},
 		{
