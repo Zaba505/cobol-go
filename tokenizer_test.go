@@ -194,6 +194,197 @@ func TestTokenizer(t *testing.T) {
 			},
 		},
 		{
+			name: "left parenthesis separator",
+			src:  "(",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("(")},
+			},
+		},
+		{
+			name: "right parenthesis separator",
+			src:  ")",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte(")")},
+			},
+		},
+		{
+			name: "colon separator",
+			src:  ":",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte(":")},
+			},
+		},
+		{
+			name: "parenthesized word",
+			src:  "(A)",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("(")},
+				{Pos: Pos{Line: 1, Column: 2}, Type: TokenIdentifier, Value: []byte("A")},
+				{Pos: Pos{Line: 1, Column: 3}, Type: TokenSymbol, Value: []byte(")")},
+			},
+		},
+		{
+			name: "plus operator",
+			src:  "+",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("+")},
+			},
+		},
+		{
+			name: "minus operator",
+			src:  "-",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("-")},
+			},
+		},
+		{
+			name: "multiply operator",
+			src:  "*",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("*")},
+			},
+		},
+		{
+			name: "divide operator",
+			src:  "/",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("/")},
+			},
+		},
+		{
+			name: "exponentiation operator",
+			src:  "**",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("**")},
+			},
+		},
+		{
+			name: "equality operator",
+			src:  "=",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("=")},
+			},
+		},
+		{
+			name: "less-than operator",
+			src:  "<",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("<")},
+			},
+		},
+		{
+			name: "greater-than operator",
+			src:  ">",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte(">")},
+			},
+		},
+		{
+			name: "less-than-or-equal operator",
+			src:  "<=",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("<=")},
+			},
+		},
+		{
+			name: "greater-than-or-equal operator",
+			src:  ">=",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte(">=")},
+			},
+		},
+		{
+			name: "not-equal operator",
+			src:  "<>",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("<>")},
+			},
+		},
+		{
+			name: "spaced less-than and equals are two operators",
+			src:  "< =",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("<")},
+				{Pos: Pos{Line: 1, Column: 3}, Type: TokenSymbol, Value: []byte("=")},
+			},
+		},
+		{
+			name: "spaced asterisks are two operators",
+			src:  "* *",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("*")},
+				{Pos: Pos{Line: 1, Column: 3}, Type: TokenSymbol, Value: []byte("*")},
+			},
+		},
+		{
+			name: "minus between operands is an operator",
+			src:  "A - 1",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("A")},
+				{Pos: Pos{Line: 1, Column: 3}, Type: TokenSymbol, Value: []byte("-")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenNumber, Value: []byte("1")},
+			},
+		},
+		{
+			name: "plus between operands is an operator",
+			src:  "A + B",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("A")},
+				{Pos: Pos{Line: 1, Column: 3}, Type: TokenSymbol, Value: []byte("+")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenIdentifier, Value: []byte("B")},
+			},
+		},
+		{
+			name: "separator comma is consumed like whitespace",
+			src:  "1, 2",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("1")},
+				{Pos: Pos{Line: 1, Column: 4}, Type: TokenNumber, Value: []byte("2")},
+			},
+		},
+		{
+			name: "separator semicolon is consumed like whitespace",
+			src:  "A; B",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("A")},
+				{Pos: Pos{Line: 1, Column: 4}, Type: TokenIdentifier, Value: []byte("B")},
+			},
+		},
+		{
+			name: "subscripts with a separator comma",
+			src:  "(2, 3)",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("(")},
+				{Pos: Pos{Line: 1, Column: 2}, Type: TokenNumber, Value: []byte("2")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenNumber, Value: []byte("3")},
+				{Pos: Pos{Line: 1, Column: 6}, Type: TokenSymbol, Value: []byte(")")},
+			},
+		},
+		{
+			name: "subscripts separated by a space tokenize the same",
+			src:  "(2 3)",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte("(")},
+				{Pos: Pos{Line: 1, Column: 2}, Type: TokenNumber, Value: []byte("2")},
+				{Pos: Pos{Line: 1, Column: 4}, Type: TokenNumber, Value: []byte("3")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenSymbol, Value: []byte(")")},
+			},
+		},
+		{
+			name: "data description entry with level number and picture digits",
+			src:  "01 WS-COUNT PIC 9(3).",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("01")},
+				{Pos: Pos{Line: 1, Column: 4}, Type: TokenIdentifier, Value: []byte("WS-COUNT")},
+				{Pos: Pos{Line: 1, Column: 13}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 17}, Type: TokenNumber, Value: []byte("9")},
+				{Pos: Pos{Line: 1, Column: 18}, Type: TokenSymbol, Value: []byte("(")},
+				{Pos: Pos{Line: 1, Column: 19}, Type: TokenNumber, Value: []byte("3")},
+				{Pos: Pos{Line: 1, Column: 20}, Type: TokenSymbol, Value: []byte(")")},
+				{Pos: Pos{Line: 1, Column: 21}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
 			name: "minimal free-format program",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. HELLO.\n" +
@@ -266,6 +457,33 @@ func TestTokenizerFigurativeConstants(t *testing.T) {
 	}
 }
 
+// Level-numbers are not a distinct lexical class: a level-number is lexically a
+// NumericLiteral (1–2 digits) and the parser recognizes it by position (the
+// start of a data description entry). This pins that every level-number spelling
+// — 01–49 for the record hierarchy, plus 66 (RENAMES), 77 (independent), and 88
+// (condition-name) — tokenizes as a single TokenNumber.
+func TestTokenizerLevelNumbers(t *testing.T) {
+	t.Parallel()
+
+	levels := []string{"01", "02", "09", "10", "49", "66", "77", "88"}
+
+	for _, level := range levels {
+		t.Run(level, func(t *testing.T) {
+			t.Parallel()
+
+			var tokens []Token
+			for tok, err := range Tokenize(strings.NewReader(level)) {
+				require.NoError(t, err)
+				tokens = append(tokens, tok)
+			}
+
+			require.Equal(t, []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte(level)},
+			}, tokens)
+		})
+	}
+}
+
 func TestTokenizerErrors(t *testing.T) {
 	t.Parallel()
 
@@ -308,6 +526,26 @@ func TestTokenizerErrors(t *testing.T) {
 				var target UnexpectedCharacterError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, '@', target.R)
+			},
+		},
+		{
+			name: "separator comma not followed by a space",
+			src:  "1,2",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedCharacterError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, ',', target.R)
+				require.Equal(t, Pos{Line: 1, Column: 2}, target.Pos)
+			},
+		},
+		{
+			name: "separator semicolon not followed by a space",
+			src:  "1;2",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedCharacterError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, ';', target.R)
+				require.Equal(t, Pos{Line: 1, Column: 2}, target.Pos)
 			},
 		},
 	}

@@ -223,9 +223,12 @@ func skipWhitespace(next tokenizerAction) tokenizerAction {
 // whitespace-only) input produces no tokens; any rune that begins no known
 // token class yields an [UnexpectedCharacterError].
 //
-// This free-format slice recognizes COBOL words, the separator period,
-// alphanumeric literals, and numeric literals. Comments and the remaining
-// symbols/operators are tokenized by later stories.
+// This free-format slice recognizes COBOL words, alphanumeric literals, numeric
+// literals, the separator period, the readability separators comma and
+// semicolon, the parenthesis and colon separators, and the special-character
+// operators (+ - * / ** = < > <= >= <>). The comment introducer *>, the
+// compiler-directive introducer >>, and the concatenation operator & are
+// tokenized by later stories; until then *> lexes as * then >, and >> as two >.
 func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
 	return skipWhitespace(
 		func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
@@ -236,19 +239,22 @@ func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction 
 			}
 
 			switch {
-			case r == '.':
-				return yieldTokenThen(
-					Token{Pos: pos, Type: TokenSymbol, Value: []byte{'.'}},
-					tokenizeCOBOL,
-				)
+			case r == '.' || r == '(' || r == ')' || r == ':' || r == '=' || r == '/':
+				return yieldSymbol(pos, utf8.AppendRune(nil, r))
+			case r == ',' || r == ';':
+				return tokenizeSeparatorPunct(pos, r)
 			case r == '"' || r == '\'':
 				return tokenizeString(pos, r)
 			case isDigit(r):
 				return tokenizeNumber(pos, utf8.AppendRune(nil, r))
 			case (r == '+' || r == '-') && t.peekIsDigit():
 				// A sign begins a numeric literal only when contiguous with a
-				// digit; otherwise it is an operator, tokenized by a later story.
+				// digit; otherwise it is an arithmetic operator (handled below).
 				return tokenizeNumber(pos, utf8.AppendRune(nil, r))
+			case r == '+' || r == '-':
+				return yieldSymbol(pos, utf8.AppendRune(nil, r))
+			case r == '*' || r == '<' || r == '>':
+				return tokenizeOperator(pos, r)
 			case isWordStart(r):
 				return tokenizeWord(pos, r)
 			default:
@@ -257,6 +263,60 @@ func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction 
 			}
 		},
 	)
+}
+
+// yieldSymbol emits a [TokenSymbol] carrying value at pos, then continues at the
+// dispatch entry point.
+func yieldSymbol(pos Pos, value []byte) tokenizerAction {
+	return yieldTokenThen(Token{Pos: pos, Type: TokenSymbol, Value: value}, tokenizeCOBOL)
+}
+
+// tokenizeOperator emits a special-character operator, greedily matching the
+// two-character forms (** <= >= <>) before their single-character prefixes
+// (SPEC §"Symbols and Operators"). first has already been consumed at start.
+// The compiler-directive introducer >> is deferred to a later story, so a bare
+// > followed by > emits two separate > operators.
+func tokenizeOperator(start Pos, first rune) tokenizerAction {
+	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		value := utf8.AppendRune(nil, first)
+		switch first {
+		case '*': // ** exponentiation
+			if b, ok := t.peekByte(); ok && b == '*' {
+				r, _ := t.next()
+				value = utf8.AppendRune(value, r)
+			}
+		case '<': // <= or <>
+			if b, ok := t.peekByte(); ok && (b == '=' || b == '>') {
+				r, _ := t.next()
+				value = utf8.AppendRune(value, r)
+			}
+		case '>': // >=
+			if b, ok := t.peekByte(); ok && b == '=' {
+				r, _ := t.next()
+				value = utf8.AppendRune(value, r)
+			}
+		}
+		return yieldSymbol(start, value)
+	}
+}
+
+// tokenizeSeparatorPunct handles the readability separators ',' and ';', already
+// consumed at start. Per SPEC they are separators only when immediately followed
+// by whitespace or end of input, and are then consumed like whitespace (no token
+// emitted) — so "(2, 3)" and "(2 3)" tokenize identically. A ',' or ';' followed
+// by anything else is not a separator and yields an [UnexpectedCharacterError].
+// (Under DECIMAL-POINT IS COMMA a ',' between digits is consumed by
+// [tokenizeNumber] and never reaches here.)
+func tokenizeSeparatorPunct(start Pos, r rune) tokenizerAction {
+	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		if b, ok := t.peekByte(); ok && !unicode.IsSpace(rune(b)) {
+			yield(Token{}, UnexpectedCharacterError{Pos: start, R: r})
+			return nil
+		}
+		// A valid separator carries no meaning beyond word separation: emit
+		// nothing and let the next dispatch skip the following whitespace.
+		return tokenizeCOBOL
+	}
 }
 
 // tokenizeWord accumulates a maximal run of COBOL word runes, beginning with the
