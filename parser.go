@@ -10,6 +10,7 @@ import (
 	"io"
 	"iter"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -108,6 +109,17 @@ type StringLiteral struct {
 }
 
 func (*StringLiteral) cobol() {}
+
+// NumericLiteral is a numeric literal used as a value, e.g. a VALUE or OCCURS
+// operand. Pos is the position of the literal; Value is its raw lexeme (sign,
+// digits, and decimal point preserved). Decoding the value is deferred to a
+// later story, mirroring [StringLiteral].
+type NumericLiteral struct {
+	Pos   Pos
+	Value string
+}
+
+func (*NumericLiteral) cobol() {}
 
 // EnvironmentDivision is the ENVIRONMENT DIVISION. Pos is the position of the
 // ENVIRONMENT keyword. Both sections are optional; a nil field means the section
@@ -253,6 +265,203 @@ type FileStatusClause struct {
 }
 
 func (*FileStatusClause) selectClause() {}
+
+// DataDivision is the DATA DIVISION. Pos is the position of the DATA keyword.
+// Every section is optional; a nil field means the section was absent in the
+// source. FILE differs structurally from the others (FD/SD entries), so it has
+// its own type; WORKING-STORAGE, LOCAL-STORAGE, and LINKAGE share the identical
+// [DataSection] body, the owning field identifying which section it is.
+type DataDivision struct {
+	Pos            Pos
+	File           *FileSection
+	WorkingStorage *DataSection
+	LocalStorage   *DataSection
+	Linkage        *DataSection
+}
+
+func (*DataDivision) division() {}
+
+// DataSection is the body of a WORKING-STORAGE, LOCAL-STORAGE, or LINKAGE
+// SECTION: a flat list of data description entries in source order. Pos is the
+// position of the section header keyword. The record hierarchy is implied by the
+// entries' level numbers (SPEC: entries "keyed by level number") rather than
+// nested in the AST.
+type DataSection struct {
+	Pos     Pos
+	Entries []*DataDescriptionEntry
+}
+
+// FileSection is the FILE SECTION of the DATA DIVISION. Pos is the position of
+// the FILE keyword; Entries are its file-description entries in source order.
+type FileSection struct {
+	Pos     Pos
+	Entries []*FileDescriptionEntry
+}
+
+// FileDescriptionEntry is a single FD/SD file-description entry. Pos is the
+// position of the FD/SD keyword; Kind is "FD" or "SD"; Name is the file-name;
+// Records are the subordinate record data-description entries. The file-clauses
+// (BLOCK CONTAINS, RECORD CONTAINS, LABEL RECORDS, …) are deferred to a later
+// story (SPEC "« file-clause »").
+type FileDescriptionEntry struct {
+	Pos     Pos
+	Kind    string
+	Name    *Word
+	Records []*DataDescriptionEntry
+}
+
+// DataDescriptionEntry is one level-numbered data description entry. Pos is the
+// position of the level-number; Level is the integer level (1–49, 66, 77, or
+// 88); Name is the data-name or condition-name (nil when FILLER or omitted);
+// Filler reports the FILLER keyword; Clauses are its clauses in source order. A
+// group item has subordinate entries (higher level numbers following) and no
+// PICTURE; an elementary item has a PICTURE — both share this one node type.
+type DataDescriptionEntry struct {
+	Pos     Pos
+	Level   int
+	Name    *Word
+	Filler  bool
+	Clauses []DataClause
+}
+
+// DataClause is implemented by the concrete data-description clause AST nodes.
+type DataClause interface {
+	dataClause()
+}
+
+// RedefinesClause is the REDEFINES clause. Pos is the position of the REDEFINES
+// keyword; Name is the data-name being redefined.
+type RedefinesClause struct {
+	Pos  Pos
+	Name *Word
+}
+
+func (*RedefinesClause) dataClause() {}
+
+// PictureClause is the PICTURE/PIC clause. Pos is the position of the
+// PICTURE/PIC keyword; Picture is the raw PICTURE character-string lexeme (case
+// preserved; category validation is deferred — SPEC §Semantics).
+type PictureClause struct {
+	Pos     Pos
+	Picture string
+}
+
+func (*PictureClause) dataClause() {}
+
+// UsageClause is the USAGE clause (with or without the USAGE keyword). Pos is the
+// position of the clause; Usage is the canonical upper-case usage-type
+// ("DISPLAY", "BINARY", "PACKED-DECIMAL", "COMP", "COMP-1"…"COMP-5", "INDEX",
+// "POINTER").
+type UsageClause struct {
+	Pos   Pos
+	Usage string
+}
+
+func (*UsageClause) dataClause() {}
+
+// ValueClause is the VALUE/VALUES clause. Pos is the position of the VALUE
+// keyword; Values holds one [ValueSpec] for an ordinary item and one or more
+// (possibly THROUGH ranges) for a level-88 condition-name.
+type ValueClause struct {
+	Pos    Pos
+	Values []ValueSpec
+}
+
+func (*ValueClause) dataClause() {}
+
+// ValueSpec is one value or value-range in a VALUE clause. From is the literal
+// (or figurative constant); Through is the upper bound of a THROUGH/THRU range,
+// nil for a single value.
+type ValueSpec struct {
+	From    Type
+	Through Type
+}
+
+// OccursClause is the OCCURS clause. Pos is the position of the OCCURS keyword;
+// Min is the occurrence count (the lower bound when Max is set); Max is the upper
+// bound of a TO range, nil for a fixed count; DependingOn is the DEPENDING ON
+// data-name, nil when absent; Keys are the ASCENDING/DESCENDING KEY phrases;
+// IndexedBy is the INDEXED BY index-name, nil when absent.
+type OccursClause struct {
+	Pos         Pos
+	Min         *NumericLiteral
+	Max         *NumericLiteral
+	DependingOn *Word
+	Keys        []OccursKey
+	IndexedBy   *Word
+}
+
+func (*OccursClause) dataClause() {}
+
+// OccursKey is one ASCENDING/DESCENDING KEY phrase of an OCCURS clause.
+// Ascending reports ASCENDING (vs DESCENDING); Name is the key data-name.
+type OccursKey struct {
+	Pos       Pos
+	Ascending bool
+	Name      *Word
+}
+
+// SignClause is the SIGN clause. Pos is the position of the SIGN keyword;
+// Position is "LEADING" or "TRAILING"; Separate reports SEPARATE [CHARACTER].
+type SignClause struct {
+	Pos      Pos
+	Position string
+	Separate bool
+}
+
+func (*SignClause) dataClause() {}
+
+// JustifiedClause is the JUSTIFIED/JUST [RIGHT] clause. Pos is the position of
+// the JUSTIFIED keyword. RIGHT is the only justification COBOL allows, so the
+// clause carries no further data.
+type JustifiedClause struct {
+	Pos Pos
+}
+
+func (*JustifiedClause) dataClause() {}
+
+// SynchronizedClause is the SYNCHRONIZED/SYNC [LEFT|RIGHT] clause. Pos is the
+// position of the SYNCHRONIZED keyword; Direction is "", "LEFT", or "RIGHT".
+type SynchronizedClause struct {
+	Pos       Pos
+	Direction string
+}
+
+func (*SynchronizedClause) dataClause() {}
+
+// BlankWhenZeroClause is the BLANK [WHEN] ZERO clause. Pos is the position of the
+// BLANK keyword.
+type BlankWhenZeroClause struct {
+	Pos Pos
+}
+
+func (*BlankWhenZeroClause) dataClause() {}
+
+// GlobalClause is the GLOBAL clause. Pos is the position of the GLOBAL keyword.
+type GlobalClause struct {
+	Pos Pos
+}
+
+func (*GlobalClause) dataClause() {}
+
+// ExternalClause is the EXTERNAL clause. Pos is the position of the EXTERNAL
+// keyword.
+type ExternalClause struct {
+	Pos Pos
+}
+
+func (*ExternalClause) dataClause() {}
+
+// RenamesClause is the RENAMES clause of a level-66 entry. Pos is the position of
+// the RENAMES keyword; From is the first renamed data-name; Through is the
+// THROUGH/THRU upper bound, nil for a single name.
+type RenamesClause struct {
+	Pos     Pos
+	From    *Word
+	Through *Word
+}
+
+func (*RenamesClause) dataClause() {}
 
 // Parse the COBOL source from the given reader into a [File].
 //
@@ -425,13 +634,19 @@ func unexpectedKeyword(tok Token, expected ...string) error {
 	return UnexpectedKeywordError{Expected: expected, Actual: tok}
 }
 
-// valueNode wraps an identifier or alphanumeric-literal token as the
-// corresponding value AST node.
+// valueNode wraps an identifier, alphanumeric-literal, or numeric-literal token
+// as the corresponding value AST node. An identifier becomes a [Word] (a
+// user-defined name or a figurative constant such as ZERO/SPACES, whose identity
+// is its spelling).
 func valueNode(tok Token) Type {
-	if tok.Type == TokenString {
+	switch tok.Type {
+	case TokenString:
 		return &StringLiteral{Pos: tok.Pos, Value: string(tok.Value)}
+	case TokenNumber:
+		return &NumericLiteral{Pos: tok.Pos, Value: string(tok.Value)}
+	default:
+		return &Word{Pos: tok.Pos, Value: string(tok.Value)}
 	}
-	return &Word{Pos: tok.Pos, Value: string(tok.Value)}
 }
 
 // parserAction is one step of the parser state machine, generic over the AST
@@ -465,21 +680,22 @@ func parseFile(p *parser, f *File) (parserAction[*File], error) {
 }
 
 // dispatchDivision returns the division parser for the already-read division
-// header keyword kw. IDENTIFICATION/ID, ENVIRONMENT, and PROCEDURE are dispatched
-// to their parsers; any other keyword — including the not-yet-implemented DATA
-// division (a later story) — falls through to the default and is reported as an
-// unexpected division header.
+// header keyword kw. IDENTIFICATION/ID, ENVIRONMENT, DATA, and PROCEDURE are
+// dispatched to their parsers; any other keyword falls through to the default and
+// is reported as an unexpected division header.
 func dispatchDivision(kw Token) parserAction[*Program] {
 	switch {
 	case keywordIs(kw, "IDENTIFICATION", "ID"):
 		return parseIdentificationDivision(kw)
 	case keywordIs(kw, "ENVIRONMENT"):
 		return parseEnvironmentDivision(kw)
+	case keywordIs(kw, "DATA"):
+		return parseDataDivision(kw)
 	case keywordIs(kw, "PROCEDURE"):
 		return parseProcedureDivision(kw)
 	default:
 		return func(_ *parser, _ *Program) (parserAction[*Program], error) {
-			return nil, unexpectedKeyword(kw, "IDENTIFICATION", "ID", "ENVIRONMENT", "PROCEDURE")
+			return nil, unexpectedKeyword(kw, "IDENTIFICATION", "ID", "ENVIRONMENT", "DATA", "PROCEDURE")
 		}
 	}
 }
@@ -1039,6 +1255,656 @@ func parseFileStatusClause(p *parser, entry *FileControlEntry) (parserAction[*Fi
 	return parseSelectClause, nil
 }
 
+// parseDataDivision parses the DATA DIVISION whose header keyword kw has already
+// been read. Every section is optional; the inner action loop ends without
+// consuming the token that begins the next division, which the post-loop advance
+// then reads to dispatch (or ends the program at end of input). It mirrors
+// parseEnvironmentDivision.
+func parseDataDivision(kw Token) parserAction[*Program] {
+	return func(p *parser, prog *Program) (parserAction[*Program], error) {
+		div := &DataDivision{Pos: kw.Pos}
+
+		var err error
+		for action := parseDataHeader; action != nil && err == nil; {
+			action, err = action(p, div)
+		}
+		if err != nil {
+			return nil, err
+		}
+		prog.Divisions = append(prog.Divisions, div)
+
+		tok, err, ok := p.advance()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, nil
+		}
+		return dispatchDivision(tok), nil
+	}
+}
+
+// parseDataHeader consumes "DIVISION" "." after the DATA keyword.
+func parseDataHeader(p *parser, _ *DataDivision) (parserAction[*DataDivision], error) {
+	if _, err := p.expectKeyword("DIVISION"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(TokenSymbol); err != nil {
+		return nil, err
+	}
+	return parseFileSectionOpt, nil
+}
+
+// parseFileSectionOpt parses the optional FILE SECTION. When the next token is
+// not the FILE keyword the section is absent and the token is left for
+// parseWorkingStorageOpt.
+func parseFileSectionOpt(p *parser, div *DataDivision) (parserAction[*DataDivision], error) {
+	is, err := p.peekKeyword("FILE")
+	if err != nil {
+		return nil, err
+	}
+	if !is {
+		return parseWorkingStorageOpt, nil
+	}
+	hdr, _, _ := p.advance() // FILE
+	if _, err := p.expectKeyword("SECTION"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(TokenSymbol); err != nil {
+		return nil, err
+	}
+
+	sec := &FileSection{Pos: hdr.Pos}
+	for action := parseFileDescriptionEntryOpt; action != nil && err == nil; {
+		action, err = action(p, sec)
+	}
+	if err != nil {
+		return nil, err
+	}
+	div.File = sec
+	return parseWorkingStorageOpt, nil
+}
+
+// parseFileDescriptionEntryOpt parses one FD/SD file-description entry and loops;
+// the entry list ends when the next token is not the FD/SD keyword (a following
+// section/division header or end of input). The file-clauses are deferred (SPEC
+// "« file-clause »"): a non-period token after the file-name surfaces as an
+// UnexpectedTokenError rather than being silently consumed.
+func parseFileDescriptionEntryOpt(p *parser, sec *FileSection) (parserAction[*FileSection], error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok || !keywordIs(tok, "FD", "SD") {
+		return nil, nil
+	}
+	p.consume() // FD/SD
+	entry := &FileDescriptionEntry{Pos: tok.Pos, Kind: strings.ToUpper(string(tok.Value))}
+
+	name, err := p.expect(TokenIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	entry.Name = &Word{Pos: name.Pos, Value: string(name.Value)}
+
+	if _, err := p.expect(TokenSymbol); err != nil {
+		return nil, err
+	}
+
+	records, err := parseDataEntries(p)
+	if err != nil {
+		return nil, err
+	}
+	entry.Records = records
+
+	sec.Entries = append(sec.Entries, entry)
+	return parseFileDescriptionEntryOpt, nil
+}
+
+// parseWorkingStorageOpt parses the optional WORKING-STORAGE SECTION.
+func parseWorkingStorageOpt(p *parser, div *DataDivision) (parserAction[*DataDivision], error) {
+	return parseDataSectionOpt(p, "WORKING-STORAGE", func(sec *DataSection) { div.WorkingStorage = sec }, parseLocalStorageOpt)
+}
+
+// parseLocalStorageOpt parses the optional LOCAL-STORAGE SECTION.
+func parseLocalStorageOpt(p *parser, div *DataDivision) (parserAction[*DataDivision], error) {
+	return parseDataSectionOpt(p, "LOCAL-STORAGE", func(sec *DataSection) { div.LocalStorage = sec }, parseLinkageOpt)
+}
+
+// parseLinkageOpt parses the optional LINKAGE SECTION. It is the last section, so
+// it ends the inner loop (returning nil); the post-loop advance in
+// parseDataDivision then reads the next division header or ends the program.
+func parseLinkageOpt(p *parser, div *DataDivision) (parserAction[*DataDivision], error) {
+	return parseDataSectionOpt(p, "LINKAGE", func(sec *DataSection) { div.Linkage = sec }, nil)
+}
+
+// parseDataSectionOpt parses an optional WORKING-STORAGE/LOCAL-STORAGE/LINKAGE
+// section: "<header>" "SECTION" "." { data-description-entry }. When the next
+// token is not the header keyword the section is absent and the token is left for
+// the next section. assign stores the parsed section on the division; next is the
+// action for the following section (nil after LINKAGE).
+func parseDataSectionOpt(p *parser, header string, assign func(*DataSection), next parserAction[*DataDivision]) (parserAction[*DataDivision], error) {
+	is, err := p.peekKeyword(header)
+	if err != nil {
+		return nil, err
+	}
+	if !is {
+		return next, nil
+	}
+	hdr, _, _ := p.advance() // header keyword
+	if _, err := p.expectKeyword("SECTION"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(TokenSymbol); err != nil {
+		return nil, err
+	}
+
+	entries, err := parseDataEntries(p)
+	if err != nil {
+		return nil, err
+	}
+	assign(&DataSection{Pos: hdr.Pos, Entries: entries})
+	return next, nil
+}
+
+// parseDataEntries runs the data-description-entry loop, returning the entries in
+// source order. It is shared by the three data sections and by FD record
+// descriptions. The loop ends at the first token that does not begin an entry (a
+// non-level-number: a following section/division header, or end of input), which
+// is left unconsumed for the caller.
+func parseDataEntries(p *parser) ([]*DataDescriptionEntry, error) {
+	var entries []*DataDescriptionEntry
+	var err error
+	for action := parseDataEntryOpt; action != nil && err == nil; {
+		action, err = action(p, &entries)
+	}
+	return entries, err
+}
+
+// parseDataEntryOpt parses one data-description entry and loops. An entry begins
+// with a level-number ([TokenNumber]); any other token (or end of input) ends the
+// list and is left for the caller. The level-number is validated to be 1–49, 66,
+// 77, or 88.
+func parseDataEntryOpt(p *parser, entries *[]*DataDescriptionEntry) (parserAction[*[]*DataDescriptionEntry], error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok || tok.Type != TokenNumber {
+		return nil, nil
+	}
+	p.consume() // level-number
+
+	level, err := strconv.Atoi(string(tok.Value))
+	if err != nil || !validLevel(level) {
+		return nil, InvalidLevelNumberError{Pos: tok.Pos, Value: string(tok.Value)}
+	}
+	entry := &DataDescriptionEntry{Pos: tok.Pos, Level: level}
+
+	var aerr error
+	for action := parseEntryName; action != nil && aerr == nil; {
+		action, aerr = action(p, entry)
+	}
+	if aerr != nil {
+		return nil, aerr
+	}
+
+	*entries = append(*entries, entry)
+	return parseDataEntryOpt, nil
+}
+
+// validLevel reports whether level is a valid data-description level-number:
+// 01–49 (record hierarchy), 66 (RENAMES), 77 (standalone elementary), or 88
+// (condition-name).
+func validLevel(level int) bool {
+	return (level >= 1 && level <= 49) || level == 66 || level == 77 || level == 88
+}
+
+// parseEntryName reads the entry's optional name (or FILLER) and dispatches to
+// the clause parser for the entry's level. Level 88 (condition-name) and level 66
+// (RENAMES) require a name and have a fixed clause; other levels take an optional
+// name/FILLER followed by the general data-clause loop.
+func parseEntryName(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	switch entry.Level {
+	case 88:
+		name, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		entry.Name = &Word{Pos: name.Pos, Value: string(name.Value)}
+		return parseConditionValueClause, nil
+	case 66:
+		name, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		entry.Name = &Word{Pos: name.Pos, Value: string(name.Value)}
+		return parseRenamesClause, nil
+	default:
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenIdentifier, TokenSymbol}}
+		}
+		switch {
+		case keywordIs(tok, "FILLER"):
+			p.consume()
+			entry.Filler = true
+		case tok.Type == TokenIdentifier && !isDataClauseKeyword(tok):
+			p.consume()
+			entry.Name = &Word{Pos: tok.Pos, Value: string(tok.Value)}
+		}
+		return parseDataClause, nil
+	}
+}
+
+// isDataClauseKeyword reports whether tok is a keyword that introduces a
+// data-clause (or is a bare usage-type). It distinguishes an entry-name from the
+// start of the clause list when the name is omitted.
+func isDataClauseKeyword(tok Token) bool {
+	return keywordIs(tok,
+		"REDEFINES", "PICTURE", "PIC", "USAGE", "VALUE", "VALUES", "OCCURS",
+		"SIGN", "JUSTIFIED", "JUST", "SYNCHRONIZED", "SYNC", "BLANK",
+		"GLOBAL", "EXTERNAL", "RENAMES",
+	) || isUsageType(tok)
+}
+
+// isUsageType reports whether tok is a bare usage-type keyword (a USAGE clause
+// written without the USAGE keyword).
+func isUsageType(tok Token) bool {
+	return keywordIs(tok,
+		"DISPLAY", "BINARY", "PACKED-DECIMAL",
+		"COMP", "COMP-1", "COMP-2", "COMP-3", "COMP-4", "COMP-5",
+		"INDEX", "POINTER",
+	)
+}
+
+// parseDataClause dispatches one data-clause and loops; the clause list ends at
+// the entry-terminating separator period (consumed here). It mirrors
+// parseSelectClause.
+func parseDataClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenSymbol}}
+	}
+	switch {
+	case keywordIs(tok, "REDEFINES"):
+		return parseRedefinesClause, nil
+	case keywordIs(tok, "PICTURE", "PIC"):
+		return parsePictureClause, nil
+	case keywordIs(tok, "USAGE") || isUsageType(tok):
+		return parseUsageClause, nil
+	case keywordIs(tok, "VALUE", "VALUES"):
+		return parseValueClause, nil
+	case keywordIs(tok, "OCCURS"):
+		return parseOccursClause, nil
+	case keywordIs(tok, "SIGN"):
+		return parseSignClause, nil
+	case keywordIs(tok, "JUSTIFIED", "JUST"):
+		return parseJustifiedClause, nil
+	case keywordIs(tok, "SYNCHRONIZED", "SYNC"):
+		return parseSynchronizedClause, nil
+	case keywordIs(tok, "BLANK"):
+		return parseBlankWhenZeroClause, nil
+	case keywordIs(tok, "GLOBAL"):
+		return parseGlobalClause, nil
+	case keywordIs(tok, "EXTERNAL"):
+		return parseExternalClause, nil
+	case tok.Type == TokenSymbol:
+		p.consume() // the entry-terminating "."
+		return nil, nil
+	default:
+		return nil, unexpectedKeyword(tok,
+			"REDEFINES", "PICTURE", "PIC", "USAGE", "VALUE", "OCCURS",
+			"SIGN", "JUSTIFIED", "SYNCHRONIZED", "BLANK", "GLOBAL", "EXTERNAL",
+		)
+	}
+}
+
+// parseRedefinesClause parses REDEFINES data-name.
+func parseRedefinesClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, _, _ := p.advance() // REDEFINES
+	name, err := p.expect(TokenIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	entry.Clauses = append(entry.Clauses, &RedefinesClause{
+		Pos:  hdr.Pos,
+		Name: &Word{Pos: name.Pos, Value: string(name.Value)},
+	})
+	return parseDataClause, nil
+}
+
+// parsePictureClause parses ( "PICTURE" | "PIC" ) [ "IS" ] PictureString. The
+// tokenizer emits the optional IS as its own identifier and the picture run as a
+// single [TokenPicture] (SPEC §"PICTURE Character-Strings").
+func parsePictureClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, _, _ := p.advance() // PICTURE/PIC
+	if err := p.skipOptionalKeyword("IS"); err != nil {
+		return nil, err
+	}
+	pic, err := p.expect(TokenPicture)
+	if err != nil {
+		return nil, err
+	}
+	entry.Clauses = append(entry.Clauses, &PictureClause{Pos: hdr.Pos, Picture: string(pic.Value)})
+	return parseDataClause, nil
+}
+
+// parseUsageClause parses [ "USAGE" [ "IS" ] ] usage-type, normalizing the
+// usage-type to a canonical upper-case name.
+func parseUsageClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, _, _ := p.advance() // USAGE keyword or the bare usage-type
+	pos := hdr.Pos
+	usageTok := hdr
+	if keywordIs(hdr, "USAGE") {
+		if err := p.skipOptionalKeyword("IS"); err != nil {
+			return nil, err
+		}
+		tok, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		usageTok = tok
+	}
+	if !isUsageType(usageTok) {
+		return nil, unexpectedKeyword(usageTok,
+			"DISPLAY", "BINARY", "PACKED-DECIMAL",
+			"COMP", "COMP-1", "COMP-2", "COMP-3", "COMP-4", "COMP-5", "INDEX", "POINTER",
+		)
+	}
+	entry.Clauses = append(entry.Clauses, &UsageClause{Pos: pos, Usage: strings.ToUpper(string(usageTok.Value))})
+	return parseDataClause, nil
+}
+
+// parseValueClause parses ( "VALUE" | "VALUES" ) [ "IS" ] literal for an ordinary
+// item: a single value with no range. Level-88 value lists are parsed by
+// parseConditionValueClause.
+func parseValueClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, _, _ := p.advance() // VALUE/VALUES
+	if err := p.skipOptionalKeyword("IS"); err != nil {
+		return nil, err
+	}
+	lit, err := p.expect(TokenString, TokenNumber, TokenIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	entry.Clauses = append(entry.Clauses, &ValueClause{Pos: hdr.Pos, Values: []ValueSpec{{From: valueNode(lit)}}})
+	return parseDataClause, nil
+}
+
+// parseOccursClause parses
+// "OCCURS" NumericLiteral [ "TO" NumericLiteral ] [ "TIMES" ]
+// [ "DEPENDING" [ "ON" ] data-name ]
+// { ( "ASCENDING" | "DESCENDING" ) [ "KEY" ] [ "IS" ] data-name }
+// [ "INDEXED" [ "BY" ] index-name ].
+func parseOccursClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, _, _ := p.advance() // OCCURS
+	clause := &OccursClause{Pos: hdr.Pos}
+
+	minTok, err := p.expect(TokenNumber)
+	if err != nil {
+		return nil, err
+	}
+	clause.Min = &NumericLiteral{Pos: minTok.Pos, Value: string(minTok.Value)}
+
+	isTo, err := p.peekKeyword("TO")
+	if err != nil {
+		return nil, err
+	}
+	if isTo {
+		p.consume() // TO
+		maxTok, err := p.expect(TokenNumber)
+		if err != nil {
+			return nil, err
+		}
+		clause.Max = &NumericLiteral{Pos: maxTok.Pos, Value: string(maxTok.Value)}
+	}
+
+	if err := p.skipOptionalKeyword("TIMES"); err != nil {
+		return nil, err
+	}
+
+	isDepending, err := p.peekKeyword("DEPENDING")
+	if err != nil {
+		return nil, err
+	}
+	if isDepending {
+		p.consume() // DEPENDING
+		if err := p.skipOptionalKeyword("ON"); err != nil {
+			return nil, err
+		}
+		name, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		clause.DependingOn = &Word{Pos: name.Pos, Value: string(name.Value)}
+	}
+
+	for {
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !keywordIs(tok, "ASCENDING", "DESCENDING") {
+			break
+		}
+		p.consume() // ASCENDING/DESCENDING
+		if err := p.skipOptionalKeyword("KEY"); err != nil {
+			return nil, err
+		}
+		if err := p.skipOptionalKeyword("IS"); err != nil {
+			return nil, err
+		}
+		name, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		clause.Keys = append(clause.Keys, OccursKey{
+			Pos:       tok.Pos,
+			Ascending: keywordIs(tok, "ASCENDING"),
+			Name:      &Word{Pos: name.Pos, Value: string(name.Value)},
+		})
+	}
+
+	isIndexed, err := p.peekKeyword("INDEXED")
+	if err != nil {
+		return nil, err
+	}
+	if isIndexed {
+		p.consume() // INDEXED
+		if err := p.skipOptionalKeyword("BY"); err != nil {
+			return nil, err
+		}
+		name, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		clause.IndexedBy = &Word{Pos: name.Pos, Value: string(name.Value)}
+	}
+
+	entry.Clauses = append(entry.Clauses, clause)
+	return parseDataClause, nil
+}
+
+// parseSignClause parses "SIGN" [ "IS" ] ( "LEADING" | "TRAILING" )
+// [ "SEPARATE" [ "CHARACTER" ] ].
+func parseSignClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, _, _ := p.advance() // SIGN
+	if err := p.skipOptionalKeyword("IS"); err != nil {
+		return nil, err
+	}
+	pos, err := p.expectKeyword("LEADING", "TRAILING")
+	if err != nil {
+		return nil, err
+	}
+	clause := &SignClause{Pos: hdr.Pos, Position: strings.ToUpper(string(pos.Value))}
+
+	isSeparate, err := p.peekKeyword("SEPARATE")
+	if err != nil {
+		return nil, err
+	}
+	if isSeparate {
+		p.consume() // SEPARATE
+		clause.Separate = true
+		if err := p.skipOptionalKeyword("CHARACTER"); err != nil {
+			return nil, err
+		}
+	}
+
+	entry.Clauses = append(entry.Clauses, clause)
+	return parseDataClause, nil
+}
+
+// parseJustifiedClause parses ( "JUSTIFIED" | "JUST" ) [ "RIGHT" ].
+func parseJustifiedClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, _, _ := p.advance() // JUSTIFIED/JUST
+	if err := p.skipOptionalKeyword("RIGHT"); err != nil {
+		return nil, err
+	}
+	entry.Clauses = append(entry.Clauses, &JustifiedClause{Pos: hdr.Pos})
+	return parseDataClause, nil
+}
+
+// parseSynchronizedClause parses ( "SYNCHRONIZED" | "SYNC" ) [ "LEFT" | "RIGHT" ].
+func parseSynchronizedClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, _, _ := p.advance() // SYNCHRONIZED/SYNC
+	clause := &SynchronizedClause{Pos: hdr.Pos}
+
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if ok && keywordIs(tok, "LEFT", "RIGHT") {
+		p.consume()
+		clause.Direction = strings.ToUpper(string(tok.Value))
+	}
+
+	entry.Clauses = append(entry.Clauses, clause)
+	return parseDataClause, nil
+}
+
+// parseBlankWhenZeroClause parses "BLANK" [ "WHEN" ] "ZERO".
+func parseBlankWhenZeroClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, _, _ := p.advance() // BLANK
+	if err := p.skipOptionalKeyword("WHEN"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("ZERO"); err != nil {
+		return nil, err
+	}
+	entry.Clauses = append(entry.Clauses, &BlankWhenZeroClause{Pos: hdr.Pos})
+	return parseDataClause, nil
+}
+
+// parseGlobalClause parses "GLOBAL".
+func parseGlobalClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, _, _ := p.advance() // GLOBAL
+	entry.Clauses = append(entry.Clauses, &GlobalClause{Pos: hdr.Pos})
+	return parseDataClause, nil
+}
+
+// parseExternalClause parses "EXTERNAL".
+func parseExternalClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, _, _ := p.advance() // EXTERNAL
+	entry.Clauses = append(entry.Clauses, &ExternalClause{Pos: hdr.Pos})
+	return parseDataClause, nil
+}
+
+// parseConditionValueClause parses the VALUE clause of a level-88 condition-name:
+// ( "VALUE" | "VALUES" ) [ "IS" ] value-spec { value-spec } "." where
+// value-spec = literal [ ( "THROUGH" | "THRU" ) literal ]. It is the only clause
+// of a condition-name entry, so it consumes the entry-terminating period and ends
+// the entry (returns nil).
+func parseConditionValueClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, err := p.expectKeyword("VALUE", "VALUES")
+	if err != nil {
+		return nil, err
+	}
+	if err := p.skipOptionalKeyword("IS"); err != nil {
+		return nil, err
+	}
+
+	clause := &ValueClause{Pos: hdr.Pos}
+	for {
+		lit, err := p.expect(TokenString, TokenNumber, TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		spec := ValueSpec{From: valueNode(lit)}
+
+		isThrough, err := p.peekKeyword("THROUGH", "THRU")
+		if err != nil {
+			return nil, err
+		}
+		if isThrough {
+			p.consume() // THROUGH/THRU
+			hi, err := p.expect(TokenString, TokenNumber, TokenIdentifier)
+			if err != nil {
+				return nil, err
+			}
+			spec.Through = valueNode(hi)
+		}
+		clause.Values = append(clause.Values, spec)
+
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenSymbol}}
+		}
+		if tok.Type == TokenSymbol {
+			p.consume() // entry-terminating "."
+			break
+		}
+	}
+
+	entry.Clauses = append(entry.Clauses, clause)
+	return nil, nil
+}
+
+// parseRenamesClause parses the RENAMES clause of a level-66 entry:
+// "RENAMES" data-name [ ( "THROUGH" | "THRU" ) data-name ] "." It is the only
+// clause of a RENAMES entry, so it consumes the entry-terminating period and ends
+// the entry (returns nil).
+func parseRenamesClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
+	hdr, err := p.expectKeyword("RENAMES")
+	if err != nil {
+		return nil, err
+	}
+	from, err := p.expect(TokenIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	clause := &RenamesClause{Pos: hdr.Pos, From: &Word{Pos: from.Pos, Value: string(from.Value)}}
+
+	isThrough, err := p.peekKeyword("THROUGH", "THRU")
+	if err != nil {
+		return nil, err
+	}
+	if isThrough {
+		p.consume() // THROUGH/THRU
+		to, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		clause.Through = &Word{Pos: to.Pos, Value: string(to.Value)}
+	}
+
+	if _, err := p.expect(TokenSymbol); err != nil {
+		return nil, err
+	}
+
+	entry.Clauses = append(entry.Clauses, clause)
+	return nil, nil
+}
+
 // parseProcedureDivision parses the PROCEDURE DIVISION whose header keyword kw
 // has already been read. For this slice the procedure division is terminal: its
 // body runs to end of input. The USING/RETURNING phrases, DECLARATIVES, and
@@ -1161,4 +2027,16 @@ type UnexpectedKeywordError struct {
 // Error implements the [error] interface.
 func (e UnexpectedKeywordError) Error() string {
 	return fmt.Sprintf("unexpected keyword %q at line %d, column %d, expected one of %v", string(e.Actual.Value), e.Actual.Pos.Line, e.Actual.Pos.Column, e.Expected)
+}
+
+// InvalidLevelNumberError is returned when a data-description entry's
+// level-number is not an integer 01–49, 66, 77, or 88.
+type InvalidLevelNumberError struct {
+	Pos   Pos
+	Value string
+}
+
+// Error implements the [error] interface.
+func (e InvalidLevelNumberError) Error() string {
+	return fmt.Sprintf("invalid level-number %q at line %d, column %d, expected 01-49, 66, 77, or 88", e.Value, e.Pos.Line, e.Pos.Column)
 }

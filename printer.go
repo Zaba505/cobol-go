@@ -110,8 +110,7 @@ func printDivisionAt(prog *Program, i int, next printerAction) printerAction {
 }
 
 // printDivision dispatches to the printer for the concrete division type, which
-// continues with next when done. The DATA division is deferred to a later story;
-// until its printer exists (and for a nil Division), an unknown type stops the
+// continues with next when done. An unknown type (and a nil Division) stops the
 // loop with an [UnsupportedNodeError] rather than silently dropping the division
 // and emitting invalid source.
 func printDivision(div Division, next printerAction) printerAction {
@@ -120,6 +119,8 @@ func printDivision(div Division, next printerAction) printerAction {
 		return printIdentificationDivision(d, next)
 	case *EnvironmentDivision:
 		return printEnvironmentDivision(d, next)
+	case *DataDivision:
+		return printDataDivision(d, next)
 	case *ProcedureDivision:
 		return printProcedureDivision(d, next)
 	default:
@@ -372,6 +373,242 @@ func printProgramID(id *ProgramID, next printerAction) printerAction {
 	}
 }
 
+// printDataDivision prints the DATA DIVISION header followed by its optional
+// FILE, WORKING-STORAGE, LOCAL-STORAGE, and LINKAGE sections in fixed order. A
+// typed-nil division is rejected with an [UnsupportedNodeError] rather than
+// panicking, matching the other printer entry points.
+func printDataDivision(div *DataDivision, next printerAction) printerAction {
+	if div == nil {
+		return failPrint(UnsupportedNodeError{Node: div})
+	}
+	return writeThen("DATA DIVISION.\n",
+		printFileSection(div.File,
+			printDataSection("WORKING-STORAGE", div.WorkingStorage,
+				printDataSection("LOCAL-STORAGE", div.LocalStorage,
+					printDataSection("LINKAGE", div.Linkage, next)))))
+}
+
+// printFileSection prints the FILE SECTION header followed by its FD/SD entries;
+// a nil section is skipped.
+func printFileSection(sec *FileSection, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if sec == nil {
+			return next
+		}
+		pr.write("FILE SECTION.\n")
+		return printFileDescriptionEntryAt(sec, 0, next)
+	}
+}
+
+// printFileDescriptionEntryAt prints sec's FD/SD entry at index i, then continues
+// with the entry after it; once i is past the last entry it continues with next.
+func printFileDescriptionEntryAt(sec *FileSection, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(sec.Entries) {
+			return next
+		}
+		return printFileDescriptionEntry(sec.Entries[i], printFileDescriptionEntryAt(sec, i+1, next))
+	}
+}
+
+// printFileDescriptionEntry prints one FD/SD file-description entry: the "FD
+// file-name." (or SD) header line, then its subordinate record entries. A nil
+// entry, a nil file-name, or an unrecognized Kind stops the loop with an
+// [UnsupportedNodeError].
+func printFileDescriptionEntry(entry *FileDescriptionEntry, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if entry == nil || entry.Name == nil || (entry.Kind != "FD" && entry.Kind != "SD") {
+			return failPrint(UnsupportedNodeError{Node: entry})
+		}
+		pr.writef("%s %s.\n", entry.Kind, entry.Name.Value)
+		return printDataEntryAt(entry.Records, 0, next)
+	}
+}
+
+// printDataSection prints a WORKING-STORAGE/LOCAL-STORAGE/LINKAGE section: the
+// "<header> SECTION." line followed by its data-description entries; a nil
+// section is skipped.
+func printDataSection(header string, sec *DataSection, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if sec == nil {
+			return next
+		}
+		pr.writef("%s SECTION.\n", header)
+		return printDataEntryAt(sec.Entries, 0, next)
+	}
+}
+
+// printDataEntryAt prints the data-description entry at index i of entries, then
+// continues with the entry after it; once i is past the last entry it continues
+// with next.
+func printDataEntryAt(entries []*DataDescriptionEntry, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(entries) {
+			return next
+		}
+		return printDataEntry(entries[i], printDataEntryAt(entries, i+1, next))
+	}
+}
+
+// printDataEntry prints one data-description entry: the level-number (two
+// digits), the data-name or FILLER, then each clause, terminated with a separator
+// period. The level is indented four spaces (a canonical layout; free-format
+// round-trips ignore positions — SPEC "Reference format independence"). A nil
+// entry or an unsupported clause type stops the loop with an [UnsupportedNodeError].
+func printDataEntry(entry *DataDescriptionEntry, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if entry == nil {
+			return failPrint(UnsupportedNodeError{Node: entry})
+		}
+		pr.writef("    %02d", entry.Level)
+		if entry.Filler {
+			pr.write(" FILLER")
+		} else if entry.Name != nil {
+			pr.writef(" %s", entry.Name.Value)
+		}
+		for _, clause := range entry.Clauses {
+			text, ok := dataClauseText(clause)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: clause})
+			}
+			pr.write(" ")
+			pr.write(text)
+		}
+		pr.write(".\n")
+		return next
+	}
+}
+
+// dataClauseText returns the source text of a data-description clause and whether
+// the node was a printable clause type. It canonicalizes optional noise words
+// (IS, KEY, ON, BY, CHARACTER) and the THROUGH/THRU and JUSTIFIED spellings.
+func dataClauseText(clause DataClause) (string, bool) {
+	switch c := clause.(type) {
+	case *RedefinesClause:
+		if c == nil || c.Name == nil {
+			return "", false
+		}
+		return "REDEFINES " + c.Name.Value, true
+	case *PictureClause:
+		if c == nil {
+			return "", false
+		}
+		return "PIC " + c.Picture, true
+	case *UsageClause:
+		if c == nil {
+			return "", false
+		}
+		return "USAGE " + c.Usage, true
+	case *ValueClause:
+		return valueClauseText(c)
+	case *OccursClause:
+		return occursClauseText(c)
+	case *SignClause:
+		if c == nil || (c.Position != "LEADING" && c.Position != "TRAILING") {
+			return "", false
+		}
+		s := "SIGN IS " + c.Position
+		if c.Separate {
+			s += " SEPARATE CHARACTER"
+		}
+		return s, true
+	case *JustifiedClause:
+		if c == nil {
+			return "", false
+		}
+		return "JUSTIFIED RIGHT", true
+	case *SynchronizedClause:
+		if c == nil {
+			return "", false
+		}
+		if c.Direction != "" {
+			return "SYNCHRONIZED " + c.Direction, true
+		}
+		return "SYNCHRONIZED", true
+	case *BlankWhenZeroClause:
+		if c == nil {
+			return "", false
+		}
+		return "BLANK WHEN ZERO", true
+	case *GlobalClause:
+		if c == nil {
+			return "", false
+		}
+		return "GLOBAL", true
+	case *ExternalClause:
+		if c == nil {
+			return "", false
+		}
+		return "EXTERNAL", true
+	case *RenamesClause:
+		if c == nil || c.From == nil {
+			return "", false
+		}
+		s := "RENAMES " + c.From.Value
+		if c.Through != nil {
+			s += " THROUGH " + c.Through.Value
+		}
+		return s, true
+	default:
+		return "", false
+	}
+}
+
+// valueClauseText returns the text of a VALUE clause: each value-spec, joined by
+// spaces, a spec being "literal" or "literal THROUGH literal".
+func valueClauseText(c *ValueClause) (string, bool) {
+	if c == nil || len(c.Values) == 0 {
+		return "", false
+	}
+	s := "VALUE"
+	for _, spec := range c.Values {
+		from, ok := valueText(spec.From)
+		if !ok {
+			return "", false
+		}
+		s += " " + from
+		if spec.Through != nil {
+			through, ok := valueText(spec.Through)
+			if !ok {
+				return "", false
+			}
+			s += " THROUGH " + through
+		}
+	}
+	return s, true
+}
+
+// occursClauseText returns the text of an OCCURS clause:
+// "OCCURS n [TO m] TIMES [DEPENDING ON d] {ASCENDING|DESCENDING KEY IS k}
+// [INDEXED BY i]".
+func occursClauseText(c *OccursClause) (string, bool) {
+	if c == nil || c.Min == nil {
+		return "", false
+	}
+	s := "OCCURS " + c.Min.Value
+	if c.Max != nil {
+		s += " TO " + c.Max.Value
+	}
+	s += " TIMES"
+	if c.DependingOn != nil {
+		s += " DEPENDING ON " + c.DependingOn.Value
+	}
+	for _, key := range c.Keys {
+		if key.Name == nil {
+			return "", false
+		}
+		if key.Ascending {
+			s += " ASCENDING KEY IS " + key.Name.Value
+		} else {
+			s += " DESCENDING KEY IS " + key.Name.Value
+		}
+	}
+	if c.IndexedBy != nil {
+		s += " INDEXED BY " + c.IndexedBy.Value
+	}
+	return s, true
+}
+
 // printProcedureDivision prints the PROCEDURE DIVISION header followed by its
 // statements, one sentence per line. A typed-nil division is rejected with an
 // [UnsupportedNodeError] rather than panicking.
@@ -462,6 +699,11 @@ func valueText(v Type) (string, bool) {
 		}
 		return n.Value, true
 	case *StringLiteral:
+		if n == nil {
+			return "", false
+		}
+		return n.Value, true
+	case *NumericLiteral:
 		if n == nil {
 			return "", false
 		}
