@@ -779,8 +779,16 @@ func parseSpecialNamesClause(p *parser, para *SpecialNamesParagraph) (parserActi
 	case tok.Type == TokenSymbol:
 		p.consume() // the optional paragraph-terminating period
 		return nil, nil
-	default:
+	case isEnvironmentHeaderKeyword(tok):
+		// The next section/division header ends the clause list (the paragraph
+		// period is optional); leave the token for the caller.
 		return nil, nil
+	default:
+		// An identifier that is neither a recognized clause nor a header — an
+		// unimplemented or misspelled clause (e.g. ALPHABET …). Report it at the
+		// clause position rather than silently truncating the paragraph and
+		// failing later with a misleading division-dispatch error.
+		return nil, unexpectedKeyword(tok, "DECIMAL-POINT", "CURRENCY")
 	}
 }
 

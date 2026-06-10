@@ -247,6 +247,22 @@ func TestParserErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "unrecognized SPECIAL-NAMES clause",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. ENV.\n" +
+				"ENVIRONMENT DIVISION.\n" +
+				"CONFIGURATION SECTION.\n" +
+				"SPECIAL-NAMES.\n" +
+				"    ALPHABET FOO.\n",
+			assert: func(t *testing.T, err error) {
+				// An unimplemented/misspelled clause is reported at the clause
+				// position, not silently truncated into a misleading later error.
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 6, Column: 5}, target.Actual.Pos)
+			},
+		},
+		{
 			name: "invalid ORGANIZATION value",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. ENV.\n" +
