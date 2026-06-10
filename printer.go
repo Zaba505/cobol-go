@@ -110,14 +110,16 @@ func printDivisionAt(prog *Program, i int, next printerAction) printerAction {
 }
 
 // printDivision dispatches to the printer for the concrete division type, which
-// continues with next when done. ENVIRONMENT and DATA divisions are deferred to
-// a later story; until their printers exist (and for a nil Division), an unknown
-// type stops the loop with an [UnsupportedNodeError] rather than silently
-// dropping the division and emitting invalid source.
+// continues with next when done. The DATA division is deferred to a later story;
+// until its printer exists (and for a nil Division), an unknown type stops the
+// loop with an [UnsupportedNodeError] rather than silently dropping the division
+// and emitting invalid source.
 func printDivision(div Division, next printerAction) printerAction {
 	switch d := div.(type) {
 	case *IdentificationDivision:
 		return printIdentificationDivision(d, next)
+	case *EnvironmentDivision:
+		return printEnvironmentDivision(d, next)
 	case *ProcedureDivision:
 		return printProcedureDivision(d, next)
 	default:
@@ -125,10 +127,230 @@ func printDivision(div Division, next printerAction) printerAction {
 	}
 }
 
+// printEnvironmentDivision prints the ENVIRONMENT DIVISION header followed by its
+// optional CONFIGURATION and INPUT-OUTPUT sections. A typed-nil division (a
+// Division interface holding a nil *EnvironmentDivision) is rejected with an
+// [UnsupportedNodeError] rather than panicking, matching the other printer
+// entry points.
+func printEnvironmentDivision(div *EnvironmentDivision, next printerAction) printerAction {
+	if div == nil {
+		return failPrint(UnsupportedNodeError{Node: div})
+	}
+	return writeThen("ENVIRONMENT DIVISION.\n",
+		printConfigurationSection(div.Configuration,
+			printInputOutputSection(div.InputOutput, next)))
+}
+
+// printConfigurationSection prints the CONFIGURATION SECTION and its optional
+// paragraphs; a nil section is skipped by continuing with next.
+func printConfigurationSection(sec *ConfigurationSection, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if sec == nil {
+			return next
+		}
+		pr.write("CONFIGURATION SECTION.\n")
+		return printSourceComputer(sec.SourceComputer,
+			printObjectComputer(sec.ObjectComputer,
+				printSpecialNames(sec.SpecialNames, next)))
+	}
+}
+
+// printSourceComputer prints the SOURCE-COMPUTER paragraph; a nil paragraph is
+// skipped. An empty body prints just the header period.
+func printSourceComputer(para *SourceComputerParagraph, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if para == nil {
+			return next
+		}
+		// WITH DEBUGGING MODE qualifies a computer-name (grammar:
+		// computer-name [ WITH DEBUGGING MODE ]); the flag set without a name is
+		// an inconsistent AST that would not round-trip, so reject it rather than
+		// silently dropping the flag.
+		if para.ComputerName == nil && para.DebuggingMode {
+			return failPrint(UnsupportedNodeError{Node: para})
+		}
+		pr.write("SOURCE-COMPUTER.")
+		if para.ComputerName != nil {
+			pr.writef(" %s", para.ComputerName.Value)
+			if para.DebuggingMode {
+				pr.write(" WITH DEBUGGING MODE")
+			}
+			pr.write(".")
+		}
+		pr.write("\n")
+		return next
+	}
+}
+
+// printObjectComputer prints the OBJECT-COMPUTER paragraph; a nil paragraph is
+// skipped. An empty body prints just the header period.
+func printObjectComputer(para *ObjectComputerParagraph, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if para == nil {
+			return next
+		}
+		pr.write("OBJECT-COMPUTER.")
+		if para.ComputerName != nil {
+			pr.writef(" %s.", para.ComputerName.Value)
+		}
+		pr.write("\n")
+		return next
+	}
+}
+
+// printSpecialNames prints the SPECIAL-NAMES paragraph, one clause per indented
+// line; the last clause carries the paragraph-terminating period. A nil
+// paragraph is skipped. The clause slice is a leaf walked with a local loop, not
+// the action machinery.
+func printSpecialNames(para *SpecialNamesParagraph, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if para == nil {
+			return next
+		}
+		pr.write("SPECIAL-NAMES.\n")
+		for i, clause := range para.Clauses {
+			text, ok := specialNamesClauseText(clause)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: clause})
+			}
+			pr.write("    ")
+			pr.write(text)
+			if i == len(para.Clauses)-1 {
+				pr.write(".")
+			}
+			pr.write("\n")
+		}
+		return next
+	}
+}
+
+// printInputOutputSection prints the INPUT-OUTPUT SECTION and its optional
+// FILE-CONTROL paragraph; a nil section is skipped.
+func printInputOutputSection(sec *InputOutputSection, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if sec == nil {
+			return next
+		}
+		pr.write("INPUT-OUTPUT SECTION.\n")
+		return printFileControl(sec.FileControl, next)
+	}
+}
+
+// printFileControl prints the FILE-CONTROL paragraph header followed by its
+// entries; a nil paragraph is skipped.
+func printFileControl(para *FileControlParagraph, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if para == nil {
+			return next
+		}
+		pr.write("FILE-CONTROL.\n")
+		return printFileControlEntryAt(para, 0, next)
+	}
+}
+
+// printFileControlEntryAt prints para's entry at index i, then continues with the
+// entry after it; once i is past the last entry it continues with next.
+func printFileControlEntryAt(para *FileControlParagraph, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(para.Entries) {
+			return next
+		}
+		return printFileControlEntry(para.Entries[i], printFileControlEntryAt(para, i+1, next))
+	}
+}
+
+// printFileControlEntry prints one SELECT ... ASSIGN entry: the SELECT clause on
+// its own indented line, then each select-clause on a continued line, terminated
+// with a separator period. A nil entry (a nil element in Entries), a nil
+// file-name or assignment target, or an unsupported clause type, stops the loop
+// with an [UnsupportedNodeError].
+func printFileControlEntry(entry *FileControlEntry, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if entry == nil {
+			return failPrint(UnsupportedNodeError{Node: entry})
+		}
+		if entry.Name == nil {
+			return failPrint(UnsupportedNodeError{Node: entry.Name})
+		}
+		assign, ok := valueText(entry.Assign)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: entry.Assign})
+		}
+		pr.write("    SELECT ")
+		if entry.Optional {
+			pr.write("OPTIONAL ")
+		}
+		pr.writef("%s ASSIGN TO %s", entry.Name.Value, assign)
+		for _, clause := range entry.Clauses {
+			text, ok := selectClauseText(clause)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: clause})
+			}
+			pr.write("\n        ")
+			pr.write(text)
+		}
+		pr.write(".\n")
+		return next
+	}
+}
+
+// specialNamesClauseText returns the source text of a SPECIAL-NAMES clause and
+// whether the node was a printable clause type.
+func specialNamesClauseText(clause SpecialNamesClause) (string, bool) {
+	switch c := clause.(type) {
+	case *DecimalPointClause:
+		if c == nil {
+			return "", false
+		}
+		return "DECIMAL-POINT IS COMMA", true
+	case *CurrencySignClause:
+		if c == nil || c.Sign == nil {
+			return "", false
+		}
+		return "CURRENCY SIGN IS " + c.Sign.Value, true
+	default:
+		return "", false
+	}
+}
+
+// selectClauseText returns the source text of a file-control select-clause and
+// whether the node was a printable clause type.
+func selectClauseText(clause SelectClause) (string, bool) {
+	switch c := clause.(type) {
+	case *OrganizationClause:
+		if c == nil {
+			return "", false
+		}
+		return "ORGANIZATION IS " + c.Organization, true
+	case *AccessClause:
+		if c == nil {
+			return "", false
+		}
+		return "ACCESS MODE IS " + c.Mode, true
+	case *RecordKeyClause:
+		if c == nil || c.Name == nil {
+			return "", false
+		}
+		return "RECORD KEY IS " + c.Name.Value, true
+	case *FileStatusClause:
+		if c == nil || c.Name == nil {
+			return "", false
+		}
+		return "FILE STATUS IS " + c.Name.Value, true
+	default:
+		return "", false
+	}
+}
+
 // printIdentificationDivision prints the IDENTIFICATION DIVISION header followed
 // by its PROGRAM-ID paragraph. The keyword spelling is canonicalized to the long
-// form (the AST does not record whether the source used ID or IDENTIFICATION).
+// form (the AST does not record whether the source used ID or IDENTIFICATION). A
+// typed-nil division is rejected with an [UnsupportedNodeError] rather than
+// panicking.
 func printIdentificationDivision(div *IdentificationDivision, next printerAction) printerAction {
+	if div == nil {
+		return failPrint(UnsupportedNodeError{Node: div})
+	}
 	return writeThen("IDENTIFICATION DIVISION.\n", printProgramID(div.ProgramID, next))
 }
 
@@ -151,8 +373,12 @@ func printProgramID(id *ProgramID, next printerAction) printerAction {
 }
 
 // printProcedureDivision prints the PROCEDURE DIVISION header followed by its
-// statements, one sentence per line.
+// statements, one sentence per line. A typed-nil division is rejected with an
+// [UnsupportedNodeError] rather than panicking.
 func printProcedureDivision(div *ProcedureDivision, next printerAction) printerAction {
+	if div == nil {
+		return failPrint(UnsupportedNodeError{Node: div})
+	}
 	return writeThen("PROCEDURE DIVISION.\n", printStatementAt(div, 0, next))
 }
 
@@ -184,9 +410,14 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 
 // printDisplayStatement prints a DISPLAY statement: the verb followed by its
 // space-separated operands, indented and terminated with a separator period. The
-// operand slice is a leaf walked with a local loop, not the action machinery.
+// operand slice is a leaf walked with a local loop, not the action machinery. A
+// typed-nil statement (a nil *DisplayStatement element) is rejected with an
+// [UnsupportedNodeError] rather than panicking.
 func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
 		pr.write("    DISPLAY")
 		for _, op := range stmt.Operands {
 			text, ok := valueText(op)
@@ -202,9 +433,14 @@ func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAc
 }
 
 // printStopStatement prints a STOP statement. Only the STOP RUN form is produced
-// by the parser today; the bare-STOP branch is forward-looking and harmless.
+// by the parser today; the bare-STOP branch is forward-looking and harmless. A
+// typed-nil statement (a nil *StopStatement element) is rejected with an
+// [UnsupportedNodeError] rather than panicking.
 func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
 		if stmt.Run {
 			pr.write("    STOP RUN.\n")
 		} else {
@@ -221,8 +457,14 @@ func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
 func valueText(v Type) (string, bool) {
 	switch n := v.(type) {
 	case *Word:
+		if n == nil {
+			return "", false
+		}
 		return n.Value, true
 	case *StringLiteral:
+		if n == nil {
+			return "", false
+		}
 		return n.Value, true
 	default:
 		return "", false
