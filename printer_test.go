@@ -455,6 +455,38 @@ func TestPrinterErrors(t *testing.T) {
 			}}}},
 		},
 		{
+			name: "typed-nil special-names clause",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&EnvironmentDivision{Configuration: &ConfigurationSection{
+					SpecialNames: &SpecialNamesParagraph{
+						Clauses: []SpecialNamesClause{(*CurrencySignClause)(nil)},
+					},
+				}},
+			}}}},
+		},
+		{
+			name: "typed-nil select-clause",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&EnvironmentDivision{InputOutput: &InputOutputSection{
+					FileControl: &FileControlParagraph{Entries: []*FileControlEntry{
+						{
+							Name:    &Word{Value: "F"},
+							Assign:  &StringLiteral{Value: `"f.dat"`},
+							Clauses: []SelectClause{(*OrganizationClause)(nil)},
+						},
+					}},
+				}},
+			}}}},
+		},
+		{
+			name: "debugging mode without computer name",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&EnvironmentDivision{Configuration: &ConfigurationSection{
+					SourceComputer: &SourceComputerParagraph{DebuggingMode: true},
+				}},
+			}}}},
+		},
+		{
 			name: "unsupported file-control assignment target",
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				&EnvironmentDivision{InputOutput: &InputOutputSection{

@@ -162,6 +162,13 @@ func printSourceComputer(para *SourceComputerParagraph, next printerAction) prin
 		if para == nil {
 			return next
 		}
+		// WITH DEBUGGING MODE qualifies a computer-name (grammar:
+		// computer-name [ WITH DEBUGGING MODE ]); the flag set without a name is
+		// an inconsistent AST that would not round-trip, so reject it rather than
+		// silently dropping the flag.
+		if para.ComputerName == nil && para.DebuggingMode {
+			return failPrint(UnsupportedNodeError{Node: para})
+		}
 		pr.write("SOURCE-COMPUTER.")
 		if para.ComputerName != nil {
 			pr.writef(" %s", para.ComputerName.Value)
@@ -292,9 +299,12 @@ func printFileControlEntry(entry *FileControlEntry, next printerAction) printerA
 func specialNamesClauseText(clause SpecialNamesClause) (string, bool) {
 	switch c := clause.(type) {
 	case *DecimalPointClause:
+		if c == nil {
+			return "", false
+		}
 		return "DECIMAL-POINT IS COMMA", true
 	case *CurrencySignClause:
-		if c.Sign == nil {
+		if c == nil || c.Sign == nil {
 			return "", false
 		}
 		return "CURRENCY SIGN IS " + c.Sign.Value, true
@@ -308,16 +318,22 @@ func specialNamesClauseText(clause SpecialNamesClause) (string, bool) {
 func selectClauseText(clause SelectClause) (string, bool) {
 	switch c := clause.(type) {
 	case *OrganizationClause:
+		if c == nil {
+			return "", false
+		}
 		return "ORGANIZATION IS " + c.Organization, true
 	case *AccessClause:
+		if c == nil {
+			return "", false
+		}
 		return "ACCESS MODE IS " + c.Mode, true
 	case *RecordKeyClause:
-		if c.Name == nil {
+		if c == nil || c.Name == nil {
 			return "", false
 		}
 		return "RECORD KEY IS " + c.Name.Value, true
 	case *FileStatusClause:
-		if c.Name == nil {
+		if c == nil || c.Name == nil {
 			return "", false
 		}
 		return "FILE STATUS IS " + c.Name.Value, true
