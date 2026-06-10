@@ -278,6 +278,35 @@ func TestParserErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "deferred I-O-CONTROL paragraph after file-control",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. ENV.\n" +
+				"ENVIRONMENT DIVISION.\n" +
+				"INPUT-OUTPUT SECTION.\n" +
+				"FILE-CONTROL.\n" +
+				"    SELECT F ASSIGN TO \"f.dat\".\n" +
+				"I-O-CONTROL.\n",
+			assert: func(t *testing.T, err error) {
+				// Reported at the section level, not as a division-dispatch error.
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 7, Column: 1}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "SELECT entry outside FILE-CONTROL paragraph",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. ENV.\n" +
+				"ENVIRONMENT DIVISION.\n" +
+				"INPUT-OUTPUT SECTION.\n" +
+				"    SELECT F ASSIGN TO \"f.dat\".\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 5, Column: 5}, target.Actual.Pos)
+			},
+		},
+		{
 			name: "unimplemented DATA division after environment",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. ENV.\n" +

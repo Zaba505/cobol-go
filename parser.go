@@ -347,6 +347,26 @@ func (p *parser) skipOptionalKeyword(kw ...string) error {
 	return nil
 }
 
+// expectFollow verifies that the next (unconsumed) token, if any, is an
+// identifier matching one of follow, allowing end of input. It does not consume
+// the token, so a valid follower remains for the caller (typically the division
+// boundary). It lets a construct report an unimplemented or misplaced keyword at
+// its own level rather than letting the token surface later as a misleading
+// division-dispatch error.
+func (p *parser) expectFollow(follow ...string) error {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if keywordIs(tok, follow...) {
+		return nil
+	}
+	return unexpectedKeyword(tok, follow...)
+}
+
 // expect pulls the next token and requires its type to be one of types,
 // returning [UnexpectedEndOfTokensError] if the stream is exhausted or
 // [UnexpectedTokenError] if the type does not match.
@@ -831,6 +851,20 @@ func parseInputOutputSectionOpt(p *parser, div *EnvironmentDivision) (parserActi
 	}
 
 	div.InputOutput = sec
+
+	// The INPUT-OUTPUT SECTION ends the ENVIRONMENT DIVISION's content, so what
+	// follows must be the next division (DATA or PROCEDURE) or end of input —
+	// plus FILE-CONTROL when it has not yet appeared. Validate it here so a
+	// deferred I-O-CONTROL paragraph, or a SELECT entry outside a FILE-CONTROL
+	// paragraph, is reported at this level instead of surfacing later as a
+	// misleading division-dispatch error.
+	follow := []string{"DATA", "PROCEDURE"}
+	if sec.FileControl == nil {
+		follow = append([]string{"FILE-CONTROL"}, follow...)
+	}
+	if err := p.expectFollow(follow...); err != nil {
+		return nil, err
+	}
 	return nil, nil
 }
 
