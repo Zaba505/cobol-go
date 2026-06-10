@@ -128,8 +128,14 @@ func printDivision(div Division, next printerAction) printerAction {
 }
 
 // printEnvironmentDivision prints the ENVIRONMENT DIVISION header followed by its
-// optional CONFIGURATION and INPUT-OUTPUT sections.
+// optional CONFIGURATION and INPUT-OUTPUT sections. A typed-nil division (a
+// Division interface holding a nil *EnvironmentDivision) is rejected with an
+// [UnsupportedNodeError] rather than panicking, matching the other printer
+// entry points.
 func printEnvironmentDivision(div *EnvironmentDivision, next printerAction) printerAction {
+	if div == nil {
+		return failPrint(UnsupportedNodeError{Node: div})
+	}
 	return writeThen("ENVIRONMENT DIVISION.\n",
 		printConfigurationSection(div.Configuration,
 			printInputOutputSection(div.InputOutput, next)))
@@ -248,10 +254,14 @@ func printFileControlEntryAt(para *FileControlParagraph, i int, next printerActi
 
 // printFileControlEntry prints one SELECT ... ASSIGN entry: the SELECT clause on
 // its own indented line, then each select-clause on a continued line, terminated
-// with a separator period. A nil file-name or assignment target, or an
-// unsupported clause type, stops the loop with an [UnsupportedNodeError].
+// with a separator period. A nil entry (a nil element in Entries), a nil
+// file-name or assignment target, or an unsupported clause type, stops the loop
+// with an [UnsupportedNodeError].
 func printFileControlEntry(entry *FileControlEntry, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
+		if entry == nil {
+			return failPrint(UnsupportedNodeError{Node: entry})
+		}
 		if entry.Name == nil {
 			return failPrint(UnsupportedNodeError{Node: entry.Name})
 		}

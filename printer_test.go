@@ -431,6 +431,20 @@ func TestPrinterErrors(t *testing.T) {
 			}}}},
 		},
 		{
+			name: "typed-nil environment division",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				(*EnvironmentDivision)(nil),
+			}}}},
+		},
+		{
+			name: "nil file-control entry element",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&EnvironmentDivision{InputOutput: &InputOutputSection{
+					FileControl: &FileControlParagraph{Entries: []*FileControlEntry{nil}},
+				}},
+			}}}},
+		},
+		{
 			name: "unknown special-names clause type",
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				&EnvironmentDivision{Configuration: &ConfigurationSection{
