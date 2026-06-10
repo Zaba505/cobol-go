@@ -38,6 +38,14 @@ func (pr *printer) writef(format string, args ...any) {
 	_, pr.err = fmt.Fprintf(pr.w, format, args...)
 }
 
+// setErr records the first error encountered; later calls are no-ops, matching
+// the short-circuit in write/writef so the first failure wins.
+func (pr *printer) setErr(err error) {
+	if pr.err == nil {
+		pr.err = err
+	}
+}
+
 // printerAction is one step of the printer state machine: it writes some
 // output and returns the next action. Returning nil ends printing. Errors are
 // accumulated in pr.err rather than returned, so the driver loop stops on the
@@ -53,21 +61,39 @@ func writeThen(s string, next printerAction) printerAction {
 	}
 }
 
+// failPrint returns a terminal action that records err and stops the loop — the
+// printer's only structural-error path (write failures already set pr.err).
+func failPrint(err error) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		pr.setErr(err)
+		return nil
+	}
+}
+
 // printFile is the entry action: it prints each program in source order. The
 // empty (zero-value) *File prints nothing, since printProgramAt(0) ends
-// immediately when there are no programs.
+// immediately when there are no programs. A nil *File is rejected with an
+// [UnsupportedNodeError] rather than panicking, since Print is a public API.
 func printFile(pr *printer, f *File) printerAction {
+	if f == nil {
+		return failPrint(UnsupportedNodeError{Node: f})
+	}
 	return printProgramAt(0)
 }
 
 // printProgramAt prints the program at index i, then continues with the program
-// after it. It returns nil once i is past the last program, ending the loop.
+// after it. It returns nil once i is past the last program, ending the loop. A
+// nil program element is rejected rather than panicking on prog.Divisions.
 func printProgramAt(i int) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if i >= len(f.Programs) {
 			return nil
 		}
-		return printDivisionAt(f.Programs[i], 0, printProgramAt(i+1))
+		prog := f.Programs[i]
+		if prog == nil {
+			return failPrint(UnsupportedNodeError{Node: prog})
+		}
+		return printDivisionAt(prog, 0, printProgramAt(i+1))
 	}
 }
 
@@ -85,7 +111,9 @@ func printDivisionAt(prog *Program, i int, next printerAction) printerAction {
 
 // printDivision dispatches to the printer for the concrete division type, which
 // continues with next when done. ENVIRONMENT and DATA divisions are deferred to
-// a later story, so the type set is closed today and the default is unreachable.
+// a later story; until their printers exist (and for a nil Division), an unknown
+// type stops the loop with an [UnsupportedNodeError] rather than silently
+// dropping the division and emitting invalid source.
 func printDivision(div Division, next printerAction) printerAction {
 	switch d := div.(type) {
 	case *IdentificationDivision:
@@ -93,7 +121,7 @@ func printDivision(div Division, next printerAction) printerAction {
 	case *ProcedureDivision:
 		return printProcedureDivision(d, next)
 	default:
-		return next
+		return failPrint(UnsupportedNodeError{Node: div})
 	}
 }
 
@@ -104,10 +132,20 @@ func printIdentificationDivision(div *IdentificationDivision, next printerAction
 	return writeThen("IDENTIFICATION DIVISION.\n", printProgramID(div.ProgramID, next))
 }
 
-// printProgramID prints the PROGRAM-ID paragraph naming the program.
+// printProgramID prints the PROGRAM-ID paragraph naming the program. A missing
+// paragraph (nil id) or a program-name of an unsupported value type stops the
+// loop with an [UnsupportedNodeError] rather than panicking or emitting a blank
+// name.
 func printProgramID(id *ProgramID, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
-		pr.writef("PROGRAM-ID. %s.\n", valueText(id.Name))
+		if id == nil {
+			return failPrint(UnsupportedNodeError{Node: id})
+		}
+		name, ok := valueText(id.Name)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: id.Name})
+		}
+		pr.writef("PROGRAM-ID. %s.\n", name)
 		return next
 	}
 }
@@ -130,7 +168,9 @@ func printStatementAt(div *ProcedureDivision, i int, next printerAction) printer
 }
 
 // printStatement dispatches to the printer for the concrete statement type,
-// which continues with next when done.
+// which continues with next when done. An unknown statement type (or a nil
+// Statement) stops the loop with an [UnsupportedNodeError] rather than silently
+// dropping the statement from the output.
 func printStatement(stmt Statement, next printerAction) printerAction {
 	switch s := stmt.(type) {
 	case *DisplayStatement:
@@ -138,7 +178,7 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 	case *StopStatement:
 		return printStopStatement(s, next)
 	default:
-		return next
+		return failPrint(UnsupportedNodeError{Node: stmt})
 	}
 }
 
@@ -149,8 +189,12 @@ func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAc
 	return func(pr *printer, f *File) printerAction {
 		pr.write("    DISPLAY")
 		for _, op := range stmt.Operands {
+			text, ok := valueText(op)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: op})
+			}
 			pr.write(" ")
-			pr.write(valueText(op))
+			pr.write(text)
 		}
 		pr.write(".\n")
 		return next
@@ -170,15 +214,31 @@ func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
 	}
 }
 
-// valueText returns the source text of a value node: a [Word]'s spelling or a
-// [StringLiteral]'s raw lexeme (including its delimiters).
-func valueText(v Type) string {
+// valueText returns the source text of a value node — a [Word]'s spelling or a
+// [StringLiteral]'s raw lexeme (including its delimiters) — and reports whether
+// the node was a printable value type. The ok flag lets callers surface an
+// explicit [UnsupportedNodeError] instead of emitting a blank operand or name.
+func valueText(v Type) (string, bool) {
 	switch n := v.(type) {
 	case *Word:
-		return n.Value
+		return n.Value, true
 	case *StringLiteral:
-		return n.Value
+		return n.Value, true
 	default:
-		return ""
+		return "", false
 	}
+}
+
+// UnsupportedNodeError is returned by [Print] when it encounters an AST node it
+// cannot emit: a nil *File or required child node, or a division, statement, or
+// value node of an unknown concrete type. It mirrors the parser's typed errors so
+// callers can match it with errors.As.
+type UnsupportedNodeError struct {
+	// Node is the offending AST node (possibly a typed-nil pointer).
+	Node any
+}
+
+// Error implements the [error] interface.
+func (e UnsupportedNodeError) Error() string {
+	return fmt.Sprintf("cannot print unsupported node %T", e.Node)
 }

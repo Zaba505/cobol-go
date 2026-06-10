@@ -116,8 +116,8 @@ func TestPrinterRoundTrip(t *testing.T) {
 }
 
 // withoutPos zeroes every Pos in f and returns it, so round-trip comparisons
-// assert AST structure while ignoring the column information the printer is free
-// to choose (SPEC.md "Reference format independence").
+// assert AST structure while ignoring the line/column positions the printer is
+// free to choose (SPEC.md "Reference format independence").
 func withoutPos(f *File) *File {
 	for _, prog := range f.Programs {
 		prog.Pos = Pos{}
@@ -155,5 +155,81 @@ func clearTypePos(v Type) {
 		n.Pos = Pos{}
 	case *StringLiteral:
 		n.Pos = Pos{}
+	}
+}
+
+// fakeDivision, fakeStatement, and fakeValue satisfy the sealed AST interfaces
+// with concrete types the printer does not know, so the error-path test can drive
+// every "unsupported node" branch without waiting for real future node types.
+type fakeDivision struct{}
+
+func (fakeDivision) division() {}
+
+type fakeStatement struct{}
+
+func (fakeStatement) statement() {}
+
+type fakeValue struct{}
+
+func (fakeValue) cobol() {}
+
+// TestPrinterErrors pins the typed error the printer reports for nil and
+// unknown-type AST nodes, so the public Print API fails cleanly instead of
+// panicking or emitting invalid COBOL.
+func TestPrinterErrors(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name  string
+		input *File
+	}{
+		{
+			name:  "nil file",
+			input: nil,
+		},
+		{
+			name:  "nil program element",
+			input: &File{Programs: []*Program{nil}},
+		},
+		{
+			name:  "unknown division type",
+			input: &File{Programs: []*Program{{Divisions: []Division{fakeDivision{}}}}},
+		},
+		{
+			name:  "missing program-id paragraph",
+			input: &File{Programs: []*Program{{Divisions: []Division{&IdentificationDivision{}}}}},
+		},
+		{
+			name: "unsupported program name type",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&IdentificationDivision{ProgramID: &ProgramID{Name: fakeValue{}}},
+			}}}},
+		},
+		{
+			name: "unknown statement type",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Statements: []Statement{fakeStatement{}}},
+			}}}},
+		},
+		{
+			name: "unsupported display operand type",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Statements: []Statement{
+					&DisplayStatement{Operands: []Type{fakeValue{}}},
+				}},
+			}}}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			err := Print(&buf, tc.input)
+
+			var target UnsupportedNodeError
+			require.ErrorAs(t, err, &target)
+		})
 	}
 }
