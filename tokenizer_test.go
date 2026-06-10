@@ -387,11 +387,109 @@ func TestTokenizer(t *testing.T) {
 				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("01")},
 				{Pos: Pos{Line: 1, Column: 4}, Type: TokenIdentifier, Value: []byte("WS-COUNT")},
 				{Pos: Pos{Line: 1, Column: 13}, Type: TokenIdentifier, Value: []byte("PIC")},
-				{Pos: Pos{Line: 1, Column: 17}, Type: TokenNumber, Value: []byte("9")},
-				{Pos: Pos{Line: 1, Column: 18}, Type: TokenSymbol, Value: []byte("(")},
-				{Pos: Pos{Line: 1, Column: 19}, Type: TokenNumber, Value: []byte("3")},
-				{Pos: Pos{Line: 1, Column: 20}, Type: TokenSymbol, Value: []byte(")")},
+				{Pos: Pos{Line: 1, Column: 17}, Type: TokenPicture, Value: []byte("9(3)")},
 				{Pos: Pos{Line: 1, Column: 21}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			name: "signed numeric picture with repeat and assumed decimal",
+			src:  "PIC S9(4)V99",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenPicture, Value: []byte("S9(4)V99")},
+			},
+		},
+		{
+			name: "alphanumeric picture with repeat",
+			src:  "PIC X(10)",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenPicture, Value: []byte("X(10)")},
+			},
+		},
+		{
+			name: "single alphabetic picture",
+			src:  "PIC A",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenPicture, Value: []byte("A")},
+			},
+		},
+		{
+			name: "numeric-edited picture with float sign, insertion comma, and actual decimal",
+			src:  "PIC -ZZ,ZZ9.99",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenPicture, Value: []byte("-ZZ,ZZ9.99")},
+			},
+		},
+		{
+			name: "floating currency picture with trailing CR",
+			src:  "PIC $$,$$9.99CR",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenPicture, Value: []byte("$$,$$9.99CR")},
+			},
+		},
+		{
+			name: "numeric picture with trailing DB",
+			src:  "PIC 9(5)DB",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenPicture, Value: []byte("9(5)DB")},
+			},
+		},
+		{
+			name: "actual decimal point inside a picture is kept",
+			src:  "PIC ZZ9.99",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenPicture, Value: []byte("ZZ9.99")},
+			},
+		},
+		{
+			name: "insertion comma inside a picture is not a separator",
+			src:  "PIC ZZ,ZZ9",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenPicture, Value: []byte("ZZ,ZZ9")},
+			},
+		},
+		{
+			name: "PICTURE IS picture string",
+			src:  "PICTURE IS X(5)",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PICTURE")},
+				{Pos: Pos{Line: 1, Column: 9}, Type: TokenIdentifier, Value: []byte("IS")},
+				{Pos: Pos{Line: 1, Column: 12}, Type: TokenPicture, Value: []byte("X(5)")},
+			},
+		},
+		{
+			name: "PIC IS picture string",
+			src:  "PIC IS 9(5)",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenIdentifier, Value: []byte("IS")},
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenPicture, Value: []byte("9(5)")},
+			},
+		},
+		{
+			name: "separator period ends a picture",
+			src:  "PIC X(10).",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenPicture, Value: []byte("X(10)")},
+				{Pos: Pos{Line: 1, Column: 10}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			name: "whitespace ends a picture and the next clause tokenizes",
+			src:  "PIC X(10) USAGE DISPLAY",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenPicture, Value: []byte("X(10)")},
+				{Pos: Pos{Line: 1, Column: 11}, Type: TokenIdentifier, Value: []byte("USAGE")},
+				{Pos: Pos{Line: 1, Column: 17}, Type: TokenIdentifier, Value: []byte("DISPLAY")},
 			},
 		},
 		{

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -41,6 +42,7 @@ const (
 	TokenSymbol                      // e.g. ".", "(", ")"
 	TokenString                      // e.g. "literal"
 	TokenNumber                      // e.g. 123, 45.67
+	TokenPicture                     // e.g. S9(4)V99, X(10) (the SPEC's PictureString)
 )
 
 func (tt TokenType) String() string {
@@ -55,6 +57,8 @@ func (tt TokenType) String() string {
 		return "String"
 	case TokenNumber:
 		return "Number"
+	case TokenPicture:
+		return "Picture"
 	default:
 		panic(fmt.Sprintf("unknown token type: %d", tt))
 	}
@@ -180,6 +184,35 @@ func (t *tokenizer) peekExponentDigits() bool {
 		return true
 	}
 	return false
+}
+
+// peekIS reports whether the next unread bytes spell the reserved word IS
+// (case-insensitive) followed by a word boundary. It is used after PIC/PICTURE
+// to consume the optional IS before the PICTURE string. The lookahead is
+// unambiguous: a PICTURE string never begins with I (not a PICTURE symbol), so
+// IS followed by a boundary is always the keyword and never the start of the
+// string.
+func (t *tokenizer) peekIS() bool {
+	b, _ := t.buf.Peek(3)
+	if len(b) < 2 || (b[0] != 'I' && b[0] != 'i') || (b[1] != 'S' && b[1] != 's') {
+		return false
+	}
+	return len(b) < 3 || !isWordContinue(rune(b[2]))
+}
+
+// peekPictureSeparatorPeriod reports whether an unconsumed '.' (the next byte)
+// is a separator period — followed by whitespace or end of input — rather than
+// the actual decimal point inside a PICTURE string (a '.' followed by another
+// PICTURE character, e.g. the '.' in ZZ9.99). It decodes the rune after the '.'
+// so multi-byte Unicode whitespace is recognized the same way [skipWhitespace]
+// recognizes it.
+func (t *tokenizer) peekPictureSeparatorPeriod() bool {
+	b, _ := t.buf.Peek(1 + utf8.UTFMax)
+	if len(b) < 2 {
+		return true // '.' at end of input
+	}
+	r, _ := utf8.DecodeRune(b[1:])
+	return unicode.IsSpace(r)
 }
 
 // tokenizerAction is one step of the tokenizer state machine: it reads some
@@ -360,8 +393,85 @@ func tokenizeWord(start Pos, first rune) tokenizerAction {
 			}
 			if !isWordContinue(r) {
 				tok := Token{Pos: start, Type: TokenIdentifier, Value: value}
-				return yieldErrorOr(t.backup(pos), yieldTokenThen(tok, tokenizeCOBOL))
+				return yieldErrorOr(t.backup(pos), yieldTokenThen(tok, nextAfterWord(value)))
 			}
+			value = utf8.AppendRune(value, r)
+		}
+	}
+}
+
+// nextAfterWord picks the action to run after a COBOL word is emitted. The word
+// PIC/PICTURE (case-insensitive) switches the tokenizer into PICTURE-scanning
+// mode (SPEC §"PICTURE Character-Strings"); every other word resumes the normal
+// dispatch.
+func nextAfterWord(value []byte) tokenizerAction {
+	if strings.EqualFold(string(value), "PIC") || strings.EqualFold(string(value), "PICTURE") {
+		return tokenizePictureClause
+	}
+	return tokenizeCOBOL
+}
+
+// tokenizePictureClause runs after a PIC/PICTURE word. It skips whitespace,
+// consumes an optional IS reserved word — emitted as its own [TokenIdentifier],
+// source case preserved, since the grammar is ( "PICTURE" | "PIC" ) [ "IS" ]
+// PictureString and the parser expects IS as a separate token — then scans the
+// PICTURE character-string as one token starting at the current position.
+func tokenizePictureClause(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+	return skipWhitespace(func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		pos := t.pos
+		if t.peekIS() {
+			r1, _ := t.next()
+			r2, _ := t.next()
+			isTok := Token{Pos: pos, Type: TokenIdentifier, Value: utf8.AppendRune(utf8.AppendRune(nil, r1), r2)}
+			return yieldTokenThen(isTok, skipWhitespace(func(t *tokenizer, _ func(Token, error) bool) tokenizerAction {
+				return tokenizePictureString(t.pos)
+			}))
+		}
+		return tokenizePictureString(pos)
+	})
+}
+
+// tokenizePictureString accumulates a PICTURE character-string into a single
+// [TokenPicture] whose value is the raw lexeme (case preserved; symbol and
+// category validation are left to the parser — SPEC §Semantics). The run begins
+// at start and stops at a separator: whitespace, or a separator period (a '.'
+// followed by whitespace or end of input). A '.' followed by another PICTURE
+// character is the actual decimal point and stays in the string; ',', '(', ')',
+// digits, '$', and the sign/insertion symbols are likewise consumed, so the
+// repeat count (n) is part of the token.
+//
+// Like [tokenizeNumber] it peeks each candidate rune before consuming it, so a
+// terminating rune is left in the buffer for the next dispatch rather than
+// backed up (peeking then backing up the same rune is impossible — see
+// [tokenizer.peekByte]). An empty run emits no token, so a malformed PIC. yields
+// PIC then the separator period rather than an empty PICTURE token.
+func tokenizePictureString(start Pos) tokenizerAction {
+	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		var value []byte
+		emit := func(next tokenizerAction) tokenizerAction {
+			if len(value) == 0 {
+				return next
+			}
+			return yieldTokenThen(Token{Pos: start, Type: TokenPicture, Value: value}, next)
+		}
+		for {
+			r, ok := t.peekRune()
+			if !ok {
+				// End of input or a read error follows the string: emit it, then
+				// let the next read surface the condition (a clean EOF stops the
+				// stream, any other error propagates unchanged).
+				return emit(func(t *tokenizer, _ func(Token, error) bool) tokenizerAction {
+					_, err := t.next()
+					return yieldErrorOr(err, nil)
+				})
+			}
+			if unicode.IsSpace(r) {
+				return emit(tokenizeCOBOL)
+			}
+			if r == '.' && t.peekPictureSeparatorPeriod() {
+				return emit(tokenizeCOBOL)
+			}
+			r, _ = t.next()
 			value = utf8.AppendRune(value, r)
 		}
 	}
