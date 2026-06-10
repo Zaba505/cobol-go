@@ -405,7 +405,7 @@ func tokenizeWord(start Pos, first rune) tokenizerAction {
 // mode (SPEC §"PICTURE Character-Strings"); every other word resumes the normal
 // dispatch.
 func nextAfterWord(value []byte) tokenizerAction {
-	if strings.EqualFold(string(value), "PIC") || strings.EqualFold(string(value), "PICTURE") {
+	if s := string(value); strings.EqualFold(s, "PIC") || strings.EqualFold(s, "PICTURE") {
 		return tokenizePictureClause
 	}
 	return tokenizeCOBOL
