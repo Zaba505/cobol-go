@@ -457,8 +457,14 @@ func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
 func valueText(v Type) (string, bool) {
 	switch n := v.(type) {
 	case *Word:
+		if n == nil {
+			return "", false
+		}
 		return n.Value, true
 	case *StringLiteral:
+		if n == nil {
+			return "", false
+		}
 		return n.Value, true
 	default:
 		return "", false

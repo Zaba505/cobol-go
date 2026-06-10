@@ -465,8 +465,10 @@ func parseFile(p *parser, f *File) (parserAction[*File], error) {
 }
 
 // dispatchDivision returns the division parser for the already-read division
-// header keyword kw. It is the division dispatch point; DATA is recognized only
-// as future work and is not yet implemented.
+// header keyword kw. IDENTIFICATION/ID, ENVIRONMENT, and PROCEDURE are dispatched
+// to their parsers; any other keyword — including the not-yet-implemented DATA
+// division (a later story) — falls through to the default and is reported as an
+// unexpected division header.
 func dispatchDivision(kw Token) parserAction[*Program] {
 	switch {
 	case keywordIs(kw, "IDENTIFICATION", "ID"):

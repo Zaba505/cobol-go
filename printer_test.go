@@ -417,6 +417,22 @@ func TestPrinterErrors(t *testing.T) {
 			}}}},
 		},
 		{
+			name: "typed-nil program name",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&IdentificationDivision{ProgramID: &ProgramID{Name: (*Word)(nil)}},
+			}}}},
+		},
+		{
+			name: "typed-nil file-control assignment target",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&EnvironmentDivision{InputOutput: &InputOutputSection{
+					FileControl: &FileControlParagraph{Entries: []*FileControlEntry{
+						{Name: &Word{Value: "F"}, Assign: (*StringLiteral)(nil)},
+					}},
+				}},
+			}}}},
+		},
+		{
 			name: "unknown statement type",
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				&ProcedureDivision{Statements: []Statement{fakeStatement{}}},
