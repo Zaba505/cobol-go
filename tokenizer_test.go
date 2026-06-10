@@ -32,6 +32,7 @@ func TestTokenizer(t *testing.T) {
 	testCases := []struct {
 		name     string
 		src      string
+		opts     []TokenizeOption
 		expected []Token
 	}{
 		{
@@ -68,6 +69,131 @@ func TestTokenizer(t *testing.T) {
 			},
 		},
 		{
+			name: "single-quoted literal",
+			src:  `'single'`,
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenString, Value: []byte(`'single'`)},
+			},
+		},
+		{
+			name: "empty double-quoted literal",
+			src:  `""`,
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenString, Value: []byte(`""`)},
+			},
+		},
+		{
+			name: "empty single-quoted literal",
+			src:  `''`,
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenString, Value: []byte(`''`)},
+			},
+		},
+		{
+			name: "doubled double-quote escape",
+			src:  `"He said ""hi"""`,
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenString, Value: []byte(`"He said ""hi"""`)},
+			},
+		},
+		{
+			name: "doubled single-quote escape",
+			src:  `'it''s'`,
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenString, Value: []byte(`'it''s'`)},
+			},
+		},
+		{
+			name: "integer literal",
+			src:  "42",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("42")},
+			},
+		},
+		{
+			name: "zero literal",
+			src:  "0",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("0")},
+			},
+		},
+		{
+			name: "negative integer literal",
+			src:  "-7",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("-7")},
+			},
+		},
+		{
+			name: "positive integer literal",
+			src:  "+5",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("+5")},
+			},
+		},
+		{
+			name: "fixed-point literal",
+			src:  "3.14",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("3.14")},
+			},
+		},
+		{
+			name: "negative fixed-point literal",
+			src:  "-2.95",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("-2.95")},
+			},
+		},
+		{
+			name: "floating-point literal",
+			src:  "9.92E25",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("9.92E25")},
+			},
+		},
+		{
+			name: "floating-point literal with signed exponent",
+			src:  "5.7E-14",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("5.7E-14")},
+			},
+		},
+		{
+			name: "trailing period is a separator, not a decimal point",
+			src:  "5.",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("5")},
+				{Pos: Pos{Line: 1, Column: 2}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			name: "decimal comma mode honors comma as decimal point",
+			src:  "3,14",
+			opts: []TokenizeOption{WithDecimalComma()},
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("3,14")},
+			},
+		},
+		{
+			name: "decimal comma mode treats period as a separator",
+			src:  "3.14",
+			opts: []TokenizeOption{WithDecimalComma()},
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("3")},
+				{Pos: Pos{Line: 1, Column: 2}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 1, Column: 3}, Type: TokenNumber, Value: []byte("14")},
+			},
+		},
+		{
+			name: "ALL figurative constant precedes a literal",
+			src:  `ALL "X"`,
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("ALL")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenString, Value: []byte(`"X"`)},
+			},
+		},
+		{
 			name: "minimal free-format program",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. HELLO.\n" +
@@ -99,10 +225,43 @@ func TestTokenizer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			tokens, err := collect(Tokenize(strings.NewReader(tc.src)))
+			tokens, err := collect(Tokenize(strings.NewReader(tc.src), tc.opts...))
 
 			require.NoError(t, err)
 			require.Equal(t, tc.expected, tokens)
+		})
+	}
+}
+
+// Figurative constants are reserved words, not a distinct lexical class: the
+// tokenizer emits them as ordinary COBOL words (TokenIdentifier) and the parser's
+// keyword table recognizes them. This pins that contract for every spelling.
+func TestTokenizerFigurativeConstants(t *testing.T) {
+	t.Parallel()
+
+	words := []string{
+		"ZERO", "ZEROS", "ZEROES",
+		"SPACE", "SPACES",
+		"HIGH-VALUE", "HIGH-VALUES",
+		"LOW-VALUE", "LOW-VALUES",
+		"QUOTE", "QUOTES",
+		"NULL", "NULLS",
+		"ALL",
+	}
+
+	for _, word := range words {
+		t.Run(word, func(t *testing.T) {
+			t.Parallel()
+
+			var tokens []Token
+			for tok, err := range Tokenize(strings.NewReader(word)) {
+				require.NoError(t, err)
+				tokens = append(tokens, tok)
+			}
+
+			require.Equal(t, []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte(word)},
+			}, tokens)
 		})
 	}
 }
@@ -127,6 +286,15 @@ func TestTokenizerErrors(t *testing.T) {
 		{
 			name: "unterminated alphanumeric literal",
 			src:  `"unterminated`,
+			assert: func(t *testing.T, err error) {
+				var target UnterminatedStringError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 1, Column: 1}, target.Pos)
+			},
+		},
+		{
+			name: "literal closed only by an escaped delimiter",
+			src:  `"abc""`,
 			assert: func(t *testing.T, err error) {
 				var target UnterminatedStringError
 				require.ErrorAs(t, err, &target)
