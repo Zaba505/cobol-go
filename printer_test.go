@@ -161,6 +161,70 @@ func TestPrinter(t *testing.T) {
 				"    STOP RUN.\n",
 		},
 		{
+			name: "procedure division statements",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "P"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										{Statements: []Statement{&MoveStatement{
+											Corresponding: true,
+											Source:        &Identifier{Name: &Word{Value: "G"}},
+											Targets:       []*Identifier{{Name: &Word{Value: "X"}}},
+										}}},
+										{Statements: []Statement{&MoveStatement{
+											Source: &Identifier{
+												Name:       &Word{Value: "A"},
+												Subscripts: []Expr{&Identifier{Name: &Word{Value: "I"}}},
+											},
+											Targets: []*Identifier{{Name: &Word{Value: "B"}}},
+										}}},
+										{Statements: []Statement{&DisplayStatement{
+											Operands: []Type{
+												&StringLiteral{Value: `"x"`},
+												&Identifier{Name: &Word{Value: "Y"}},
+											},
+											Upon: &Word{Value: "CONSOLE"},
+										}}},
+										{Statements: []Statement{&DisplayStatement{
+											Operands:    []Type{&Identifier{Name: &Word{Value: "Z"}}},
+											NoAdvancing: true,
+										}}},
+										{Statements: []Statement{&AcceptStatement{
+											Target: &Identifier{Name: &Word{Value: "W"}},
+											From:   &Word{Value: "DATE"},
+										}}},
+										{Statements: []Statement{&GoToStatement{
+											Targets:     []*Word{{Value: "P1"}, {Value: "P2"}},
+											DependingOn: &Identifier{Name: &Word{Value: "IDX"}},
+										}}},
+										{Statements: []Statement{&ContinueStatement{}}},
+										{Statements: []Statement{&StopStatement{Literal: &StringLiteral{Value: `"DONE"`}}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE CORRESPONDING G TO X.\n" +
+				"    MOVE A(I) TO B.\n" +
+				"    DISPLAY \"x\" Y UPON CONSOLE.\n" +
+				"    DISPLAY Z WITH NO ADVANCING.\n" +
+				"    ACCEPT W FROM DATE.\n" +
+				"    GO TO P1 P2 DEPENDING ON IDX.\n" +
+				"    CONTINUE.\n" +
+				"    STOP \"DONE\".\n",
+		},
+		{
 			name: "environment division",
 			input: &File{
 				Programs: []*Program{
@@ -366,6 +430,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "hello_cob", fixture: "hello.cob"},
 		{name: "environment_cob", fixture: "environment.cob"},
 		{name: "data_cob", fixture: "data.cob"},
+		{name: "procedure_paragraphs_cob", fixture: "procedure_paragraphs.cob"},
 	}
 
 	for _, tc := range testCases {
@@ -427,6 +492,8 @@ func clearTypePos(v Type) {
 		n.Pos = Pos{}
 	case *NumericLiteral:
 		n.Pos = Pos{}
+	case *Identifier:
+		clearIdentifierPos(n)
 	}
 }
 
@@ -475,7 +542,8 @@ func clearParagraphPos(para *Paragraph) {
 	}
 }
 
-// clearStatementPos zeroes the Pos of a statement and its value operands.
+// clearStatementPos zeroes the Pos of a statement and all of its nested operands,
+// identifiers, and expressions.
 func clearStatementPos(stmt Statement) {
 	switch s := stmt.(type) {
 	case *DisplayStatement:
@@ -483,8 +551,81 @@ func clearStatementPos(stmt Statement) {
 		for _, op := range s.Operands {
 			clearTypePos(op)
 		}
+		clearWordPos(s.Upon)
+	case *MoveStatement:
+		s.Pos = Pos{}
+		clearTypePos(s.Source)
+		for _, t := range s.Targets {
+			clearIdentifierPos(t)
+		}
+	case *AcceptStatement:
+		s.Pos = Pos{}
+		clearIdentifierPos(s.Target)
+		clearWordPos(s.From)
+	case *GoToStatement:
+		s.Pos = Pos{}
+		for _, t := range s.Targets {
+			clearWordPos(t)
+		}
+		clearIdentifierPos(s.DependingOn)
+	case *ContinueStatement:
+		s.Pos = Pos{}
 	case *StopStatement:
 		s.Pos = Pos{}
+		clearTypePos(s.Literal)
+	}
+}
+
+// clearIdentifierPos zeroes the Pos of an identifier, its name, qualifiers,
+// subscripts, and reference-modifier (a no-op when nil).
+func clearIdentifierPos(id *Identifier) {
+	if id == nil {
+		return
+	}
+	id.Pos = Pos{}
+	clearWordPos(id.Name)
+	for _, q := range id.Qualifiers {
+		clearWordPos(q)
+	}
+	for _, sub := range id.Subscripts {
+		clearExprPos(sub)
+	}
+	if id.RefMod != nil {
+		id.RefMod.Pos = Pos{}
+		clearExprPos(id.RefMod.Start)
+		clearExprPos(id.RefMod.Length)
+	}
+}
+
+// clearExprPos zeroes the Pos of an arithmetic-expression node and its operands.
+func clearExprPos(e Expr) {
+	switch n := e.(type) {
+	case *Identifier:
+		clearIdentifierPos(n)
+	case *NumericLiteral:
+		if n != nil {
+			n.Pos = Pos{}
+		}
+	case *StringLiteral:
+		if n != nil {
+			n.Pos = Pos{}
+		}
+	case *BinaryExpr:
+		if n != nil {
+			n.Pos = Pos{}
+			clearExprPos(n.Left)
+			clearExprPos(n.Right)
+		}
+	case *UnaryExpr:
+		if n != nil {
+			n.Pos = Pos{}
+			clearExprPos(n.Operand)
+		}
+	case *ParenExpr:
+		if n != nil {
+			n.Pos = Pos{}
+			clearExprPos(n.Expr)
+		}
 	}
 }
 
@@ -736,6 +877,65 @@ func TestPrinterErrors(t *testing.T) {
 				&ProcedureDivision{Paragraphs: []*Paragraph{
 					{Sentences: []*Sentence{{Statements: []Statement{(*StopStatement)(nil)}}}},
 				}},
+			}}}},
+		},
+		{
+			name: "typed-nil move statement",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{(*MoveStatement)(nil)}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "unsupported move source type",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&MoveStatement{Source: fakeValue{}, Targets: []*Identifier{{Name: &Word{Value: "X"}}}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "typed-nil accept statement",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{(*AcceptStatement)(nil)}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "go to with no targets",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{&GoToStatement{}}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "typed-nil continue statement",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{(*ContinueStatement)(nil)}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "empty sentence",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{}}},
+				}},
+			}}}},
+		},
+		{
+			name: "both paragraphs and sections set",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{
+					Paragraphs: []*Paragraph{{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}}},
+					Sections:   []*Section{{Name: &Word{Value: "S"}}},
+				},
 			}}}},
 		},
 		{

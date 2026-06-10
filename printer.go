@@ -725,6 +725,14 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 	switch s := stmt.(type) {
 	case *DisplayStatement:
 		return printDisplayStatement(s, next)
+	case *MoveStatement:
+		return printMoveStatement(s, next)
+	case *AcceptStatement:
+		return printAcceptStatement(s, next)
+	case *GoToStatement:
+		return printGoToStatement(s, next)
+	case *ContinueStatement:
+		return printContinueStatement(s, next)
 	case *StopStatement:
 		return printStopStatement(s, next)
 	default:
@@ -732,11 +740,11 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 	}
 }
 
-// printDisplayStatement prints a DISPLAY statement: the indented verb followed by
-// its space-separated operands. The sentence-terminating period is emitted by the
-// enclosing sentence, not here. The operand slice is a leaf walked with a local
-// loop, not the action machinery. A typed-nil statement (a nil *DisplayStatement
-// element) is rejected with an [UnsupportedNodeError] rather than panicking.
+// printDisplayStatement prints a DISPLAY statement: the indented verb, its
+// space-separated operands, an optional UPON mnemonic, and an optional WITH NO
+// ADVANCING phrase. The sentence-terminating period is emitted by the enclosing
+// sentence, not here. A typed-nil statement is rejected with an
+// [UnsupportedNodeError].
 func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil {
@@ -751,33 +759,133 @@ func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAc
 			pr.write(" ")
 			pr.write(text)
 		}
+		if stmt.Upon != nil {
+			pr.write(" UPON " + stmt.Upon.Value)
+		}
+		if stmt.NoAdvancing {
+			pr.write(" WITH NO ADVANCING")
+		}
+		return next
+	}
+}
+
+// printMoveStatement prints a MOVE statement: the optional CORRESPONDING, the
+// sending operand, "TO", and the receiving identifiers. A typed-nil statement or
+// an unprintable operand is rejected with an [UnsupportedNodeError].
+func printMoveStatement(stmt *MoveStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("    MOVE ")
+		if stmt.Corresponding {
+			pr.write("CORRESPONDING ")
+		}
+		src, ok := valueText(stmt.Source)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Source})
+		}
+		pr.write(src)
+		pr.write(" TO")
+		for _, t := range stmt.Targets {
+			text, ok := identifierText(t)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: t})
+			}
+			pr.write(" " + text)
+		}
+		return next
+	}
+}
+
+// printAcceptStatement prints an ACCEPT statement: the receiving identifier and an
+// optional FROM source. A typed-nil statement or an unprintable target is rejected
+// with an [UnsupportedNodeError].
+func printAcceptStatement(stmt *AcceptStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		target, ok := identifierText(stmt.Target)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Target})
+		}
+		pr.write("    ACCEPT " + target)
+		if stmt.From != nil {
+			pr.write(" FROM " + stmt.From.Value)
+		}
+		return next
+	}
+}
+
+// printGoToStatement prints a GO TO statement: the procedure-names and an optional
+// DEPENDING ON selector. A typed-nil statement, one with no targets, or an
+// unprintable selector is rejected with an [UnsupportedNodeError].
+func printGoToStatement(stmt *GoToStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || len(stmt.Targets) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("    GO TO")
+		for _, t := range stmt.Targets {
+			if t == nil {
+				return failPrint(UnsupportedNodeError{Node: stmt})
+			}
+			pr.write(" " + t.Value)
+		}
+		if stmt.DependingOn != nil {
+			dep, ok := identifierText(stmt.DependingOn)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.DependingOn})
+			}
+			pr.write(" DEPENDING ON " + dep)
+		}
+		return next
+	}
+}
+
+// printContinueStatement prints a CONTINUE statement. A typed-nil statement is
+// rejected with an [UnsupportedNodeError].
+func printContinueStatement(stmt *ContinueStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("    CONTINUE")
 		return next
 	}
 }
 
 // printStopStatement prints a STOP statement (the indented verb; the sentence
-// emits the terminating period). Only the STOP RUN form is produced by the parser
-// today; the bare-STOP branch is forward-looking and harmless. A typed-nil
-// statement (a nil *StopStatement element) is rejected with an
-// [UnsupportedNodeError] rather than panicking.
+// emits the terminating period): STOP RUN or STOP <literal>. A typed-nil statement
+// or a STOP form with neither RUN nor a literal is rejected with an
+// [UnsupportedNodeError].
 func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		if stmt.Run {
+		switch {
+		case stmt.Run:
 			pr.write("    STOP RUN")
-		} else {
-			pr.write("    STOP")
+		case stmt.Literal != nil:
+			text, ok := valueText(stmt.Literal)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Literal})
+			}
+			pr.write("    STOP " + text)
+		default:
+			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
 		return next
 	}
 }
 
-// valueText returns the source text of a value node — a [Word]'s spelling or a
-// [StringLiteral]'s raw lexeme (including its delimiters) — and reports whether
-// the node was a printable value type. The ok flag lets callers surface an
-// explicit [UnsupportedNodeError] instead of emitting a blank operand or name.
+// valueText returns the source text of a value node — a [Word]'s spelling, a
+// literal's raw lexeme (including its delimiters), or an [Identifier]'s rendered
+// reference — and reports whether the node was a printable value type. The ok flag
+// lets callers surface an explicit [UnsupportedNodeError] instead of emitting a
+// blank operand or name.
 func valueText(v Type) (string, bool) {
 	switch n := v.(type) {
 	case *Word:
@@ -795,9 +903,112 @@ func valueText(v Type) (string, bool) {
 			return "", false
 		}
 		return n.Value, true
+	case *Identifier:
+		return identifierText(n)
 	default:
 		return "", false
 	}
+}
+
+// exprText returns the canonical source text of an arithmetic expression and
+// whether it could be rendered. Binary operators are surrounded by single spaces,
+// a unary sign is attached to its operand, and parenthesized groups are preserved
+// so the printed expression re-parses to the same tree.
+func exprText(e Expr) (string, bool) {
+	switch n := e.(type) {
+	case *Identifier:
+		return identifierText(n)
+	case *NumericLiteral:
+		if n == nil {
+			return "", false
+		}
+		return n.Value, true
+	case *StringLiteral:
+		if n == nil {
+			return "", false
+		}
+		return n.Value, true
+	case *BinaryExpr:
+		if n == nil {
+			return "", false
+		}
+		l, ok := exprText(n.Left)
+		if !ok {
+			return "", false
+		}
+		r, ok := exprText(n.Right)
+		if !ok {
+			return "", false
+		}
+		return l + " " + n.Op + " " + r, true
+	case *UnaryExpr:
+		if n == nil {
+			return "", false
+		}
+		o, ok := exprText(n.Operand)
+		if !ok {
+			return "", false
+		}
+		return n.Op + o, true
+	case *ParenExpr:
+		if n == nil {
+			return "", false
+		}
+		inner, ok := exprText(n.Expr)
+		if !ok {
+			return "", false
+		}
+		return "(" + inner + ")", true
+	default:
+		return "", false
+	}
+}
+
+// identifierText returns the canonical source text of a data reference: its name,
+// any IN/OF qualifiers, an optional subscript list, and an optional
+// reference-modifier. Subscripts are space-separated; the reference-modifier uses
+// the "(start:length)" form with the length omitted when nil.
+func identifierText(id *Identifier) (string, bool) {
+	if id == nil || id.Name == nil {
+		return "", false
+	}
+	s := id.Name.Value
+	for _, q := range id.Qualifiers {
+		if q == nil {
+			return "", false
+		}
+		s += " OF " + q.Value
+	}
+	if len(id.Subscripts) > 0 {
+		s += "("
+		for i, sub := range id.Subscripts {
+			t, ok := exprText(sub)
+			if !ok {
+				return "", false
+			}
+			if i > 0 {
+				s += " "
+			}
+			s += t
+		}
+		s += ")"
+	}
+	if id.RefMod != nil {
+		start, ok := exprText(id.RefMod.Start)
+		if !ok {
+			return "", false
+		}
+		s += "(" + start + ":"
+		if id.RefMod.Length != nil {
+			l, ok := exprText(id.RefMod.Length)
+			if !ok {
+				return "", false
+			}
+			s += l
+		}
+		s += ")"
+	}
+	return s, true
 }
 
 // UnsupportedNodeError is returned by [Print] when it encounters an AST node it

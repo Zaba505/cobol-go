@@ -106,19 +106,65 @@ type Sentence struct {
 }
 
 // DisplayStatement is a DISPLAY statement. Pos is the position of the DISPLAY
-// keyword; Operands are the values to display.
+// keyword; Operands are the values to display. Upon is the optional UPON
+// mnemonic-name; NoAdvancing reports the WITH NO ADVANCING phrase.
 type DisplayStatement struct {
-	Pos      Pos
-	Operands []Type
+	Pos         Pos
+	Operands    []Type
+	Upon        *Word
+	NoAdvancing bool
 }
 
 func (*DisplayStatement) statement() {}
 
-// StopStatement is a STOP statement. Pos is the position of the STOP keyword;
-// Run reports the STOP RUN form.
-type StopStatement struct {
+// MoveStatement is a MOVE statement. Pos is the position of the MOVE keyword;
+// Corresponding reports the CORRESPONDING/CORR form; Source is the sending operand
+// (an identifier or literal); Targets are the one or more receiving identifiers.
+type MoveStatement struct {
+	Pos           Pos
+	Corresponding bool
+	Source        Type
+	Targets       []*Identifier
+}
+
+func (*MoveStatement) statement() {}
+
+// AcceptStatement is an ACCEPT statement. Pos is the position of the ACCEPT
+// keyword; Target is the receiving identifier; From is the optional FROM source
+// (a mnemonic-name or a device such as DATE/TIME), nil when absent.
+type AcceptStatement struct {
+	Pos    Pos
+	Target *Identifier
+	From   *Word
+}
+
+func (*AcceptStatement) statement() {}
+
+// GoToStatement is a GO TO statement. Pos is the position of the GO keyword;
+// Targets are the procedure-names; DependingOn is the GO TO … DEPENDING ON
+// selector identifier, nil for the unconditional form.
+type GoToStatement struct {
+	Pos         Pos
+	Targets     []*Word
+	DependingOn *Identifier
+}
+
+func (*GoToStatement) statement() {}
+
+// ContinueStatement is a CONTINUE statement (a no-op). Pos is the position of the
+// CONTINUE keyword.
+type ContinueStatement struct {
 	Pos Pos
-	Run bool
+}
+
+func (*ContinueStatement) statement() {}
+
+// StopStatement is a STOP statement. Pos is the position of the STOP keyword.
+// Run reports the STOP RUN form; otherwise Literal is the STOP <literal> operand.
+type StopStatement struct {
+	Pos     Pos
+	Run     bool
+	Literal Type
 }
 
 func (*StopStatement) statement() {}
@@ -141,6 +187,7 @@ type StringLiteral struct {
 }
 
 func (*StringLiteral) cobol() {}
+func (*StringLiteral) expr()  {}
 
 // NumericLiteral is a numeric literal used as a value, e.g. a VALUE or OCCURS
 // operand. Pos is the position of the literal; Value is its raw lexeme (sign,
@@ -152,6 +199,70 @@ type NumericLiteral struct {
 }
 
 func (*NumericLiteral) cobol() {}
+func (*NumericLiteral) expr()  {}
+
+// Expr is implemented by the arithmetic-expression AST nodes (SPEC.md
+// "arithmetic-expression"): the operator nodes [BinaryExpr], [UnaryExpr], and
+// [ParenExpr], plus the value-leaf nodes [Identifier], [NumericLiteral], and
+// [StringLiteral].
+type Expr interface {
+	expr()
+}
+
+// Identifier is a procedure-division data reference: a data-name with optional
+// IN/OF qualifiers, subscripts, and a reference-modifier (SPEC.md "identifier").
+// Pos is the position of the data-name. An identifier is both a value [Type] and
+// an expression [Expr].
+type Identifier struct {
+	Pos        Pos
+	Name       *Word
+	Qualifiers []*Word            // IN/OF chain, each a more inclusive containing name
+	Subscripts []Expr             // subscript operands; nil when unsubscripted
+	RefMod     *ReferenceModifier // optional reference modifier
+}
+
+func (*Identifier) cobol() {}
+func (*Identifier) expr()  {}
+
+// ReferenceModifier is the "(start:length)" suffix selecting a substring of an
+// identifier. Pos is the position of the opening parenthesis; Length is nil for
+// the open-ended "(start:)" form.
+type ReferenceModifier struct {
+	Pos    Pos
+	Start  Expr
+	Length Expr
+}
+
+// BinaryExpr is a binary arithmetic expression. Pos is the position of its left
+// operand; Op is one of "+", "-", "*", "/", "**". The "+"/"-"/"*"/"/" operators
+// are left-associative and "**" is right-associative.
+type BinaryExpr struct {
+	Pos   Pos
+	Op    string
+	Left  Expr
+	Right Expr
+}
+
+func (*BinaryExpr) expr() {}
+
+// UnaryExpr is a sign-prefixed arithmetic expression. Pos is the position of the
+// sign; Op is "+" or "-".
+type UnaryExpr struct {
+	Pos     Pos
+	Op      string
+	Operand Expr
+}
+
+func (*UnaryExpr) expr() {}
+
+// ParenExpr is a parenthesized arithmetic expression, preserved so the printer can
+// reproduce the grouping. Pos is the position of the opening parenthesis.
+type ParenExpr struct {
+	Pos  Pos
+	Expr Expr
+}
+
+func (*ParenExpr) expr() {}
 
 // EnvironmentDivision is the ENVIRONMENT DIVISION. Pos is the position of the
 // ENVIRONMENT keyword. Both sections are optional; a nil field means the section
@@ -656,6 +767,34 @@ func (p *parser) expectPeriod() (Token, error) {
 // isPeriod reports whether tok is the separator-period symbol.
 func isPeriod(tok Token) bool {
 	return tok.Type == TokenSymbol && string(tok.Value) == "."
+}
+
+// peekSymbol reports whether the next (unconsumed) token is a symbol whose value
+// matches one of vals (e.g. an operator or a parenthesis). End of input and a
+// non-symbol token report false; a tokenizer error is propagated.
+func (p *parser) peekSymbol(vals ...string) (bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if !ok || tok.Type != TokenSymbol {
+		return false, nil
+	}
+	return slices.Contains(vals, string(tok.Value)), nil
+}
+
+// expectSymbol consumes the next token, requiring it to be a symbol whose value
+// matches one of vals. Unlike [parser.expect], it checks the symbol's value, not
+// just its token type.
+func (p *parser) expectSymbol(vals ...string) (Token, error) {
+	tok, err := p.expect(TokenSymbol)
+	if err != nil {
+		return Token{}, err
+	}
+	if !slices.Contains(vals, string(tok.Value)) {
+		return Token{}, UnexpectedTokenError{Expected: []TokenType{TokenSymbol}, Actual: tok}
+	}
+	return tok, nil
 }
 
 // keywordIs reports whether tok is an identifier whose value matches one of kws
@@ -2093,6 +2232,53 @@ func parseStatementOpt(stop stopFunc) parserAction[*[]Statement] {
 	}
 }
 
+// procedureVerbs are the statement-leading verb keywords the parser recognizes as
+// the start of a statement. Any of them ends a preceding operand list (a COBOL
+// reserved word cannot be a data-name, so an operand list cannot contain one).
+var procedureVerbs = []string{
+	"DISPLAY", "MOVE", "ACCEPT", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
+	"COMPUTE", "IF", "PERFORM", "GO", "CONTINUE", "STOP",
+}
+
+// procedureScopeTerminators are the explicit scope terminators that close one
+// statement without ending the sentence.
+var procedureScopeTerminators = []string{
+	"END-IF", "END-PERFORM", "END-COMPUTE", "END-ADD", "END-SUBTRACT",
+	"END-MULTIPLY", "END-DIVIDE",
+}
+
+// procedurePhraseKeywords are the clause/phrase keywords that introduce a part of
+// a statement and so end a preceding operand list.
+var procedurePhraseKeywords = []string{
+	"TO", "FROM", "BY", "INTO", "GIVING", "REMAINDER", "UPON", "ROUNDED",
+	"CORRESPONDING", "CORR", "THEN", "ELSE", "THROUGH", "THRU", "TIMES",
+	"UNTIL", "VARYING", "WITH", "TEST", "BEFORE", "AFTER", "NO", "ADVANCING",
+	"DEPENDING", "ON", "RUN", "WHEN",
+}
+
+// isStatementVerb reports whether tok is a recognized statement-leading verb.
+func isStatementVerb(tok Token) bool { return keywordIs(tok, procedureVerbs...) }
+
+// isScopeTerminator reports whether tok is an explicit scope terminator (END-IF …).
+func isScopeTerminator(tok Token) bool { return keywordIs(tok, procedureScopeTerminators...) }
+
+// isPhraseKeyword reports whether tok is a statement clause/phrase keyword.
+func isPhraseKeyword(tok Token) bool { return keywordIs(tok, procedurePhraseKeywords...) }
+
+// isOperandStart reports whether tok can begin an operand in a statement's operand
+// list. Literals always can; an identifier can unless it is a reserved verb, a
+// scope terminator, or a phrase keyword — any of which ends the list.
+func isOperandStart(tok Token) bool {
+	switch tok.Type {
+	case TokenString, TokenNumber:
+		return true
+	case TokenIdentifier:
+		return !isStatementVerb(tok) && !isScopeTerminator(tok) && !isPhraseKeyword(tok)
+	default:
+		return false
+	}
+}
+
 // parseStatement reads one statement's verb and dispatches to its parser. The
 // statement parsers leave the sentence-terminating period for the enclosing
 // sentence loop and the next verb for the enclosing statement list.
@@ -2104,39 +2290,512 @@ func parseStatement(p *parser) (Statement, error) {
 	switch {
 	case keywordIs(tok, "DISPLAY"):
 		return parseDisplayStatement(p, tok)
+	case keywordIs(tok, "MOVE"):
+		return parseMoveStatement(p, tok)
+	case keywordIs(tok, "ACCEPT"):
+		return parseAcceptStatement(p, tok)
+	case keywordIs(tok, "GO"):
+		return parseGoToStatement(p, tok)
+	case keywordIs(tok, "CONTINUE"):
+		return &ContinueStatement{Pos: tok.Pos}, nil
 	case keywordIs(tok, "STOP"):
 		return parseStopStatement(p, tok)
 	default:
-		return nil, unexpectedKeyword(tok, "DISPLAY", "STOP")
+		return nil, unexpectedKeyword(tok, "DISPLAY", "MOVE", "ACCEPT", "GO", "CONTINUE", "STOP")
 	}
 }
 
-// parseDisplayStatement parses a DISPLAY statement whose verb kw has already been
-// read, collecting operands. Only literal operands are recognized in this slice;
-// identifier operands, UPON, and NO ADVANCING are added by a later step.
-func parseDisplayStatement(p *parser, kw Token) (Statement, error) {
-	stmt := &DisplayStatement{Pos: kw.Pos}
+// parseOperandList collects operands until the next token cannot begin one
+// (a period, verb, scope terminator, or phrase keyword).
+func parseOperandList(p *parser) ([]Type, error) {
+	var ops []Type
 	for {
 		tok, err, ok := p.peek()
 		if err != nil {
 			return nil, err
 		}
-		if !ok || tok.Type != TokenString {
-			break
+		if !ok || !isOperandStart(tok) {
+			return ops, nil
 		}
+		op, err := parseOperand(p)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+	}
+}
+
+// parseDisplayStatement parses a DISPLAY statement whose verb kw has already been
+// read: its operands, an optional UPON mnemonic, and an optional [WITH] NO
+// ADVANCING phrase.
+func parseDisplayStatement(p *parser, kw Token) (Statement, error) {
+	ops, err := parseOperandList(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt := &DisplayStatement{Pos: kw.Pos, Operands: ops}
+
+	upon, err := p.peekKeyword("UPON")
+	if err != nil {
+		return nil, err
+	}
+	if upon {
 		p.consume()
-		stmt.Operands = append(stmt.Operands, valueNode(tok))
+		m, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Upon = &Word{Pos: m.Pos, Value: string(m.Value)}
+	}
+
+	noAdv, err := parseNoAdvancing(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.NoAdvancing = noAdv
+	return stmt, nil
+}
+
+// parseNoAdvancing consumes an optional "[WITH] NO ADVANCING" phrase and reports
+// whether it was present. In a DISPLAY a leading WITH can only introduce NO
+// ADVANCING, so it is safe to consume before requiring NO ADVANCING.
+func parseNoAdvancing(p *parser) (bool, error) {
+	withIs, err := p.peekKeyword("WITH")
+	if err != nil {
+		return false, err
+	}
+	if withIs {
+		p.consume()
+		if _, err := p.expectKeyword("NO"); err != nil {
+			return false, err
+		}
+		if _, err := p.expectKeyword("ADVANCING"); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	noIs, err := p.peekKeyword("NO")
+	if err != nil {
+		return false, err
+	}
+	if noIs {
+		p.consume()
+		if _, err := p.expectKeyword("ADVANCING"); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// parseMoveStatement parses a MOVE statement whose verb kw has already been read:
+// an optional CORRESPONDING/CORR, a sending operand, "TO", and one or more
+// receiving identifiers.
+func parseMoveStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &MoveStatement{Pos: kw.Pos}
+
+	corr, err := p.peekKeyword("CORRESPONDING", "CORR")
+	if err != nil {
+		return nil, err
+	}
+	if corr {
+		p.consume()
+		stmt.Corresponding = true
+	}
+
+	src, err := parseOperand(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Source = src
+
+	if _, err := p.expectKeyword("TO"); err != nil {
+		return nil, err
+	}
+
+	targets, err := parseIdentifierList(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Targets = targets
+	return stmt, nil
+}
+
+// parseIdentifierList parses one or more receiving identifiers, stopping at the
+// first token that cannot begin an operand.
+func parseIdentifierList(p *parser) ([]*Identifier, error) {
+	first, err := parseIdentifierToken(p)
+	if err != nil {
+		return nil, err
+	}
+	ids := []*Identifier{first}
+	for {
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !isOperandStart(tok) {
+			return ids, nil
+		}
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+}
+
+// parseAcceptStatement parses an ACCEPT statement whose verb kw has already been
+// read: a receiving identifier and an optional FROM source.
+func parseAcceptStatement(p *parser, kw Token) (Statement, error) {
+	target, err := parseIdentifierToken(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt := &AcceptStatement{Pos: kw.Pos, Target: target}
+
+	from, err := p.peekKeyword("FROM")
+	if err != nil {
+		return nil, err
+	}
+	if from {
+		p.consume()
+		src, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		stmt.From = &Word{Pos: src.Pos, Value: string(src.Value)}
 	}
 	return stmt, nil
 }
 
-// parseStopStatement parses a STOP RUN statement whose verb kw has already been
-// read. The STOP <literal> form is added by a later step.
-func parseStopStatement(p *parser, kw Token) (Statement, error) {
-	if _, err := p.expectKeyword("RUN"); err != nil {
+// parseGoToStatement parses a GO TO statement whose verb kw has already been read:
+// an optional TO, one or more procedure-names, and an optional DEPENDING ON
+// selector.
+func parseGoToStatement(p *parser, kw Token) (Statement, error) {
+	if err := p.skipOptionalKeyword("TO"); err != nil {
 		return nil, err
 	}
-	return &StopStatement{Pos: kw.Pos, Run: true}, nil
+	stmt := &GoToStatement{Pos: kw.Pos}
+
+	for {
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || tok.Type != TokenIdentifier || isStatementVerb(tok) ||
+			isScopeTerminator(tok) || isPhraseKeyword(tok) {
+			break
+		}
+		p.consume()
+		stmt.Targets = append(stmt.Targets, &Word{Pos: tok.Pos, Value: string(tok.Value)})
+	}
+
+	depending, err := p.peekKeyword("DEPENDING")
+	if err != nil {
+		return nil, err
+	}
+	if depending {
+		p.consume()
+		if err := p.skipOptionalKeyword("ON"); err != nil {
+			return nil, err
+		}
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.DependingOn = id
+	}
+
+	if len(stmt.Targets) == 0 {
+		tok, _, _ := p.peek()
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+	}
+	return stmt, nil
+}
+
+// parseStopStatement parses a STOP statement whose verb kw has already been read:
+// either STOP RUN or STOP <literal>.
+func parseStopStatement(p *parser, kw Token) (Statement, error) {
+	run, err := p.peekKeyword("RUN")
+	if err != nil {
+		return nil, err
+	}
+	if run {
+		p.consume()
+		return &StopStatement{Pos: kw.Pos, Run: true}, nil
+	}
+
+	lit, err := p.expect(TokenString, TokenNumber)
+	if err != nil {
+		return nil, err
+	}
+	return &StopStatement{Pos: kw.Pos, Literal: valueNode(lit)}, nil
+}
+
+// The following identifier and arithmetic-expression sub-parsers are recursive
+// descent, not part of the statement action machinery. The action-loop rule
+// (CLAUDE.md) governs AST-accreting loops over divisions/sections/paragraphs/
+// statements; an arithmetic expression or identifier reference is a leaf
+// sub-grammar with its own natural precedence recursion, so plain recursive
+// helpers returning (Expr, error) / (*Identifier, error) are idiomatic here.
+
+// parseOperand parses an operand: an identifier or a literal (SPEC.md "operand").
+// A figurative constant (ZERO, SPACES, …) tokenizes as an identifier and so parses
+// as a single-name [Identifier]; its identity is its spelling.
+func parseOperand(p *parser) (Type, error) {
+	tok, err := p.expect(TokenIdentifier, TokenString, TokenNumber)
+	if err != nil {
+		return nil, err
+	}
+	switch tok.Type {
+	case TokenString:
+		return &StringLiteral{Pos: tok.Pos, Value: string(tok.Value)}, nil
+	case TokenNumber:
+		return &NumericLiteral{Pos: tok.Pos, Value: string(tok.Value)}, nil
+	default:
+		return parseIdentifier(p, tok)
+	}
+}
+
+// parseIdentifierToken consumes one identifier token and parses the data
+// reference it begins, including any IN/OF qualification, subscript, or
+// reference-modifier.
+func parseIdentifierToken(p *parser) (*Identifier, error) {
+	tok, err := p.expect(TokenIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	return parseIdentifier(p, tok)
+}
+
+// parseIdentifier parses a data reference whose data-name token name has already
+// been read: optional IN/OF qualification followed by an optional parenthesized
+// subscript or reference-modifier (SPEC.md "identifier").
+func parseIdentifier(p *parser, name Token) (*Identifier, error) {
+	id := &Identifier{Pos: name.Pos, Name: &Word{Pos: name.Pos, Value: string(name.Value)}}
+
+	for {
+		is, err := p.peekKeyword("IN", "OF")
+		if err != nil {
+			return nil, err
+		}
+		if !is {
+			break
+		}
+		p.consume() // IN / OF
+		q, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		id.Qualifiers = append(id.Qualifiers, &Word{Pos: q.Pos, Value: string(q.Value)})
+	}
+
+	open, err := p.peekSymbol("(")
+	if err != nil {
+		return nil, err
+	}
+	if open {
+		if err := parseSubscriptOrRefMod(p, id); err != nil {
+			return nil, err
+		}
+	}
+	return id, nil
+}
+
+// parseSubscriptOrRefMod parses the parenthesized suffix of an identifier. A
+// top-level ":" marks a reference-modifier "(start:length)"; otherwise it is a
+// subscript list "(sub {sub})". The opening parenthesis has not yet been consumed.
+func parseSubscriptOrRefMod(p *parser, id *Identifier) error {
+	open, err := p.expectSymbol("(")
+	if err != nil {
+		return err
+	}
+	first, err := parseExpr(p)
+	if err != nil {
+		return err
+	}
+
+	isColon, err := p.peekSymbol(":")
+	if err != nil {
+		return err
+	}
+	if isColon {
+		p.consume() // ":"
+		rm := &ReferenceModifier{Pos: open.Pos, Start: first}
+		closing, err := p.peekSymbol(")")
+		if err != nil {
+			return err
+		}
+		if !closing {
+			length, err := parseExpr(p)
+			if err != nil {
+				return err
+			}
+			rm.Length = length
+		}
+		if _, err := p.expectSymbol(")"); err != nil {
+			return err
+		}
+		id.RefMod = rm
+		return nil
+	}
+
+	subs := []Expr{first}
+	for {
+		closing, err := p.peekSymbol(")")
+		if err != nil {
+			return err
+		}
+		if closing {
+			break
+		}
+		sub, err := parseExpr(p)
+		if err != nil {
+			return err
+		}
+		subs = append(subs, sub)
+	}
+	if _, err := p.expectSymbol(")"); err != nil {
+		return err
+	}
+	id.Subscripts = subs
+	return nil
+}
+
+// parseExpr parses an arithmetic expression: terms joined by "+"/"-"
+// (left-associative).
+func parseExpr(p *parser) (Expr, error) {
+	left, err := parseTerm(p)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		is, err := p.peekSymbol("+", "-")
+		if err != nil {
+			return nil, err
+		}
+		if !is {
+			return left, nil
+		}
+		op, _ := p.expectSymbol("+", "-")
+		right, err := parseTerm(p)
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryExpr{Pos: exprPos(left), Op: string(op.Value), Left: left, Right: right}
+	}
+}
+
+// parseTerm parses a term: factors joined by "*"/"/" (left-associative).
+func parseTerm(p *parser) (Expr, error) {
+	left, err := parseFactor(p)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		is, err := p.peekSymbol("*", "/")
+		if err != nil {
+			return nil, err
+		}
+		if !is {
+			return left, nil
+		}
+		op, _ := p.expectSymbol("*", "/")
+		right, err := parseFactor(p)
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryExpr{Pos: exprPos(left), Op: string(op.Value), Left: left, Right: right}
+	}
+}
+
+// parseFactor parses a factor: an optional leading sign, a primary, and a
+// right-associative chain of "**" exponentiations.
+func parseFactor(p *parser) (Expr, error) {
+	signed, err := p.peekSymbol("+", "-")
+	if err != nil {
+		return nil, err
+	}
+	if signed {
+		op, _ := p.expectSymbol("+", "-")
+		operand, err := parseFactor(p)
+		if err != nil {
+			return nil, err
+		}
+		return &UnaryExpr{Pos: op.Pos, Op: string(op.Value), Operand: operand}, nil
+	}
+
+	left, err := parsePrimary(p)
+	if err != nil {
+		return nil, err
+	}
+	is, err := p.peekSymbol("**")
+	if err != nil {
+		return nil, err
+	}
+	if !is {
+		return left, nil
+	}
+	op, _ := p.expectSymbol("**")
+	right, err := parseFactor(p) // right-associative
+	if err != nil {
+		return nil, err
+	}
+	return &BinaryExpr{Pos: exprPos(left), Op: string(op.Value), Left: left, Right: right}, nil
+}
+
+// parsePrimary parses a primary: a parenthesized expression or an operand.
+func parsePrimary(p *parser) (Expr, error) {
+	open, err := p.peekSymbol("(")
+	if err != nil {
+		return nil, err
+	}
+	if open {
+		lp, _ := p.expectSymbol("(")
+		inner, err := parseExpr(p)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expectSymbol(")"); err != nil {
+			return nil, err
+		}
+		return &ParenExpr{Pos: lp.Pos, Expr: inner}, nil
+	}
+
+	tok, err := p.expect(TokenIdentifier, TokenString, TokenNumber)
+	if err != nil {
+		return nil, err
+	}
+	switch tok.Type {
+	case TokenString:
+		return &StringLiteral{Pos: tok.Pos, Value: string(tok.Value)}, nil
+	case TokenNumber:
+		return &NumericLiteral{Pos: tok.Pos, Value: string(tok.Value)}, nil
+	default:
+		return parseIdentifier(p, tok)
+	}
+}
+
+// exprPos returns the source position of an expression node.
+func exprPos(e Expr) Pos {
+	switch n := e.(type) {
+	case *Identifier:
+		return n.Pos
+	case *NumericLiteral:
+		return n.Pos
+	case *StringLiteral:
+		return n.Pos
+	case *BinaryExpr:
+		return n.Pos
+	case *UnaryExpr:
+		return n.Pos
+	case *ParenExpr:
+		return n.Pos
+	default:
+		return Pos{}
+	}
 }
 
 // UnexpectedEndOfTokensError is returned when the parser needs another token
