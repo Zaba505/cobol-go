@@ -159,6 +159,45 @@ type ContinueStatement struct {
 
 func (*ContinueStatement) statement() {}
 
+// ArithmeticStatement is an ADD, SUBTRACT, MULTIPLY, or DIVIDE statement. Pos is
+// the position of the verb; Verb is the canonical verb keyword. Operands are the
+// source operands; Connector is the keyword joining them to the targets ("TO",
+// "FROM", "BY", or "INTO", empty for the GIVING-only form); Targets are the
+// in-place receiving identifiers; Giving is the optional GIVING result; Rounded
+// reports a ROUNDED phrase; EndScope reports an explicit END-<verb> terminator.
+type ArithmeticStatement struct {
+	Pos       Pos
+	Verb      string
+	Operands  []Type
+	Connector string
+	Targets   []*Identifier
+	Giving    *Identifier
+	Rounded   bool
+	EndScope  bool
+}
+
+func (*ArithmeticStatement) statement() {}
+
+// ComputeStatement is a COMPUTE statement. Pos is the position of the COMPUTE
+// keyword; Targets are the receiving fields (each optionally ROUNDED); Expr is the
+// assigned arithmetic expression; EndScope reports an explicit END-COMPUTE.
+type ComputeStatement struct {
+	Pos      Pos
+	Targets  []ComputeTarget
+	Expr     Expr
+	EndScope bool
+}
+
+func (*ComputeStatement) statement() {}
+
+// ComputeTarget is one receiving field of a COMPUTE statement. Pos is the position
+// of the identifier; Rounded reports a trailing ROUNDED phrase.
+type ComputeTarget struct {
+	Pos     Pos
+	Name    *Identifier
+	Rounded bool
+}
+
 // StopStatement is a STOP statement. Pos is the position of the STOP keyword.
 // Run reports the STOP RUN form; otherwise Literal is the STOP <literal> operand.
 type StopStatement struct {
@@ -2294,6 +2333,10 @@ func parseStatement(p *parser) (Statement, error) {
 		return parseMoveStatement(p, tok)
 	case keywordIs(tok, "ACCEPT"):
 		return parseAcceptStatement(p, tok)
+	case keywordIs(tok, "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE"):
+		return parseArithmeticStatement(p, tok)
+	case keywordIs(tok, "COMPUTE"):
+		return parseComputeStatement(p, tok)
 	case keywordIs(tok, "GO"):
 		return parseGoToStatement(p, tok)
 	case keywordIs(tok, "CONTINUE"):
@@ -2301,7 +2344,8 @@ func parseStatement(p *parser) (Statement, error) {
 	case keywordIs(tok, "STOP"):
 		return parseStopStatement(p, tok)
 	default:
-		return nil, unexpectedKeyword(tok, "DISPLAY", "MOVE", "ACCEPT", "GO", "CONTINUE", "STOP")
+		return nil, unexpectedKeyword(tok, "DISPLAY", "MOVE", "ACCEPT",
+			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "GO", "CONTINUE", "STOP")
 	}
 }
 
@@ -2532,6 +2576,144 @@ func parseStopStatement(p *parser, kw Token) (Statement, error) {
 		return nil, err
 	}
 	return &StopStatement{Pos: kw.Pos, Literal: valueNode(lit)}, nil
+}
+
+// parseArithmeticStatement parses an ADD/SUBTRACT/MULTIPLY/DIVIDE statement whose
+// verb kw has already been read: source operands, an optional connector
+// (TO/FROM/BY/INTO) with in-place targets, an optional GIVING result, an optional
+// ROUNDED, and an optional END-<verb> scope terminator. REMAINDER, multiple GIVING
+// targets, and ON SIZE ERROR are deferred.
+func parseArithmeticStatement(p *parser, kw Token) (Statement, error) {
+	verb := strings.ToUpper(string(kw.Value))
+	stmt := &ArithmeticStatement{Pos: kw.Pos, Verb: verb}
+
+	ops, err := parseOperandList(p)
+	if err != nil {
+		return nil, err
+	}
+	if len(ops) == 0 {
+		tok, _, _ := p.peek()
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier, TokenNumber}, Actual: tok}
+	}
+	stmt.Operands = ops
+
+	connector, err := p.peekKeyword("TO", "FROM", "BY", "INTO")
+	if err != nil {
+		return nil, err
+	}
+	if connector {
+		conn, _ := p.expectKeyword("TO", "FROM", "BY", "INTO")
+		stmt.Connector = strings.ToUpper(string(conn.Value))
+		targets, err := parseIdentifierList(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Targets = targets
+		rounded, err := p.peekKeyword("ROUNDED")
+		if err != nil {
+			return nil, err
+		}
+		if rounded {
+			p.consume()
+			stmt.Rounded = true
+		}
+	}
+
+	giving, err := p.peekKeyword("GIVING")
+	if err != nil {
+		return nil, err
+	}
+	if giving {
+		p.consume()
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Giving = id
+		rounded, err := p.peekKeyword("ROUNDED")
+		if err != nil {
+			return nil, err
+		}
+		if rounded {
+			p.consume()
+			stmt.Rounded = true
+		}
+	}
+
+	if len(stmt.Targets) == 0 && stmt.Giving == nil {
+		tok, _, _ := p.peek()
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+	}
+
+	endScope, err := p.peekKeyword("END-" + verb)
+	if err != nil {
+		return nil, err
+	}
+	if endScope {
+		p.consume()
+		stmt.EndScope = true
+	}
+	return stmt, nil
+}
+
+// parseComputeStatement parses a COMPUTE statement whose verb kw has already been
+// read: one or more receiving fields (each optionally ROUNDED), "=" (or EQUAL), an
+// arithmetic expression, and an optional END-COMPUTE. ON SIZE ERROR is deferred.
+func parseComputeStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &ComputeStatement{Pos: kw.Pos}
+
+	for {
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		target := ComputeTarget{Pos: id.Pos, Name: id}
+		rounded, err := p.peekKeyword("ROUNDED")
+		if err != nil {
+			return nil, err
+		}
+		if rounded {
+			p.consume()
+			target.Rounded = true
+		}
+		stmt.Targets = append(stmt.Targets, target)
+
+		isEq, err := p.peekSymbol("=")
+		if err != nil {
+			return nil, err
+		}
+		isEqual, err := p.peekKeyword("EQUAL")
+		if err != nil {
+			return nil, err
+		}
+		if isEq || isEqual {
+			break
+		}
+	}
+
+	if isEqual, err := p.peekKeyword("EQUAL"); err != nil {
+		return nil, err
+	} else if isEqual {
+		p.consume()
+	} else if _, err := p.expectSymbol("="); err != nil {
+		return nil, err
+	}
+
+	expr, err := parseExpr(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Expr = expr
+
+	endScope, err := p.peekKeyword("END-COMPUTE")
+	if err != nil {
+		return nil, err
+	}
+	if endScope {
+		p.consume()
+		stmt.EndScope = true
+	}
+	return stmt, nil
 }
 
 // The following identifier and arithmetic-expression sub-parsers are recursive

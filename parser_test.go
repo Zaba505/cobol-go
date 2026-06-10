@@ -398,6 +398,65 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "compute with operator precedence",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    COMPUTE X = A + B * C.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ComputeStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Targets: []ComputeTarget{
+															{
+																Pos:  Pos{Line: 4, Column: 13},
+																Name: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "X"}},
+															},
+														},
+														// A + (B * C): "*" binds tighter than "+".
+														Expr: &BinaryExpr{
+															Pos:  Pos{Line: 4, Column: 17},
+															Op:   "+",
+															Left: &Identifier{Pos: Pos{Line: 4, Column: 17}, Name: &Word{Pos: Pos{Line: 4, Column: 17}, Value: "A"}},
+															Right: &BinaryExpr{
+																Pos:   Pos{Line: 4, Column: 21},
+																Op:    "*",
+																Left:  &Identifier{Pos: Pos{Line: 4, Column: 21}, Name: &Word{Pos: Pos{Line: 4, Column: 21}, Value: "B"}},
+																Right: &Identifier{Pos: Pos{Line: 4, Column: 25}, Name: &Word{Pos: Pos{Line: 4, Column: 25}, Value: "C"}},
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "environment division with both sections",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. ENV.\n" +

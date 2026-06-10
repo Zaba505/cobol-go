@@ -225,6 +225,59 @@ func TestPrinter(t *testing.T) {
 				"    STOP \"DONE\".\n",
 		},
 		{
+			name: "procedure division arithmetic",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "A"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										{Statements: []Statement{&ArithmeticStatement{
+											Verb:      "ADD",
+											Operands:  []Type{&Identifier{Name: &Word{Value: "A"}}, &Identifier{Name: &Word{Value: "B"}}},
+											Connector: "TO",
+											Targets:   []*Identifier{{Name: &Word{Value: "C"}}},
+										}}},
+										{Statements: []Statement{&ArithmeticStatement{
+											Verb:      "SUBTRACT",
+											Operands:  []Type{&Identifier{Name: &Word{Value: "A"}}},
+											Connector: "FROM",
+											Targets:   []*Identifier{{Name: &Word{Value: "B"}}},
+											Giving:    &Identifier{Name: &Word{Value: "C"}},
+											Rounded:   true,
+										}}},
+										{Statements: []Statement{&ComputeStatement{
+											Targets: []ComputeTarget{{Name: &Identifier{Name: &Word{Value: "Z"}}, Rounded: true}},
+											Expr: &BinaryExpr{
+												Op: "*",
+												Left: &ParenExpr{Expr: &BinaryExpr{
+													Op:    "+",
+													Left:  &Identifier{Name: &Word{Value: "A"}},
+													Right: &Identifier{Name: &Word{Value: "B"}},
+												}},
+												Right: &Identifier{Name: &Word{Value: "C"}},
+											},
+											EndScope: true,
+										}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. A.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    ADD A B TO C.\n" +
+				"    SUBTRACT A FROM B GIVING C ROUNDED.\n" +
+				"    COMPUTE Z ROUNDED = (A + B) * C END-COMPUTE.\n",
+		},
+		{
 			name: "environment division",
 			input: &File{
 				Programs: []*Program{
@@ -431,6 +484,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "environment_cob", fixture: "environment.cob"},
 		{name: "data_cob", fixture: "data.cob"},
 		{name: "procedure_paragraphs_cob", fixture: "procedure_paragraphs.cob"},
+		{name: "procedure_arithmetic_cob", fixture: "procedure_arithmetic.cob"},
 	}
 
 	for _, tc := range testCases {
@@ -562,6 +616,22 @@ func clearStatementPos(stmt Statement) {
 		s.Pos = Pos{}
 		clearIdentifierPos(s.Target)
 		clearWordPos(s.From)
+	case *ArithmeticStatement:
+		s.Pos = Pos{}
+		for _, op := range s.Operands {
+			clearTypePos(op)
+		}
+		for _, t := range s.Targets {
+			clearIdentifierPos(t)
+		}
+		clearIdentifierPos(s.Giving)
+	case *ComputeStatement:
+		s.Pos = Pos{}
+		for i := range s.Targets {
+			s.Targets[i].Pos = Pos{}
+			clearIdentifierPos(s.Targets[i].Name)
+		}
+		clearExprPos(s.Expr)
 	case *GoToStatement:
 		s.Pos = Pos{}
 		for _, t := range s.Targets {

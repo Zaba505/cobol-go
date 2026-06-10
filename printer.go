@@ -729,6 +729,10 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 		return printMoveStatement(s, next)
 	case *AcceptStatement:
 		return printAcceptStatement(s, next)
+	case *ArithmeticStatement:
+		return printArithmeticStatement(s, next)
+	case *ComputeStatement:
+		return printComputeStatement(s, next)
 	case *GoToStatement:
 		return printGoToStatement(s, next)
 	case *ContinueStatement:
@@ -813,6 +817,84 @@ func printAcceptStatement(stmt *AcceptStatement, next printerAction) printerActi
 		pr.write("    ACCEPT " + target)
 		if stmt.From != nil {
 			pr.write(" FROM " + stmt.From.Value)
+		}
+		return next
+	}
+}
+
+// printArithmeticStatement prints an ADD/SUBTRACT/MULTIPLY/DIVIDE statement: the
+// verb, source operands, optional connector and in-place targets, optional GIVING
+// result, optional ROUNDED, and optional END-<verb> terminator. A statement with
+// no verb, no operands, or no receiving field is rejected with an
+// [UnsupportedNodeError].
+func printArithmeticStatement(stmt *ArithmeticStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.Verb == "" || len(stmt.Operands) == 0 ||
+			(len(stmt.Targets) == 0 && stmt.Giving == nil) {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("    " + stmt.Verb)
+		for _, op := range stmt.Operands {
+			text, ok := valueText(op)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: op})
+			}
+			pr.write(" " + text)
+		}
+		if stmt.Connector != "" {
+			pr.write(" " + stmt.Connector)
+			for _, t := range stmt.Targets {
+				text, ok := identifierText(t)
+				if !ok {
+					return failPrint(UnsupportedNodeError{Node: t})
+				}
+				pr.write(" " + text)
+			}
+		}
+		if stmt.Giving != nil {
+			text, ok := identifierText(stmt.Giving)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Giving})
+			}
+			pr.write(" GIVING " + text)
+		}
+		if stmt.Rounded {
+			pr.write(" ROUNDED")
+		}
+		if stmt.EndScope {
+			pr.write(" END-" + stmt.Verb)
+		}
+		return next
+	}
+}
+
+// printComputeStatement prints a COMPUTE statement: the receiving fields (each
+// optionally ROUNDED), "=", the arithmetic expression, and an optional
+// END-COMPUTE. A statement with no targets or an unprintable expression is
+// rejected with an [UnsupportedNodeError].
+func printComputeStatement(stmt *ComputeStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || len(stmt.Targets) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("    COMPUTE")
+		for _, tgt := range stmt.Targets {
+			text, ok := identifierText(tgt.Name)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: tgt.Name})
+			}
+			pr.write(" " + text)
+			if tgt.Rounded {
+				pr.write(" ROUNDED")
+			}
+		}
+		e, ok := exprText(stmt.Expr)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Expr})
+		}
+		pr.write(" = " + e)
+		if stmt.EndScope {
+			pr.write(" END-COMPUTE")
 		}
 		return next
 	}
