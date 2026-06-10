@@ -29,6 +29,100 @@ func TestPrinter(t *testing.T) {
 			expected: "",
 		},
 		{
+			name: "data division",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "DATADEMO"}},
+							},
+							&DataDivision{
+								File: &FileSection{
+									Entries: []*FileDescriptionEntry{
+										{
+											Kind: "FD",
+											Name: &Word{Value: "CUST-FILE"},
+											Records: []*DataDescriptionEntry{
+												{Level: 1, Name: &Word{Value: "CUST-REC"}},
+												{Level: 5, Name: &Word{Value: "CUST-ID"}, Clauses: []DataClause{&PictureClause{Picture: "9(5)"}}},
+												{Level: 5, Filler: true, Clauses: []DataClause{&PictureClause{Picture: "X(20)"}}},
+											},
+										},
+									},
+								},
+								WorkingStorage: &DataSection{
+									Entries: []*DataDescriptionEntry{
+										{Level: 1, Name: &Word{Value: "COUNTER"}, Clauses: []DataClause{
+											&PictureClause{Picture: "9(2)"},
+											&UsageClause{Usage: "COMP-3"},
+											&ValueClause{Values: []ValueSpec{{From: &Word{Value: "ZERO"}}}},
+										}},
+										{Level: 1, Name: &Word{Value: "STATUS-FLAG"}, Clauses: []DataClause{
+											&PictureClause{Picture: "X"},
+											&ValueClause{Values: []ValueSpec{{From: &StringLiteral{Value: `"N"`}}}},
+										}},
+										{Level: 88, Name: &Word{Value: "PENDING"}, Clauses: []DataClause{
+											&ValueClause{Values: []ValueSpec{{From: &StringLiteral{Value: `"A"`}, Through: &StringLiteral{Value: `"M"`}}}},
+										}},
+										{Level: 5, Name: &Word{Value: "ITEM"}, Clauses: []DataClause{
+											&OccursClause{
+												Min:         &NumericLiteral{Value: "1"},
+												Max:         &NumericLiteral{Value: "10"},
+												DependingOn: &Word{Value: "N"},
+												Keys:        []OccursKey{{Ascending: true, Name: &Word{Value: "K"}}},
+												IndexedBy:   &Word{Value: "IDX"},
+											},
+											&PictureClause{Picture: "9(4)"},
+										}},
+										{Level: 5, Name: &Word{Value: "F3"}, Clauses: []DataClause{
+											&PictureClause{Picture: "S9"},
+											&SignClause{Position: "LEADING", Separate: true},
+											&JustifiedClause{},
+											&SynchronizedClause{Direction: "LEFT"},
+											&BlankWhenZeroClause{},
+											&GlobalClause{},
+											&ExternalClause{},
+										}},
+										{Level: 66, Name: &Word{Value: "RN"}, Clauses: []DataClause{
+											&RenamesClause{From: &Word{Value: "A"}, Through: &Word{Value: "B"}},
+										}},
+									},
+								},
+								Linkage: &DataSection{
+									Entries: []*DataDescriptionEntry{
+										{Level: 1, Name: &Word{Value: "LK"}, Clauses: []DataClause{&PictureClause{Picture: "X(10)"}}},
+									},
+								},
+							},
+							&ProcedureDivision{
+								Statements: []Statement{&StopStatement{Run: true}},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. DATADEMO.\n" +
+				"DATA DIVISION.\n" +
+				"FILE SECTION.\n" +
+				"FD CUST-FILE.\n" +
+				"    01 CUST-REC.\n" +
+				"    05 CUST-ID PIC 9(5).\n" +
+				"    05 FILLER PIC X(20).\n" +
+				"WORKING-STORAGE SECTION.\n" +
+				"    01 COUNTER PIC 9(2) USAGE COMP-3 VALUE ZERO.\n" +
+				"    01 STATUS-FLAG PIC X VALUE \"N\".\n" +
+				"    88 PENDING VALUE \"A\" THROUGH \"M\".\n" +
+				"    05 ITEM OCCURS 1 TO 10 TIMES DEPENDING ON N ASCENDING KEY IS K INDEXED BY IDX PIC 9(4).\n" +
+				"    05 F3 PIC S9 SIGN IS LEADING SEPARATE CHARACTER JUSTIFIED RIGHT SYNCHRONIZED LEFT BLANK WHEN ZERO GLOBAL EXTERNAL.\n" +
+				"    66 RN RENAMES A THROUGH B.\n" +
+				"LINKAGE SECTION.\n" +
+				"    01 LK PIC X(10).\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STOP RUN.\n",
+		},
+		{
 			name: "hello world program",
 			// The printer never reads Pos, so the hand-built AST omits it.
 			input: &File{
@@ -167,6 +261,38 @@ func TestPrinterRoundTrip(t *testing.T) {
 			src:  "",
 		},
 		{
+			name: "data division entries",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. DATADEMO.\n" +
+				"DATA DIVISION.\n" +
+				"FILE SECTION.\n" +
+				"FD CUST-FILE.\n" +
+				"01 CUST-RECORD.\n" +
+				"    05 CUST-ID PIC 9(5).\n" +
+				"    05 FILLER PIC X(20).\n" +
+				"WORKING-STORAGE SECTION.\n" +
+				"01 COUNTER PIC 9(2) USAGE COMP-3 VALUE ZERO.\n" +
+				"01 TOTAL PIC S9(5)V99 VALUE 0.\n" +
+				"01 STATUS-FLAG PIC X VALUE \"N\".\n" +
+				"    88 DONE VALUE \"Y\".\n" +
+				"    88 PENDING VALUE \"A\" THROUGH \"M\".\n" +
+				"01 TABLE-DATA.\n" +
+				"    05 ITEM OCCURS 10 TIMES PIC 9(4).\n" +
+				"01 ALT REDEFINES TABLE-DATA PIC X(40).\n" +
+				"01 FLAGS.\n" +
+				"    05 F1 PIC X JUSTIFIED RIGHT.\n" +
+				"    05 F2 PIC 9 BLANK WHEN ZERO.\n" +
+				"    05 F3 PIC S9 SIGN IS LEADING SEPARATE.\n" +
+				"    05 F4 PIC 9 SYNCHRONIZED LEFT.\n" +
+				"    05 F5 PIC X GLOBAL.\n" +
+				"    05 F6 PIC X EXTERNAL.\n" +
+				"66 RENAME-FIELD RENAMES F1 THROUGH F2.\n" +
+				"LINKAGE SECTION.\n" +
+				"01 LK-PARM PIC X(10).\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STOP RUN.\n",
+		},
+		{
 			name: "hello world program",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. hello.\n" +
@@ -229,6 +355,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 	}{
 		{name: "hello_cob", fixture: "hello.cob"},
 		{name: "environment_cob", fixture: "environment.cob"},
+		{name: "data_cob", fixture: "data.cob"},
 	}
 
 	for _, tc := range testCases {
@@ -271,6 +398,8 @@ func withoutPos(f *File) *File {
 				}
 			case *EnvironmentDivision:
 				clearEnvironmentPos(d)
+			case *DataDivision:
+				clearDataDivisionPos(d)
 			case *ProcedureDivision:
 				d.Pos = Pos{}
 				for _, stmt := range d.Statements {
@@ -297,6 +426,8 @@ func clearTypePos(v Type) {
 		n.Pos = Pos{}
 	case *StringLiteral:
 		n.Pos = Pos{}
+	case *NumericLiteral:
+		n.Pos = Pos{}
 	}
 }
 
@@ -304,6 +435,14 @@ func clearTypePos(v Type) {
 func clearWordPos(w *Word) {
 	if w != nil {
 		w.Pos = Pos{}
+	}
+}
+
+// clearNumericPos zeroes the Pos of an optional *NumericLiteral child (a no-op
+// when nil).
+func clearNumericPos(n *NumericLiteral) {
+	if n != nil {
+		n.Pos = Pos{}
 	}
 }
 
@@ -361,6 +500,81 @@ func clearEnvironmentPos(div *EnvironmentDivision) {
 	}
 }
 
+// clearDataDivisionPos zeroes every Pos beneath a DATA DIVISION so round-trip
+// comparisons ignore the positions the printer is free to choose.
+func clearDataDivisionPos(div *DataDivision) {
+	div.Pos = Pos{}
+	if sec := div.File; sec != nil {
+		sec.Pos = Pos{}
+		for _, entry := range sec.Entries {
+			entry.Pos = Pos{}
+			clearWordPos(entry.Name)
+			for _, rec := range entry.Records {
+				clearDataEntryPos(rec)
+			}
+		}
+	}
+	for _, sec := range []*DataSection{div.WorkingStorage, div.LocalStorage, div.Linkage} {
+		if sec == nil {
+			continue
+		}
+		sec.Pos = Pos{}
+		for _, entry := range sec.Entries {
+			clearDataEntryPos(entry)
+		}
+	}
+}
+
+// clearDataEntryPos zeroes the Pos of a data-description entry and every node
+// beneath it (name and clauses).
+func clearDataEntryPos(entry *DataDescriptionEntry) {
+	entry.Pos = Pos{}
+	clearWordPos(entry.Name)
+	for _, clause := range entry.Clauses {
+		switch c := clause.(type) {
+		case *RedefinesClause:
+			c.Pos = Pos{}
+			clearWordPos(c.Name)
+		case *PictureClause:
+			c.Pos = Pos{}
+		case *UsageClause:
+			c.Pos = Pos{}
+		case *ValueClause:
+			c.Pos = Pos{}
+			for _, spec := range c.Values {
+				clearTypePos(spec.From)
+				clearTypePos(spec.Through)
+			}
+		case *OccursClause:
+			c.Pos = Pos{}
+			clearNumericPos(c.Min)
+			clearNumericPos(c.Max)
+			clearWordPos(c.DependingOn)
+			for i := range c.Keys {
+				c.Keys[i].Pos = Pos{}
+				clearWordPos(c.Keys[i].Name)
+			}
+			clearWordPos(c.IndexedBy)
+		case *SignClause:
+			c.Pos = Pos{}
+		case *JustifiedClause:
+			c.Pos = Pos{}
+		case *SynchronizedClause:
+			c.Pos = Pos{}
+		case *BlankWhenZeroClause:
+			c.Pos = Pos{}
+		case *GlobalClause:
+			c.Pos = Pos{}
+		case *ExternalClause:
+			c.Pos = Pos{}
+		case *RenamesClause:
+			c.Pos = Pos{}
+			clearWordPos(c.From)
+			clearWordPos(c.Through)
+		}
+	}
+}
+
 // fakeDivision, fakeStatement, and fakeValue satisfy the sealed AST interfaces
 // with concrete types the printer does not know, so the error-path test can drive
 // every "unsupported node" branch without waiting for real future node types.
@@ -383,6 +597,10 @@ func (fakeSpecialNamesClause) specialNamesClause() {}
 type fakeSelectClause struct{}
 
 func (fakeSelectClause) selectClause() {}
+
+type fakeDataClause struct{}
+
+func (fakeDataClause) dataClause() {}
 
 // TestPrinterErrors pins the typed error the printer reports for nil and
 // unknown-type AST nodes, so the public Print API fails cleanly instead of
@@ -548,6 +766,58 @@ func TestPrinterErrors(t *testing.T) {
 						},
 					}},
 				}},
+			}}}},
+		},
+		{
+			name: "typed-nil data division",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				(*DataDivision)(nil),
+			}}}},
+		},
+		{
+			name: "nil data-description entry element",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&DataDivision{WorkingStorage: &DataSection{Entries: []*DataDescriptionEntry{nil}}},
+			}}}},
+		},
+		{
+			name: "nil file-description entry element",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&DataDivision{File: &FileSection{Entries: []*FileDescriptionEntry{nil}}},
+			}}}},
+		},
+		{
+			name: "file-description entry with unknown kind",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&DataDivision{File: &FileSection{Entries: []*FileDescriptionEntry{
+					{Kind: "XD", Name: &Word{Value: "F"}},
+				}}},
+			}}}},
+		},
+		{
+			name: "unknown data clause type",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&DataDivision{WorkingStorage: &DataSection{Entries: []*DataDescriptionEntry{
+					{Level: 1, Name: &Word{Value: "X"}, Clauses: []DataClause{fakeDataClause{}}},
+				}}},
+			}}}},
+		},
+		{
+			name: "typed-nil data clause",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&DataDivision{WorkingStorage: &DataSection{Entries: []*DataDescriptionEntry{
+					{Level: 1, Name: &Word{Value: "X"}, Clauses: []DataClause{(*PictureClause)(nil)}},
+				}}},
+			}}}},
+		},
+		{
+			name: "unsupported value-clause literal type",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&DataDivision{WorkingStorage: &DataSection{Entries: []*DataDescriptionEntry{
+					{Level: 1, Name: &Word{Value: "X"}, Clauses: []DataClause{
+						&ValueClause{Values: []ValueSpec{{From: fakeValue{}}}},
+					}},
+				}}},
 			}}}},
 		},
 	}
