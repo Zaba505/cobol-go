@@ -278,6 +278,51 @@ func TestPrinter(t *testing.T) {
 				"    COMPUTE Z ROUNDED = (A + B) * C END-COMPUTE.\n",
 		},
 		{
+			name: "procedure division if",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "P"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										{Statements: []Statement{&IfStatement{
+											Cond: &RelationCondition{
+												Left:  &Identifier{Name: &Word{Value: "A"}},
+												Op:    ">",
+												Right: &Identifier{Name: &Word{Value: "B"}},
+											},
+											Then:    []Statement{&MoveStatement{Source: &NumericLiteral{Value: "1"}, Targets: []*Identifier{{Name: &Word{Value: "C"}}}}},
+											Else:    []Statement{&MoveStatement{Source: &NumericLiteral{Value: "2"}, Targets: []*Identifier{{Name: &Word{Value: "C"}}}}},
+											HasElse: true,
+											EndIf:   true,
+										}}},
+										{Statements: []Statement{&IfStatement{
+											Cond: &ConditionNameCondition{Name: &Identifier{Name: &Word{Value: "FLAG"}}},
+											Then: []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"x"`}}}},
+										}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF A > B\n" +
+				"    MOVE 1 TO C\n" +
+				"    ELSE\n" +
+				"    MOVE 2 TO C\n" +
+				"    END-IF.\n" +
+				"    IF FLAG\n" +
+				"    DISPLAY \"x\".\n",
+		},
+		{
 			name: "environment division",
 			input: &File{
 				Programs: []*Program{
@@ -485,6 +530,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "data_cob", fixture: "data.cob"},
 		{name: "procedure_paragraphs_cob", fixture: "procedure_paragraphs.cob"},
 		{name: "procedure_arithmetic_cob", fixture: "procedure_arithmetic.cob"},
+		{name: "procedure_conditional_cob", fixture: "procedure_conditional.cob"},
 	}
 
 	for _, tc := range testCases {
@@ -632,6 +678,15 @@ func clearStatementPos(stmt Statement) {
 			clearIdentifierPos(s.Targets[i].Name)
 		}
 		clearExprPos(s.Expr)
+	case *IfStatement:
+		s.Pos = Pos{}
+		clearConditionPos(s.Cond)
+		for _, st := range s.Then {
+			clearStatementPos(st)
+		}
+		for _, st := range s.Else {
+			clearStatementPos(st)
+		}
 	case *GoToStatement:
 		s.Pos = Pos{}
 		for _, t := range s.Targets {
@@ -664,6 +719,36 @@ func clearIdentifierPos(id *Identifier) {
 		id.RefMod.Pos = Pos{}
 		clearExprPos(id.RefMod.Start)
 		clearExprPos(id.RefMod.Length)
+	}
+}
+
+// clearConditionPos zeroes the Pos of a condition node and its nested operands and
+// sub-conditions.
+func clearConditionPos(c Condition) {
+	switch n := c.(type) {
+	case *RelationCondition:
+		n.Pos = Pos{}
+		clearExprPos(n.Left)
+		clearExprPos(n.Right)
+	case *ClassCondition:
+		n.Pos = Pos{}
+		clearExprPos(n.Operand)
+	case *SignCondition:
+		n.Pos = Pos{}
+		clearExprPos(n.Operand)
+	case *ConditionNameCondition:
+		n.Pos = Pos{}
+		clearIdentifierPos(n.Name)
+	case *LogicalCondition:
+		n.Pos = Pos{}
+		clearConditionPos(n.Left)
+		clearConditionPos(n.Right)
+	case *NotCondition:
+		n.Pos = Pos{}
+		clearConditionPos(n.Cond)
+	case *ParenCondition:
+		n.Pos = Pos{}
+		clearConditionPos(n.Cond)
 	}
 }
 
@@ -843,6 +928,14 @@ type fakeValue struct{}
 
 func (fakeValue) cobol() {}
 
+type fakeExpr struct{}
+
+func (fakeExpr) expr() {}
+
+type fakeCondition struct{}
+
+func (fakeCondition) condition() {}
+
 type fakeSpecialNamesClause struct{}
 
 func (fakeSpecialNamesClause) specialNamesClause() {}
@@ -1006,6 +1099,34 @@ func TestPrinterErrors(t *testing.T) {
 					Paragraphs: []*Paragraph{{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}}},
 					Sections:   []*Section{{Name: &Word{Value: "S"}}},
 				},
+			}}}},
+		},
+		{
+			name: "typed-nil if statement",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{(*IfStatement)(nil)}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "unknown condition type",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&IfStatement{Cond: fakeCondition{}, Then: []Statement{&ContinueStatement{}}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "unknown expression type in compute",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&ComputeStatement{Targets: []ComputeTarget{{Name: &Identifier{Name: &Word{Value: "X"}}}}, Expr: fakeExpr{}},
+					}}}},
+				}},
 			}}}},
 		},
 		{

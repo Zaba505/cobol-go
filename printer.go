@@ -733,6 +733,8 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 		return printArithmeticStatement(s, next)
 	case *ComputeStatement:
 		return printComputeStatement(s, next)
+	case *IfStatement:
+		return printIfStatement(s, next)
 	case *GoToStatement:
 		return printGoToStatement(s, next)
 	case *ContinueStatement:
@@ -898,6 +900,132 @@ func printComputeStatement(stmt *ComputeStatement, next printerAction) printerAc
 		}
 		return next
 	}
+}
+
+// printIfStatement prints an IF statement: the condition, the then-branch
+// statements (each on its own line), an optional ELSE branch, and an optional
+// END-IF. The sentence-terminating period is emitted by the enclosing sentence, so
+// the final line carries no period here. A typed-nil statement or a missing
+// condition is rejected with an [UnsupportedNodeError].
+func printIfStatement(stmt *IfStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.Cond == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		cond, ok := conditionText(stmt.Cond)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Cond})
+		}
+		pr.write("    IF " + cond)
+
+		end := next
+		if stmt.EndIf {
+			end = writeThen("\n    END-IF", end)
+		}
+		tail := end
+		if stmt.HasElse {
+			tail = writeThen("\n    ELSE", printBranchStatementAt(stmt.Else, 0, end))
+		}
+		return printBranchStatementAt(stmt.Then, 0, tail)
+	}
+}
+
+// printBranchStatementAt prints the branch statement at index i on its own line
+// (preceded by a newline so it sits under the IF/PERFORM header), then continues
+// with the next; once i is past the last statement it continues with next.
+func printBranchStatementAt(stmts []Statement, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(stmts) {
+			return next
+		}
+		pr.write("\n")
+		return printStatement(stmts[i], printBranchStatementAt(stmts, i+1, next))
+	}
+}
+
+// conditionText returns the canonical source text of a condition and whether it
+// could be rendered: relational operators in symbol form, class/sign conditions as
+// "operand IS [NOT] keyword", AND/OR/NOT combinators, and preserved parentheses.
+func conditionText(c Condition) (string, bool) {
+	switch n := c.(type) {
+	case *RelationCondition:
+		if n == nil {
+			return "", false
+		}
+		l, ok := exprText(n.Left)
+		if !ok {
+			return "", false
+		}
+		r, ok := exprText(n.Right)
+		if !ok {
+			return "", false
+		}
+		return l + " " + n.Op + " " + r, true
+	case *ClassCondition:
+		if n == nil {
+			return "", false
+		}
+		o, ok := exprText(n.Operand)
+		if !ok {
+			return "", false
+		}
+		return o + " IS " + negate(n.Not) + n.Class, true
+	case *SignCondition:
+		if n == nil {
+			return "", false
+		}
+		o, ok := exprText(n.Operand)
+		if !ok {
+			return "", false
+		}
+		return o + " IS " + negate(n.Not) + n.Sign, true
+	case *ConditionNameCondition:
+		if n == nil {
+			return "", false
+		}
+		return identifierText(n.Name)
+	case *LogicalCondition:
+		if n == nil {
+			return "", false
+		}
+		l, ok := conditionText(n.Left)
+		if !ok {
+			return "", false
+		}
+		r, ok := conditionText(n.Right)
+		if !ok {
+			return "", false
+		}
+		return l + " " + n.Op + " " + r, true
+	case *NotCondition:
+		if n == nil {
+			return "", false
+		}
+		inner, ok := conditionText(n.Cond)
+		if !ok {
+			return "", false
+		}
+		return "NOT " + inner, true
+	case *ParenCondition:
+		if n == nil {
+			return "", false
+		}
+		inner, ok := conditionText(n.Cond)
+		if !ok {
+			return "", false
+		}
+		return "(" + inner + ")", true
+	default:
+		return "", false
+	}
+}
+
+// negate returns the "NOT " prefix when not is set, for class/sign conditions.
+func negate(not bool) string {
+	if not {
+		return "NOT "
+	}
+	return ""
 }
 
 // printGoToStatement prints a GO TO statement: the procedure-names and an optional

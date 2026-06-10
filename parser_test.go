@@ -457,6 +457,61 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "if statement with end-if",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF A > B MOVE 1 TO C END-IF.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&IfStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Cond: &RelationCondition{
+															Pos:   Pos{Line: 4, Column: 8},
+															Left:  &Identifier{Pos: Pos{Line: 4, Column: 8}, Name: &Word{Pos: Pos{Line: 4, Column: 8}, Value: "A"}},
+															Op:    ">",
+															Right: &Identifier{Pos: Pos{Line: 4, Column: 12}, Name: &Word{Pos: Pos{Line: 4, Column: 12}, Value: "B"}},
+														},
+														Then: []Statement{
+															&MoveStatement{
+																Pos:     Pos{Line: 4, Column: 14},
+																Source:  &NumericLiteral{Pos: Pos{Line: 4, Column: 19}, Value: "1"},
+																Targets: []*Identifier{{Pos: Pos{Line: 4, Column: 24}, Name: &Word{Pos: Pos{Line: 4, Column: 24}, Value: "C"}}},
+															},
+														},
+														EndIf: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "environment division with both sections",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. ENV.\n" +
@@ -670,6 +725,18 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedTokenError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 13}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "IF without a condition",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 7}, target.Actual.Pos)
 			},
 		},
 		{

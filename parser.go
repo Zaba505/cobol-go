@@ -159,6 +159,22 @@ type ContinueStatement struct {
 
 func (*ContinueStatement) statement() {}
 
+// IfStatement is an IF statement. Pos is the position of the IF keyword; Cond is
+// the condition; Then and Else are the branch statement lists; HasElse reports an
+// ELSE clause (distinguishing an empty ELSE from no ELSE); EndIf reports an
+// explicit END-IF scope terminator (a bare IF without it runs to the sentence
+// period).
+type IfStatement struct {
+	Pos     Pos
+	Cond    Condition
+	Then    []Statement
+	Else    []Statement
+	HasElse bool
+	EndIf   bool
+}
+
+func (*IfStatement) statement() {}
+
 // ArithmeticStatement is an ADD, SUBTRACT, MULTIPLY, or DIVIDE statement. Pos is
 // the position of the verb; Verb is the canonical verb keyword. Operands are the
 // source operands; Connector is the keyword joining them to the targets ("TO",
@@ -302,6 +318,87 @@ type ParenExpr struct {
 }
 
 func (*ParenExpr) expr() {}
+
+// Condition is implemented by the conditional-expression AST nodes (SPEC.md
+// "condition"): the relation/class/sign/condition-name simple conditions and the
+// AND/OR/NOT/parenthesized combinators.
+type Condition interface {
+	condition()
+}
+
+// RelationCondition compares two expressions. Pos is the position of the left
+// operand; Op is the canonical relational operator (">", "<", "=", ">=", "<=",
+// "<>"). A negated relation (e.g. "NOT =") is represented by wrapping this in a
+// [NotCondition].
+type RelationCondition struct {
+	Pos   Pos
+	Left  Expr
+	Op    string
+	Right Expr
+}
+
+func (*RelationCondition) condition() {}
+
+// ClassCondition tests an operand's class. Pos is the position of the operand; Not
+// reports the "IS NOT" form; Class is the canonical class keyword ("NUMERIC",
+// "ALPHABETIC", "ALPHABETIC-LOWER", "ALPHABETIC-UPPER").
+type ClassCondition struct {
+	Pos     Pos
+	Operand Expr
+	Not     bool
+	Class   string
+}
+
+func (*ClassCondition) condition() {}
+
+// SignCondition tests an operand's sign. Pos is the position of the operand; Not
+// reports the "IS NOT" form; Sign is the canonical sign keyword ("POSITIVE",
+// "NEGATIVE", "ZERO").
+type SignCondition struct {
+	Pos     Pos
+	Operand Expr
+	Not     bool
+	Sign    string
+}
+
+func (*SignCondition) condition() {}
+
+// ConditionNameCondition references a level-88 condition-name used as a bare
+// condition. Pos is the position of the condition-name.
+type ConditionNameCondition struct {
+	Pos  Pos
+	Name *Identifier
+}
+
+func (*ConditionNameCondition) condition() {}
+
+// LogicalCondition combines two conditions with AND or OR. Pos is the position of
+// the left condition; Op is "AND" or "OR".
+type LogicalCondition struct {
+	Pos   Pos
+	Op    string
+	Left  Condition
+	Right Condition
+}
+
+func (*LogicalCondition) condition() {}
+
+// NotCondition negates a condition. Pos is the position of the NOT keyword.
+type NotCondition struct {
+	Pos  Pos
+	Cond Condition
+}
+
+func (*NotCondition) condition() {}
+
+// ParenCondition is a parenthesized condition, preserved so the printer can
+// reproduce the grouping. Pos is the position of the opening parenthesis.
+type ParenCondition struct {
+	Pos  Pos
+	Cond Condition
+}
+
+func (*ParenCondition) condition() {}
 
 // EnvironmentDivision is the ENVIRONMENT DIVISION. Pos is the position of the
 // ENVIRONMENT keyword. Both sections are optional; a nil field means the section
@@ -736,6 +833,33 @@ func (p *parser) skipOptionalKeyword(kw ...string) error {
 		p.consume()
 	}
 	return nil
+}
+
+// acceptKeyword consumes and returns the next token iff it is an identifier
+// matching one of kw, reporting whether it was consumed. It is the consuming
+// counterpart of peekKeyword for optional keywords whose token (its position) is
+// needed.
+func (p *parser) acceptKeyword(kw ...string) (Token, bool, error) {
+	is, err := p.peekKeyword(kw...)
+	if err != nil {
+		return Token{}, false, err
+	}
+	if !is {
+		return Token{}, false, nil
+	}
+	tok, _, _ := p.advance()
+	return tok, true, nil
+}
+
+// acceptKeywordValue is like acceptKeyword but returns the matched keyword in its
+// canonical upper-case spelling (COBOL words are case-insensitive), for storing a
+// normalized keyword in the AST.
+func (p *parser) acceptKeywordValue(kw ...string) (string, bool, error) {
+	tok, ok, err := p.acceptKeyword(kw...)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	return strings.ToUpper(string(tok.Value)), true, nil
 }
 
 // expectFollow verifies that the next (unconsumed) token, if any, is an
@@ -2337,6 +2461,8 @@ func parseStatement(p *parser) (Statement, error) {
 		return parseArithmeticStatement(p, tok)
 	case keywordIs(tok, "COMPUTE"):
 		return parseComputeStatement(p, tok)
+	case keywordIs(tok, "IF"):
+		return parseIfStatement(p, tok)
 	case keywordIs(tok, "GO"):
 		return parseGoToStatement(p, tok)
 	case keywordIs(tok, "CONTINUE"):
@@ -2345,8 +2471,68 @@ func parseStatement(p *parser) (Statement, error) {
 		return parseStopStatement(p, tok)
 	default:
 		return nil, unexpectedKeyword(tok, "DISPLAY", "MOVE", "ACCEPT",
-			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "GO", "CONTINUE", "STOP")
+			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "GO", "CONTINUE", "STOP")
 	}
+}
+
+// stopAtNested stops a nested statement list (an IF branch or a PERFORM body) at a
+// separator period, an ELSE, any explicit scope terminator (END-IF, END-PERFORM,
+// …), or end of input — each of which is consumed by an enclosing construct, not
+// the nested list.
+func stopAtNested(p *parser) (bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return true, nil
+	}
+	return isPeriod(tok) || keywordIs(tok, "ELSE") || isScopeTerminator(tok), nil
+}
+
+// parseIfStatement parses an IF statement whose verb kw has already been read: a
+// condition, an optional THEN, a then-branch, an optional ELSE branch, and an
+// optional END-IF. NEXT SENTENCE is deferred.
+func parseIfStatement(p *parser, kw Token) (Statement, error) {
+	cond, err := parseCondition(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt := &IfStatement{Pos: kw.Pos, Cond: cond}
+
+	if err := p.skipOptionalKeyword("THEN"); err != nil {
+		return nil, err
+	}
+
+	then, err := parseStatementList(p, stopAtNested)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Then = then
+
+	hasElse, err := p.peekKeyword("ELSE")
+	if err != nil {
+		return nil, err
+	}
+	if hasElse {
+		p.consume()
+		stmt.HasElse = true
+		els, err := parseStatementList(p, stopAtNested)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Else = els
+	}
+
+	endIf, err := p.peekKeyword("END-IF")
+	if err != nil {
+		return nil, err
+	}
+	if endIf {
+		p.consume()
+		stmt.EndIf = true
+	}
+	return stmt, nil
 }
 
 // parseOperandList collects operands until the next token cannot begin one
@@ -2974,6 +3160,217 @@ func exprPos(e Expr) Pos {
 	case *UnaryExpr:
 		return n.Pos
 	case *ParenExpr:
+		return n.Pos
+	default:
+		return Pos{}
+	}
+}
+
+// classKeywords are the class-condition keywords.
+var classKeywords = []string{"NUMERIC", "ALPHABETIC", "ALPHABETIC-LOWER", "ALPHABETIC-UPPER"}
+
+// signKeywords are the sign-condition keywords.
+var signKeywords = []string{"POSITIVE", "NEGATIVE", "ZERO"}
+
+// parseCondition parses a condition: combinable conditions joined by OR (the
+// lowest-precedence combinator, so it is the outermost loop). It is a
+// recursive-descent sub-parser, like the arithmetic-expression parsers.
+func parseCondition(p *parser) (Condition, error) {
+	left, err := parseAndCondition(p)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		is, err := p.peekKeyword("OR")
+		if err != nil {
+			return nil, err
+		}
+		if !is {
+			return left, nil
+		}
+		p.consume()
+		right, err := parseAndCondition(p)
+		if err != nil {
+			return nil, err
+		}
+		left = &LogicalCondition{Pos: conditionPos(left), Op: "OR", Left: left, Right: right}
+	}
+}
+
+// parseAndCondition parses combinable conditions joined by AND.
+func parseAndCondition(p *parser) (Condition, error) {
+	left, err := parseCombinable(p)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		is, err := p.peekKeyword("AND")
+		if err != nil {
+			return nil, err
+		}
+		if !is {
+			return left, nil
+		}
+		p.consume()
+		right, err := parseCombinable(p)
+		if err != nil {
+			return nil, err
+		}
+		left = &LogicalCondition{Pos: conditionPos(left), Op: "AND", Left: left, Right: right}
+	}
+}
+
+// parseCombinable parses a combinable condition: an optional leading NOT applied
+// to either a parenthesized condition or a simple condition.
+func parseCombinable(p *parser) (Condition, error) {
+	notTok, hasNot, err := p.acceptKeyword("NOT")
+	if err != nil {
+		return nil, err
+	}
+
+	cond, err := parseParenOrSimpleCondition(p)
+	if err != nil {
+		return nil, err
+	}
+	if hasNot {
+		return &NotCondition{Pos: notTok.Pos, Cond: cond}, nil
+	}
+	return cond, nil
+}
+
+// parseParenOrSimpleCondition parses a parenthesized condition or a simple one.
+func parseParenOrSimpleCondition(p *parser) (Condition, error) {
+	paren, err := p.peekSymbol("(")
+	if err != nil {
+		return nil, err
+	}
+	if paren {
+		lp, _ := p.expectSymbol("(")
+		inner, err := parseCondition(p)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expectSymbol(")"); err != nil {
+			return nil, err
+		}
+		return &ParenCondition{Pos: lp.Pos, Cond: inner}, nil
+	}
+	return parseSimpleCondition(p)
+}
+
+// parseSimpleCondition parses a relation, class, sign, or condition-name
+// condition. It reads the left operand expression, an optional "IS" and "NOT",
+// then dispatches on what follows: a class/sign keyword, a relational operator, or
+// nothing (a bare condition-name reference).
+func parseSimpleCondition(p *parser) (Condition, error) {
+	left, err := parseExpr(p)
+	if err != nil {
+		return nil, err
+	}
+	pos := exprPos(left)
+
+	if err := p.skipOptionalKeyword("IS"); err != nil {
+		return nil, err
+	}
+	_, hasNot, err := p.acceptKeyword("NOT")
+	if err != nil {
+		return nil, err
+	}
+
+	if class, ok, err := p.acceptKeywordValue(classKeywords...); err != nil {
+		return nil, err
+	} else if ok {
+		return &ClassCondition{Pos: pos, Operand: left, Not: hasNot, Class: class}, nil
+	}
+
+	if sign, ok, err := p.acceptKeywordValue(signKeywords...); err != nil {
+		return nil, err
+	} else if ok {
+		return &SignCondition{Pos: pos, Operand: left, Not: hasNot, Sign: sign}, nil
+	}
+
+	op, found, err := parseRelationalOperator(p)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		right, err := parseExpr(p)
+		if err != nil {
+			return nil, err
+		}
+		rel := &RelationCondition{Pos: pos, Left: left, Op: op, Right: right}
+		if hasNot {
+			return &NotCondition{Pos: pos, Cond: rel}, nil
+		}
+		return rel, nil
+	}
+
+	if hasNot {
+		// "NOT" with no relation/class/sign following is malformed.
+		tok, _, _ := p.peek()
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenSymbol, TokenIdentifier}, Actual: tok}
+	}
+	if id, ok := left.(*Identifier); ok {
+		return &ConditionNameCondition{Pos: pos, Name: id}, nil
+	}
+	tok, _, _ := p.peek()
+	return nil, UnexpectedTokenError{Expected: []TokenType{TokenSymbol}, Actual: tok}
+}
+
+// parseRelationalOperator parses a relational operator and returns its canonical
+// symbol form. Symbol operators (= < > <= >= <>) and the word forms GREATER
+// [THAN], LESS [THAN], and EQUAL [TO] are recognized.
+func parseRelationalOperator(p *parser) (string, bool, error) {
+	if sym, err := p.peekSymbol("=", "<", ">", "<=", ">=", "<>"); err != nil {
+		return "", false, err
+	} else if sym {
+		tok, _ := p.expectSymbol("=", "<", ">", "<=", ">=", "<>")
+		return string(tok.Value), true, nil
+	}
+
+	if _, ok, err := p.acceptKeyword("GREATER"); err != nil {
+		return "", false, err
+	} else if ok {
+		if err := p.skipOptionalKeyword("THAN"); err != nil {
+			return "", false, err
+		}
+		return ">", true, nil
+	}
+	if _, ok, err := p.acceptKeyword("LESS"); err != nil {
+		return "", false, err
+	} else if ok {
+		if err := p.skipOptionalKeyword("THAN"); err != nil {
+			return "", false, err
+		}
+		return "<", true, nil
+	}
+	if _, ok, err := p.acceptKeyword("EQUAL"); err != nil {
+		return "", false, err
+	} else if ok {
+		if err := p.skipOptionalKeyword("TO"); err != nil {
+			return "", false, err
+		}
+		return "=", true, nil
+	}
+	return "", false, nil
+}
+
+// conditionPos returns the source position of a condition node.
+func conditionPos(c Condition) Pos {
+	switch n := c.(type) {
+	case *RelationCondition:
+		return n.Pos
+	case *ClassCondition:
+		return n.Pos
+	case *SignCondition:
+		return n.Pos
+	case *ConditionNameCondition:
+		return n.Pos
+	case *LogicalCondition:
+		return n.Pos
+	case *NotCondition:
+		return n.Pos
+	case *ParenCondition:
 		return n.Pos
 	default:
 		return Pos{}
