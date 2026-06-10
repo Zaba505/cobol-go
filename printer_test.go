@@ -431,6 +431,30 @@ func TestPrinterErrors(t *testing.T) {
 			}}}},
 		},
 		{
+			name: "typed-nil identification division",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				(*IdentificationDivision)(nil),
+			}}}},
+		},
+		{
+			name: "typed-nil procedure division",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				(*ProcedureDivision)(nil),
+			}}}},
+		},
+		{
+			name: "typed-nil display statement",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Statements: []Statement{(*DisplayStatement)(nil)}},
+			}}}},
+		},
+		{
+			name: "typed-nil stop statement",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Statements: []Statement{(*StopStatement)(nil)}},
+			}}}},
+		},
+		{
 			name: "typed-nil environment division",
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				(*EnvironmentDivision)(nil),

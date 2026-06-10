@@ -344,8 +344,13 @@ func selectClauseText(clause SelectClause) (string, bool) {
 
 // printIdentificationDivision prints the IDENTIFICATION DIVISION header followed
 // by its PROGRAM-ID paragraph. The keyword spelling is canonicalized to the long
-// form (the AST does not record whether the source used ID or IDENTIFICATION).
+// form (the AST does not record whether the source used ID or IDENTIFICATION). A
+// typed-nil division is rejected with an [UnsupportedNodeError] rather than
+// panicking.
 func printIdentificationDivision(div *IdentificationDivision, next printerAction) printerAction {
+	if div == nil {
+		return failPrint(UnsupportedNodeError{Node: div})
+	}
 	return writeThen("IDENTIFICATION DIVISION.\n", printProgramID(div.ProgramID, next))
 }
 
@@ -368,8 +373,12 @@ func printProgramID(id *ProgramID, next printerAction) printerAction {
 }
 
 // printProcedureDivision prints the PROCEDURE DIVISION header followed by its
-// statements, one sentence per line.
+// statements, one sentence per line. A typed-nil division is rejected with an
+// [UnsupportedNodeError] rather than panicking.
 func printProcedureDivision(div *ProcedureDivision, next printerAction) printerAction {
+	if div == nil {
+		return failPrint(UnsupportedNodeError{Node: div})
+	}
 	return writeThen("PROCEDURE DIVISION.\n", printStatementAt(div, 0, next))
 }
 
@@ -401,9 +410,14 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 
 // printDisplayStatement prints a DISPLAY statement: the verb followed by its
 // space-separated operands, indented and terminated with a separator period. The
-// operand slice is a leaf walked with a local loop, not the action machinery.
+// operand slice is a leaf walked with a local loop, not the action machinery. A
+// typed-nil statement (a nil *DisplayStatement element) is rejected with an
+// [UnsupportedNodeError] rather than panicking.
 func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
 		pr.write("    DISPLAY")
 		for _, op := range stmt.Operands {
 			text, ok := valueText(op)
@@ -419,9 +433,14 @@ func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAc
 }
 
 // printStopStatement prints a STOP statement. Only the STOP RUN form is produced
-// by the parser today; the bare-STOP branch is forward-looking and harmless.
+// by the parser today; the bare-STOP branch is forward-looking and harmless. A
+// typed-nil statement (a nil *StopStatement element) is rejected with an
+// [UnsupportedNodeError] rather than panicking.
 func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
 		if stmt.Run {
 			pr.write("    STOP RUN.\n")
 		} else {
