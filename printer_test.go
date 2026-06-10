@@ -1178,6 +1178,16 @@ func TestPrinterErrors(t *testing.T) {
 			}}}},
 		},
 		{
+			name: "move with no targets",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&MoveStatement{Source: &Identifier{Name: &Word{Value: "X"}}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
 			name: "typed-nil accept statement",
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				&ProcedureDivision{Paragraphs: []*Paragraph{

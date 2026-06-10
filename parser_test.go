@@ -512,6 +512,59 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "negated relation records the NOT position",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF A NOT = B CONTINUE END-IF.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&IfStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														// NotCondition.Pos is the NOT keyword (4,10), not the operand.
+														Cond: &NotCondition{
+															Pos: Pos{Line: 4, Column: 10},
+															Cond: &RelationCondition{
+																Pos:   Pos{Line: 4, Column: 8},
+																Left:  &Identifier{Pos: Pos{Line: 4, Column: 8}, Name: &Word{Pos: Pos{Line: 4, Column: 8}, Value: "A"}},
+																Op:    "=",
+																Right: &Identifier{Pos: Pos{Line: 4, Column: 16}, Name: &Word{Pos: Pos{Line: 4, Column: 16}, Value: "B"}},
+															},
+														},
+														Then:  []Statement{&ContinueStatement{Pos: Pos{Line: 4, Column: 18}}},
+														EndIf: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "anonymous and named paragraphs",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +
@@ -798,6 +851,21 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedTokenError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 7}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "PERFORM with a non-procedure-name operand",
+			// A string literal is neither a count nor a procedure-name; the error
+			// reports the real token (a String), not a synthesized identifier.
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    PERFORM \"X\".\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 13}, target.Actual.Pos)
+				require.Equal(t, TokenString, target.Actual.Type)
 			},
 		},
 		{

@@ -778,11 +778,12 @@ func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAc
 }
 
 // printMoveStatement prints a MOVE statement: the optional CORRESPONDING, the
-// sending operand, "TO", and the receiving identifiers. A typed-nil statement or
-// an unprintable operand is rejected with an [UnsupportedNodeError].
+// sending operand, "TO", and the receiving identifiers. A typed-nil statement, one
+// with no receiving identifier (MOVE requires at least one), or an unprintable
+// operand is rejected with an [UnsupportedNodeError].
 func printMoveStatement(stmt *MoveStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
-		if stmt == nil {
+		if stmt == nil || len(stmt.Targets) == 0 {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
 		pr.write("    MOVE ")

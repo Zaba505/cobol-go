@@ -2811,6 +2811,7 @@ func parsePerformStatement(p *parser, kw Token) (Statement, error) {
 // parsePerformWithOperand handles a PERFORM whose first token is an operand: either
 // a count ("n TIMES …" inline) or a procedure-name (out-of-line).
 func parsePerformWithOperand(p *parser, stmt *PerformStatement) (Statement, error) {
+	lead, _, _ := p.peek()
 	first, err := parseOperand(p)
 	if err != nil {
 		return nil, err
@@ -2827,11 +2828,11 @@ func parsePerformWithOperand(p *parser, stmt *PerformStatement) (Statement, erro
 		return parsePerformInlineBody(p, stmt)
 	}
 
-	id, ok := first.(*Identifier)
-	if !ok || len(id.Qualifiers) > 0 || len(id.Subscripts) > 0 || id.RefMod != nil {
-		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: Token{Pos: typePos(first), Type: TokenIdentifier}}
+	name, ok := procedureNameFromOperand(first)
+	if !ok {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier, TokenNumber}, Actual: lead}
 	}
-	stmt.Target = id.Name
+	stmt.Target = name
 
 	through, err := p.peekKeyword("THROUGH", "THRU")
 	if err != nil {
@@ -3151,8 +3152,10 @@ func parseGoToStatement(p *parser, kw Token) (Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !ok || tok.Type != TokenIdentifier || isStatementVerb(tok) ||
-			isScopeTerminator(tok) || isPhraseKeyword(tok) {
+		// A procedure-name is an identifier or an all-digit word; stop at verbs,
+		// scope terminators, and phrase keywords (e.g. DEPENDING).
+		if !ok || (tok.Type != TokenIdentifier && tok.Type != TokenNumber) ||
+			isStatementVerb(tok) || isScopeTerminator(tok) || isPhraseKeyword(tok) {
 			break
 		}
 		p.consume()
@@ -3583,20 +3586,21 @@ func parsePrimary(p *parser) (Expr, error) {
 	}
 }
 
-// typePos returns the source position of a value node (a [Type]).
-func typePos(v Type) Pos {
-	switch n := v.(type) {
+// procedureNameFromOperand extracts a procedure-name word from an operand, for the
+// PERFORM target. A procedure-name is a bare data-name (an [Identifier] with no
+// qualification, subscript, or reference-modifier) or an all-digit numeric literal;
+// a string literal or a qualified/subscripted reference is not a valid
+// procedure-name and reports false.
+func procedureNameFromOperand(t Type) (*Word, bool) {
+	switch v := t.(type) {
 	case *Identifier:
-		return n.Pos
-	case *Word:
-		return n.Pos
-	case *StringLiteral:
-		return n.Pos
+		if v.Name != nil && len(v.Qualifiers) == 0 && len(v.Subscripts) == 0 && v.RefMod == nil {
+			return v.Name, true
+		}
 	case *NumericLiteral:
-		return n.Pos
-	default:
-		return Pos{}
+		return &Word{Pos: v.Pos, Value: v.Value}, true
 	}
+	return nil, false
 }
 
 // exprPos returns the source position of an expression node.
@@ -3725,7 +3729,7 @@ func parseSimpleCondition(p *parser) (Condition, error) {
 	if err := p.skipOptionalKeyword("IS"); err != nil {
 		return nil, err
 	}
-	_, hasNot, err := p.acceptKeyword("NOT")
+	notTok, hasNot, err := p.acceptKeyword("NOT")
 	if err != nil {
 		return nil, err
 	}
@@ -3753,7 +3757,7 @@ func parseSimpleCondition(p *parser) (Condition, error) {
 		}
 		rel := &RelationCondition{Pos: pos, Left: left, Op: op, Right: right}
 		if hasNot {
-			return &NotCondition{Pos: pos, Cond: rel}, nil
+			return &NotCondition{Pos: notTok.Pos, Cond: rel}, nil
 		}
 		return rel, nil
 	}
