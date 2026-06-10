@@ -7,6 +7,8 @@ package cobol
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -111,6 +113,44 @@ func TestPrinterRoundTrip(t *testing.T) {
 			// The printer reformats canonically, so positions shift between the
 			// original source and the printed output; compare structure only.
 			require.Equal(t, withoutPos(file1), withoutPos(file2))
+		})
+	}
+}
+
+// TestRoundTripFromTestdata is the reusable, fixture-driven round-trip harness:
+// it reads a golden COBOL program from testdata/, runs Parse -> Print -> Parse,
+// and asserts the two ASTs are equal ignoring positions. Later fixture-based
+// stories extend it by dropping a file in testdata/ and adding one table row.
+func TestRoundTripFromTestdata(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		fixture string
+	}{
+		{name: "hello_cob", fixture: "hello.cob"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			data, err := os.ReadFile(filepath.Join("testdata", tc.fixture))
+			require.NoError(t, err)
+
+			first, err := Parse(bytes.NewReader(data))
+			require.NoError(t, err)
+
+			var buf bytes.Buffer
+			require.NoError(t, Print(&buf, first))
+
+			second, err := Parse(&buf)
+			require.NoError(t, err)
+
+			// The printer reformats canonically, so positions shift between the
+			// fixture and the printed output; compare structure only (SPEC.md
+			// "Reference format independence").
+			require.Equal(t, withoutPos(first), withoutPos(second))
 		})
 	}
 }
