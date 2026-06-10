@@ -735,6 +735,8 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 		return printComputeStatement(s, next)
 	case *IfStatement:
 		return printIfStatement(s, next)
+	case *PerformStatement:
+		return printPerformStatement(s, next)
 	case *GoToStatement:
 		return printGoToStatement(s, next)
 	case *ContinueStatement:
@@ -927,6 +929,87 @@ func printIfStatement(stmt *IfStatement, next printerAction) printerAction {
 			tail = writeThen("\n    ELSE", printBranchStatementAt(stmt.Else, 0, end))
 		}
 		return printBranchStatementAt(stmt.Then, 0, tail)
+	}
+}
+
+// printPerformStatement prints a PERFORM statement. The out-of-line form prints the
+// procedure-name(s) and loop on one line; the inline form prints the loop, the body
+// statements (each on its own line), and END-PERFORM. The sentence-terminating
+// period is emitted by the enclosing sentence. A typed-nil statement, an
+// out-of-line PERFORM with no target, or an unprintable loop is rejected with an
+// [UnsupportedNodeError].
+func printPerformStatement(stmt *PerformStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		loop, ok := performLoopText(stmt)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+
+		if !stmt.Inline {
+			if stmt.Target == nil {
+				return failPrint(UnsupportedNodeError{Node: stmt})
+			}
+			pr.write("    PERFORM " + stmt.Target.Value)
+			if stmt.Through != nil {
+				pr.write(" THROUGH " + stmt.Through.Value)
+			}
+			pr.write(loop)
+			return next
+		}
+
+		pr.write("    PERFORM" + loop)
+		end := next
+		if stmt.EndPerform {
+			end = writeThen("\n    END-PERFORM", next)
+		}
+		return printBranchStatementAt(stmt.Body, 0, end)
+	}
+}
+
+// performLoopText returns the canonical text of a PERFORM loop specification, with
+// a leading space when non-empty, and whether it could be rendered.
+func performLoopText(stmt *PerformStatement) (string, bool) {
+	switch {
+	case stmt.Times != nil:
+		t, ok := valueText(stmt.Times)
+		if !ok {
+			return "", false
+		}
+		return " " + t + " TIMES", true
+	case stmt.Varying != nil:
+		v := stmt.Varying
+		name, ok := identifierText(v.Name)
+		if !ok {
+			return "", false
+		}
+		from, ok := valueText(v.From)
+		if !ok {
+			return "", false
+		}
+		by, ok := valueText(v.By)
+		if !ok {
+			return "", false
+		}
+		cond, ok := conditionText(v.Until)
+		if !ok {
+			return "", false
+		}
+		return " VARYING " + name + " FROM " + from + " BY " + by + " UNTIL " + cond, true
+	case stmt.Until != nil:
+		cond, ok := conditionText(stmt.Until)
+		if !ok {
+			return "", false
+		}
+		s := " "
+		if stmt.TestAfter {
+			s += "WITH TEST AFTER "
+		}
+		return s + "UNTIL " + cond, true
+	default:
+		return "", true
 	}
 }
 

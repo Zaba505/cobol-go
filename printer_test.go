@@ -323,6 +323,63 @@ func TestPrinter(t *testing.T) {
 				"    DISPLAY \"x\".\n",
 		},
 		{
+			name: "procedure division perform",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "P"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										{Statements: []Statement{&PerformStatement{
+											Target:  &Word{Value: "P1"},
+											Through: &Word{Value: "P2"},
+											Times:   &NumericLiteral{Value: "5"},
+										}}},
+										{Statements: []Statement{&PerformStatement{
+											Inline:    true,
+											TestAfter: true,
+											Until: &RelationCondition{
+												Left:  &Identifier{Name: &Word{Value: "A"}},
+												Op:    ">",
+												Right: &NumericLiteral{Value: "10"},
+											},
+											Body:       []Statement{&ArithmeticStatement{Verb: "ADD", Operands: []Type{&NumericLiteral{Value: "1"}}, Connector: "TO", Targets: []*Identifier{{Name: &Word{Value: "A"}}}}},
+											EndPerform: true,
+										}}},
+										{Statements: []Statement{&PerformStatement{
+											Inline: true,
+											Varying: &PerformVarying{
+												Name:  &Identifier{Name: &Word{Value: "I"}},
+												From:  &NumericLiteral{Value: "1"},
+												By:    &NumericLiteral{Value: "1"},
+												Until: &RelationCondition{Left: &Identifier{Name: &Word{Value: "I"}}, Op: ">", Right: &Identifier{Name: &Word{Value: "N"}}},
+											},
+											Body:       []Statement{&DisplayStatement{Operands: []Type{&Identifier{Name: &Word{Value: "I"}}}}},
+											EndPerform: true,
+										}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    PERFORM P1 THROUGH P2 5 TIMES.\n" +
+				"    PERFORM WITH TEST AFTER UNTIL A > 10\n" +
+				"    ADD 1 TO A\n" +
+				"    END-PERFORM.\n" +
+				"    PERFORM VARYING I FROM 1 BY 1 UNTIL I > N\n" +
+				"    DISPLAY I\n" +
+				"    END-PERFORM.\n",
+		},
+		{
 			name: "environment division",
 			input: &File{
 				Programs: []*Program{
@@ -531,6 +588,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_paragraphs_cob", fixture: "procedure_paragraphs.cob"},
 		{name: "procedure_arithmetic_cob", fixture: "procedure_arithmetic.cob"},
 		{name: "procedure_conditional_cob", fixture: "procedure_conditional.cob"},
+		{name: "procedure_perform_cob", fixture: "procedure_perform.cob"},
 	}
 
 	for _, tc := range testCases {
@@ -685,6 +743,22 @@ func clearStatementPos(stmt Statement) {
 			clearStatementPos(st)
 		}
 		for _, st := range s.Else {
+			clearStatementPos(st)
+		}
+	case *PerformStatement:
+		s.Pos = Pos{}
+		clearWordPos(s.Target)
+		clearWordPos(s.Through)
+		clearTypePos(s.Times)
+		clearConditionPos(s.Until)
+		if s.Varying != nil {
+			s.Varying.Pos = Pos{}
+			clearIdentifierPos(s.Varying.Name)
+			clearTypePos(s.Varying.From)
+			clearTypePos(s.Varying.By)
+			clearConditionPos(s.Varying.Until)
+		}
+		for _, st := range s.Body {
 			clearStatementPos(st)
 		}
 	case *GoToStatement:
@@ -1126,6 +1200,22 @@ func TestPrinterErrors(t *testing.T) {
 					{Sentences: []*Sentence{{Statements: []Statement{
 						&ComputeStatement{Targets: []ComputeTarget{{Name: &Identifier{Name: &Word{Value: "X"}}}}, Expr: fakeExpr{}},
 					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "typed-nil perform statement",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{(*PerformStatement)(nil)}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "out-of-line perform with no target",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{&PerformStatement{}}}}},
 				}},
 			}}}},
 		},

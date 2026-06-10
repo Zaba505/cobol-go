@@ -175,6 +175,38 @@ type IfStatement struct {
 
 func (*IfStatement) statement() {}
 
+// PerformStatement is a PERFORM statement. Pos is the position of the PERFORM
+// keyword. Out-of-line form: Target (and optional Through) name the procedure(s)
+// to run; Inline is false; Body is nil. Inline form: Inline is true, Body holds
+// the inline statements, and EndPerform reports the END-PERFORM terminator. The
+// loop is one of Times (n TIMES), Until (UNTIL, with TestAfter for WITH TEST
+// AFTER), or Varying (VARYING …); all nil for a plain PERFORM.
+type PerformStatement struct {
+	Pos        Pos
+	Target     *Word
+	Through    *Word
+	Times      Type
+	TestAfter  bool
+	Until      Condition
+	Varying    *PerformVarying
+	Body       []Statement
+	Inline     bool
+	EndPerform bool
+}
+
+func (*PerformStatement) statement() {}
+
+// PerformVarying is the VARYING phrase of a PERFORM loop. Pos is the position of
+// the loop variable; From and By are its initial value and increment; Until is the
+// termination condition.
+type PerformVarying struct {
+	Pos   Pos
+	Name  *Identifier
+	From  Type
+	By    Type
+	Until Condition
+}
+
 // ArithmeticStatement is an ADD, SUBTRACT, MULTIPLY, or DIVIDE statement. Pos is
 // the position of the verb; Verb is the canonical verb keyword. Operands are the
 // source operands; Connector is the keyword joining them to the targets ("TO",
@@ -2463,6 +2495,8 @@ func parseStatement(p *parser) (Statement, error) {
 		return parseComputeStatement(p, tok)
 	case keywordIs(tok, "IF"):
 		return parseIfStatement(p, tok)
+	case keywordIs(tok, "PERFORM"):
+		return parsePerformStatement(p, tok)
 	case keywordIs(tok, "GO"):
 		return parseGoToStatement(p, tok)
 	case keywordIs(tok, "CONTINUE"):
@@ -2471,7 +2505,7 @@ func parseStatement(p *parser) (Statement, error) {
 		return parseStopStatement(p, tok)
 	default:
 		return nil, unexpectedKeyword(tok, "DISPLAY", "MOVE", "ACCEPT",
-			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "GO", "CONTINUE", "STOP")
+			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "PERFORM", "GO", "CONTINUE", "STOP")
 	}
 }
 
@@ -2532,6 +2566,204 @@ func parseIfStatement(p *parser, kw Token) (Statement, error) {
 		p.consume()
 		stmt.EndIf = true
 	}
+	return stmt, nil
+}
+
+// parsePerformStatement parses a PERFORM statement whose verb kw has already been
+// read. It distinguishes the out-of-line form (a procedure-name, optional THROUGH,
+// and an optional loop) from the inline form (an optional loop, an inline body, and
+// END-PERFORM) by what follows the verb.
+func parsePerformStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &PerformStatement{Pos: kw.Pos}
+
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenIdentifier}}
+	}
+
+	switch {
+	case keywordIs(tok, "UNTIL", "VARYING", "WITH"):
+		// Inline loop with no procedure-name.
+		stmt.Inline = true
+		if err := parsePerformLoopSpec(p, stmt); err != nil {
+			return nil, err
+		}
+		return parsePerformInlineBody(p, stmt)
+	case isStatementVerb(tok):
+		// Inline body executed once.
+		stmt.Inline = true
+		return parsePerformInlineBody(p, stmt)
+	case isOperandStart(tok):
+		return parsePerformWithOperand(p, stmt)
+	default:
+		return nil, unexpectedKeyword(tok, "UNTIL", "VARYING", "WITH")
+	}
+}
+
+// parsePerformWithOperand handles a PERFORM whose first token is an operand: either
+// a count ("n TIMES …" inline) or a procedure-name (out-of-line).
+func parsePerformWithOperand(p *parser, stmt *PerformStatement) (Statement, error) {
+	first, err := parseOperand(p)
+	if err != nil {
+		return nil, err
+	}
+
+	times, err := p.peekKeyword("TIMES")
+	if err != nil {
+		return nil, err
+	}
+	if times {
+		p.consume()
+		stmt.Times = first
+		stmt.Inline = true
+		return parsePerformInlineBody(p, stmt)
+	}
+
+	id, ok := first.(*Identifier)
+	if !ok || len(id.Qualifiers) > 0 || len(id.Subscripts) > 0 || id.RefMod != nil {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: Token{Pos: typePos(first), Type: TokenIdentifier}}
+	}
+	stmt.Target = id.Name
+
+	through, err := p.peekKeyword("THROUGH", "THRU")
+	if err != nil {
+		return nil, err
+	}
+	if through {
+		p.consume()
+		t, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Through = &Word{Pos: t.Pos, Value: string(t.Value)}
+	}
+
+	if err := parsePerformLoopSpec(p, stmt); err != nil {
+		return nil, err
+	}
+	return stmt, nil
+}
+
+// parsePerformLoopSpec parses an optional PERFORM loop specification onto stmt:
+// "n TIMES", "[WITH TEST BEFORE|AFTER] UNTIL condition", or "VARYING …".
+func parsePerformLoopSpec(p *parser, stmt *PerformStatement) error {
+	with, err := p.peekKeyword("WITH")
+	if err != nil {
+		return err
+	}
+	if with {
+		p.consume()
+		if _, err := p.expectKeyword("TEST"); err != nil {
+			return err
+		}
+		ba, err := p.expectKeyword("BEFORE", "AFTER")
+		if err != nil {
+			return err
+		}
+		stmt.TestAfter = keywordIs(ba, "AFTER")
+		if _, err := p.expectKeyword("UNTIL"); err != nil {
+			return err
+		}
+		cond, err := parseCondition(p)
+		if err != nil {
+			return err
+		}
+		stmt.Until = cond
+		return nil
+	}
+
+	until, err := p.peekKeyword("UNTIL")
+	if err != nil {
+		return err
+	}
+	if until {
+		p.consume()
+		cond, err := parseCondition(p)
+		if err != nil {
+			return err
+		}
+		stmt.Until = cond
+		return nil
+	}
+
+	varying, err := p.peekKeyword("VARYING")
+	if err != nil {
+		return err
+	}
+	if varying {
+		vtok, _, _ := p.advance()
+		v, err := parsePerformVarying(p, vtok)
+		if err != nil {
+			return err
+		}
+		stmt.Varying = v
+		return nil
+	}
+
+	// "n TIMES" loop (a count operand followed by TIMES).
+	tok, terr, tokOK := p.peek()
+	if terr != nil {
+		return terr
+	}
+	if tokOK && isOperandStart(tok) {
+		count, err := parseOperand(p)
+		if err != nil {
+			return err
+		}
+		if _, err := p.expectKeyword("TIMES"); err != nil {
+			return err
+		}
+		stmt.Times = count
+	}
+	return nil
+}
+
+// parsePerformVarying parses the VARYING phrase after its keyword vtok: the loop
+// variable, FROM initial value, BY increment, and UNTIL termination condition.
+func parsePerformVarying(p *parser, vtok Token) (*PerformVarying, error) {
+	name, err := parseIdentifierToken(p)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("FROM"); err != nil {
+		return nil, err
+	}
+	from, err := parseOperand(p)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("BY"); err != nil {
+		return nil, err
+	}
+	by, err := parseOperand(p)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("UNTIL"); err != nil {
+		return nil, err
+	}
+	cond, err := parseCondition(p)
+	if err != nil {
+		return nil, err
+	}
+	return &PerformVarying{Pos: vtok.Pos, Name: name, From: from, By: by, Until: cond}, nil
+}
+
+// parsePerformInlineBody parses the inline body of a PERFORM and its required
+// END-PERFORM terminator.
+func parsePerformInlineBody(p *parser, stmt *PerformStatement) (Statement, error) {
+	body, err := parseStatementList(p, stopAtNested)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Body = body
+	if _, err := p.expectKeyword("END-PERFORM"); err != nil {
+		return nil, err
+	}
+	stmt.EndPerform = true
 	return stmt, nil
 }
 
@@ -3143,6 +3375,22 @@ func parsePrimary(p *parser) (Expr, error) {
 		return &NumericLiteral{Pos: tok.Pos, Value: string(tok.Value)}, nil
 	default:
 		return parseIdentifier(p, tok)
+	}
+}
+
+// typePos returns the source position of a value node (a [Type]).
+func typePos(v Type) Pos {
+	switch n := v.(type) {
+	case *Identifier:
+		return n.Pos
+	case *Word:
+		return n.Pos
+	case *StringLiteral:
+		return n.Pos
+	case *NumericLiteral:
+		return n.Pos
+	default:
+		return Pos{}
 	}
 }
 
