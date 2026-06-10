@@ -493,6 +493,17 @@ func TestTokenizer(t *testing.T) {
 			},
 		},
 		{
+			// An empty picture run emits no TokenPicture: the separator period is
+			// left for the next dispatch rather than swallowed or turned into an
+			// empty-valued picture token.
+			name: "empty picture run emits no picture token",
+			src:  "PIC.",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 4}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
 			name: "minimal free-format program",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. HELLO.\n" +
