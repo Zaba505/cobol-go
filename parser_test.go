@@ -64,6 +64,99 @@ func TestParser(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "environment division with both sections",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. ENV.\n" +
+				"ENVIRONMENT DIVISION.\n" +
+				"CONFIGURATION SECTION.\n" +
+				"SOURCE-COMPUTER. GNU.\n" +
+				"OBJECT-COMPUTER. GNU.\n" +
+				"SPECIAL-NAMES.\n" +
+				"    DECIMAL-POINT IS COMMA\n" +
+				"    CURRENCY SIGN IS \"$\".\n" +
+				"INPUT-OUTPUT SECTION.\n" +
+				"FILE-CONTROL.\n" +
+				"    SELECT OPTIONAL F ASSIGN TO \"f.dat\"\n" +
+				"        ORGANIZATION IS LINE SEQUENTIAL\n" +
+				"        ACCESS MODE IS DYNAMIC\n" +
+				"        RECORD KEY IS F-KEY\n" +
+				"        FILE STATUS IS F-STAT.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STOP RUN.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "ENV"},
+								},
+							},
+							&EnvironmentDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Configuration: &ConfigurationSection{
+									Pos: Pos{Line: 4, Column: 1},
+									SourceComputer: &SourceComputerParagraph{
+										Pos:          Pos{Line: 5, Column: 1},
+										ComputerName: &Word{Pos: Pos{Line: 5, Column: 18}, Value: "GNU"},
+									},
+									ObjectComputer: &ObjectComputerParagraph{
+										Pos:          Pos{Line: 6, Column: 1},
+										ComputerName: &Word{Pos: Pos{Line: 6, Column: 18}, Value: "GNU"},
+									},
+									SpecialNames: &SpecialNamesParagraph{
+										Pos: Pos{Line: 7, Column: 1},
+										Clauses: []SpecialNamesClause{
+											&DecimalPointClause{Pos: Pos{Line: 8, Column: 5}},
+											&CurrencySignClause{
+												Pos:  Pos{Line: 9, Column: 5},
+												Sign: &StringLiteral{Pos: Pos{Line: 9, Column: 22}, Value: `"$"`},
+											},
+										},
+									},
+								},
+								InputOutput: &InputOutputSection{
+									Pos: Pos{Line: 10, Column: 1},
+									FileControl: &FileControlParagraph{
+										Pos: Pos{Line: 11, Column: 1},
+										Entries: []*FileControlEntry{
+											{
+												Pos:      Pos{Line: 12, Column: 5},
+												Optional: true,
+												Name:     &Word{Pos: Pos{Line: 12, Column: 21}, Value: "F"},
+												Assign:   &StringLiteral{Pos: Pos{Line: 12, Column: 33}, Value: `"f.dat"`},
+												Clauses: []SelectClause{
+													&OrganizationClause{Pos: Pos{Line: 13, Column: 9}, Organization: "LINE SEQUENTIAL"},
+													&AccessClause{Pos: Pos{Line: 14, Column: 9}, Mode: "DYNAMIC"},
+													&RecordKeyClause{
+														Pos:  Pos{Line: 15, Column: 9},
+														Name: &Word{Pos: Pos{Line: 15, Column: 23}, Value: "F-KEY"},
+													},
+													&FileStatusClause{
+														Pos:  Pos{Line: 16, Column: 9},
+														Name: &Word{Pos: Pos{Line: 16, Column: 24}, Value: "F-STAT"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 17, Column: 1},
+								Statements: []Statement{
+									&StopStatement{Pos: Pos{Line: 18, Column: 5}, Run: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -139,6 +232,45 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedTokenError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 5}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "missing SECTION after CONFIGURATION",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. ENV.\n" +
+				"ENVIRONMENT DIVISION.\n" +
+				"CONFIGURATION.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 14}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "invalid ORGANIZATION value",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. ENV.\n" +
+				"ENVIRONMENT DIVISION.\n" +
+				"INPUT-OUTPUT SECTION.\n" +
+				"FILE-CONTROL.\n" +
+				"    SELECT F ASSIGN TO \"f.dat\"\n" +
+				"        ORGANIZATION IS BOGUS.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 7, Column: 25}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "unimplemented DATA division after environment",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. ENV.\n" +
+				"ENVIRONMENT DIVISION.\n" +
+				"DATA DIVISION.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 1}, target.Actual.Pos)
 			},
 		},
 	}

@@ -58,6 +58,86 @@ func TestPrinter(t *testing.T) {
 				"    DISPLAY \"Hello, world!\".\n" +
 				"    STOP RUN.\n",
 		},
+		{
+			name: "environment division",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "ENV"}},
+							},
+							&EnvironmentDivision{
+								Configuration: &ConfigurationSection{
+									SourceComputer: &SourceComputerParagraph{
+										ComputerName:  &Word{Value: "GNU"},
+										DebuggingMode: true,
+									},
+									ObjectComputer: &ObjectComputerParagraph{
+										ComputerName: &Word{Value: "GNU"},
+									},
+									SpecialNames: &SpecialNamesParagraph{
+										Clauses: []SpecialNamesClause{
+											&DecimalPointClause{},
+											&CurrencySignClause{Sign: &StringLiteral{Value: `"$"`}},
+										},
+									},
+								},
+								InputOutput: &InputOutputSection{
+									FileControl: &FileControlParagraph{
+										Entries: []*FileControlEntry{
+											{
+												Optional: true,
+												Name:     &Word{Value: "LOG-FILE"},
+												Assign:   &StringLiteral{Value: `"log.txt"`},
+												Clauses: []SelectClause{
+													&OrganizationClause{Organization: "LINE SEQUENTIAL"},
+													&AccessClause{Mode: "SEQUENTIAL"},
+												},
+											},
+											{
+												Name:   &Word{Value: "CUST-FILE"},
+												Assign: &StringLiteral{Value: `"customers.dat"`},
+												Clauses: []SelectClause{
+													&OrganizationClause{Organization: "INDEXED"},
+													&AccessClause{Mode: "DYNAMIC"},
+													&RecordKeyClause{Name: &Word{Value: "CUST-ID"}},
+													&FileStatusClause{Name: &Word{Value: "WS-FILE-STATUS"}},
+												},
+											},
+										},
+									},
+								},
+							},
+							&ProcedureDivision{
+								Statements: []Statement{&StopStatement{Run: true}},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. ENV.\n" +
+				"ENVIRONMENT DIVISION.\n" +
+				"CONFIGURATION SECTION.\n" +
+				"SOURCE-COMPUTER. GNU WITH DEBUGGING MODE.\n" +
+				"OBJECT-COMPUTER. GNU.\n" +
+				"SPECIAL-NAMES.\n" +
+				"    DECIMAL-POINT IS COMMA\n" +
+				"    CURRENCY SIGN IS \"$\".\n" +
+				"INPUT-OUTPUT SECTION.\n" +
+				"FILE-CONTROL.\n" +
+				"    SELECT OPTIONAL LOG-FILE ASSIGN TO \"log.txt\"\n" +
+				"        ORGANIZATION IS LINE SEQUENTIAL\n" +
+				"        ACCESS MODE IS SEQUENTIAL.\n" +
+				"    SELECT CUST-FILE ASSIGN TO \"customers.dat\"\n" +
+				"        ORGANIZATION IS INDEXED\n" +
+				"        ACCESS MODE IS DYNAMIC\n" +
+				"        RECORD KEY IS CUST-ID\n" +
+				"        FILE STATUS IS WS-FILE-STATUS.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STOP RUN.\n",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -92,6 +172,25 @@ func TestPrinterRoundTrip(t *testing.T) {
 				"PROGRAM-ID. hello.\n" +
 				"PROCEDURE DIVISION.\n" +
 				"    DISPLAY \"Hello, world!\".\n" +
+				"    STOP RUN.\n",
+		},
+		{
+			name: "environment division",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. ENV.\n" +
+				"ENVIRONMENT DIVISION.\n" +
+				"CONFIGURATION SECTION.\n" +
+				"SOURCE-COMPUTER. GNU WITH DEBUGGING MODE.\n" +
+				"OBJECT-COMPUTER. GNU.\n" +
+				"SPECIAL-NAMES.\n" +
+				"    DECIMAL-POINT IS COMMA\n" +
+				"    CURRENCY SIGN IS \"$\".\n" +
+				"INPUT-OUTPUT SECTION.\n" +
+				"FILE-CONTROL.\n" +
+				"    SELECT OPTIONAL LOG-FILE ASSIGN TO \"log.txt\"\n" +
+				"        ORGANIZATION IS LINE SEQUENTIAL\n" +
+				"        ACCESS MODE IS SEQUENTIAL.\n" +
+				"PROCEDURE DIVISION.\n" +
 				"    STOP RUN.\n",
 		},
 	}
@@ -129,6 +228,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		fixture string
 	}{
 		{name: "hello_cob", fixture: "hello.cob"},
+		{name: "environment_cob", fixture: "environment.cob"},
 	}
 
 	for _, tc := range testCases {
@@ -169,6 +269,8 @@ func withoutPos(f *File) *File {
 					d.ProgramID.Pos = Pos{}
 					clearTypePos(d.ProgramID.Name)
 				}
+			case *EnvironmentDivision:
+				clearEnvironmentPos(d)
 			case *ProcedureDivision:
 				d.Pos = Pos{}
 				for _, stmt := range d.Statements {
@@ -198,6 +300,67 @@ func clearTypePos(v Type) {
 	}
 }
 
+// clearWordPos zeroes the Pos of an optional *Word child (a no-op when nil).
+func clearWordPos(w *Word) {
+	if w != nil {
+		w.Pos = Pos{}
+	}
+}
+
+// clearEnvironmentPos zeroes every Pos beneath an ENVIRONMENT DIVISION so
+// round-trip comparisons ignore the positions the printer is free to choose.
+func clearEnvironmentPos(div *EnvironmentDivision) {
+	div.Pos = Pos{}
+	if sec := div.Configuration; sec != nil {
+		sec.Pos = Pos{}
+		if p := sec.SourceComputer; p != nil {
+			p.Pos = Pos{}
+			clearWordPos(p.ComputerName)
+		}
+		if p := sec.ObjectComputer; p != nil {
+			p.Pos = Pos{}
+			clearWordPos(p.ComputerName)
+		}
+		if p := sec.SpecialNames; p != nil {
+			p.Pos = Pos{}
+			for _, clause := range p.Clauses {
+				switch c := clause.(type) {
+				case *DecimalPointClause:
+					c.Pos = Pos{}
+				case *CurrencySignClause:
+					c.Pos = Pos{}
+					clearTypePos(c.Sign)
+				}
+			}
+		}
+	}
+	if sec := div.InputOutput; sec != nil {
+		sec.Pos = Pos{}
+		if para := sec.FileControl; para != nil {
+			para.Pos = Pos{}
+			for _, entry := range para.Entries {
+				entry.Pos = Pos{}
+				clearWordPos(entry.Name)
+				clearTypePos(entry.Assign)
+				for _, clause := range entry.Clauses {
+					switch c := clause.(type) {
+					case *OrganizationClause:
+						c.Pos = Pos{}
+					case *AccessClause:
+						c.Pos = Pos{}
+					case *RecordKeyClause:
+						c.Pos = Pos{}
+						clearWordPos(c.Name)
+					case *FileStatusClause:
+						c.Pos = Pos{}
+						clearWordPos(c.Name)
+					}
+				}
+			}
+		}
+	}
+}
+
 // fakeDivision, fakeStatement, and fakeValue satisfy the sealed AST interfaces
 // with concrete types the printer does not know, so the error-path test can drive
 // every "unsupported node" branch without waiting for real future node types.
@@ -212,6 +375,14 @@ func (fakeStatement) statement() {}
 type fakeValue struct{}
 
 func (fakeValue) cobol() {}
+
+type fakeSpecialNamesClause struct{}
+
+func (fakeSpecialNamesClause) specialNamesClause() {}
+
+type fakeSelectClause struct{}
+
+func (fakeSelectClause) selectClause() {}
 
 // TestPrinterErrors pins the typed error the printer reports for nil and
 // unknown-type AST nodes, so the public Print API fails cleanly instead of
@@ -256,6 +427,40 @@ func TestPrinterErrors(t *testing.T) {
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				&ProcedureDivision{Statements: []Statement{
 					&DisplayStatement{Operands: []Type{fakeValue{}}},
+				}},
+			}}}},
+		},
+		{
+			name: "unknown special-names clause type",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&EnvironmentDivision{Configuration: &ConfigurationSection{
+					SpecialNames: &SpecialNamesParagraph{
+						Clauses: []SpecialNamesClause{fakeSpecialNamesClause{}},
+					},
+				}},
+			}}}},
+		},
+		{
+			name: "unsupported file-control assignment target",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&EnvironmentDivision{InputOutput: &InputOutputSection{
+					FileControl: &FileControlParagraph{Entries: []*FileControlEntry{
+						{Name: &Word{Value: "F"}, Assign: fakeValue{}},
+					}},
+				}},
+			}}}},
+		},
+		{
+			name: "unknown select-clause type",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&EnvironmentDivision{InputOutput: &InputOutputSection{
+					FileControl: &FileControlParagraph{Entries: []*FileControlEntry{
+						{
+							Name:    &Word{Value: "F"},
+							Assign:  &StringLiteral{Value: `"f.dat"`},
+							Clauses: []SelectClause{fakeSelectClause{}},
+						},
+					}},
 				}},
 			}}}},
 		},
