@@ -969,7 +969,8 @@ func printComputeStatement(stmt *ComputeStatement, depth int, next printerAction
 // program (a literal or identifier), an optional USING phrase whose operands each
 // carry an optional BY mode, an optional RETURNING identifier, and an optional
 // END-CALL scope terminator. The sentence-terminating period is emitted by the
-// enclosing sentence. A typed-nil statement, a nil/unprintable target, or an
+// enclosing sentence. A typed-nil statement, a target that is not an alphanumeric
+// literal or identifier, a nil USING argument, an unsupported BY mode, or an
 // unprintable operand is rejected with an [UnsupportedNodeError].
 func printCallStatement(stmt *CallStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
@@ -999,10 +1000,17 @@ func printCallStatement(stmt *CallStatement, depth int, next printerAction) prin
 			pr.write(" USING")
 			for _, arg := range stmt.Using {
 				if arg == nil {
-					return failPrint(UnsupportedNodeError{Node: stmt})
+					return failPrint(UnsupportedNodeError{Node: arg})
 				}
 				if arg.Mode != "" {
-					pr.write(" BY " + arg.Mode)
+					// Mode is a free-form string on the node; only the three COBOL
+					// passing mechanisms print as valid BY phrases.
+					switch arg.Mode {
+					case "REFERENCE", "CONTENT", "VALUE":
+						pr.write(" BY " + arg.Mode)
+					default:
+						return failPrint(UnsupportedNodeError{Node: arg})
+					}
 				}
 				text, ok := valueText(arg.Operand)
 				if !ok {

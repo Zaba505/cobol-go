@@ -1774,6 +1774,29 @@ func TestPrinterErrors(t *testing.T) {
 				}},
 			}}}},
 		},
+		{
+			name: "call target not literal or identifier",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&CallStatement{Target: &NumericLiteral{Value: "5"}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "call using with unsupported by mode",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&CallStatement{
+							Target: &StringLiteral{Value: `"P"`},
+							Using:  []*CallArgument{{Mode: "BOGUS", Operand: &Identifier{Name: &Word{Value: "WS-A"}}}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
 	}
 
 	for _, tc := range testCases {
