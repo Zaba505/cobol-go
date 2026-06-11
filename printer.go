@@ -1097,19 +1097,33 @@ func evaluateSubjectsText(subjects []*EvaluateSubject) (string, bool) {
 }
 
 // evaluateSubjectText renders one EVALUATE subject: a boolean keyword, a condition,
-// or an operand.
+// or an operand. Exactly one of Bool/Cond/Operand must be set; an inconsistent node
+// is rejected (false) rather than silently dropping a field, so the print stays
+// round-trippable.
 func evaluateSubjectText(s *EvaluateSubject) (string, bool) {
-	switch {
-	case s == nil:
+	if s == nil {
 		return "", false
+	}
+	set := 0
+	if s.Bool != "" {
+		set++
+	}
+	if s.Cond != nil {
+		set++
+	}
+	if s.Operand != nil {
+		set++
+	}
+	if set != 1 {
+		return "", false
+	}
+	switch {
 	case s.Bool != "":
 		return s.Bool, true
 	case s.Cond != nil:
 		return conditionText(s.Cond)
-	case s.Operand != nil:
-		return valueText(s.Operand)
 	default:
-		return "", false
+		return valueText(s.Operand)
 	}
 }
 
@@ -1128,10 +1142,37 @@ func evaluateObjectsText(objects []*EvaluateObject) (string, bool) {
 
 // evaluateObjectText renders one WHEN object: ANY, a boolean keyword, or an optional
 // leading NOT applied to an operand (with an optional THROUGH range) or a condition.
+// The union invariants are validated up front and an inconsistent node is rejected
+// (false) so a malformed AST cannot print a lossy, non-round-trippable object:
+// exactly one of Any/Bool/Cond/Operand must be set, a THROUGH range requires the
+// operand form, and a leading NOT cannot combine with ANY or a boolean.
 func evaluateObjectText(o *EvaluateObject) (string, bool) {
 	if o == nil {
 		return "", false
 	}
+	set := 0
+	if o.Any {
+		set++
+	}
+	if o.Bool != "" {
+		set++
+	}
+	if o.Cond != nil {
+		set++
+	}
+	if o.Operand != nil {
+		set++
+	}
+	if set != 1 {
+		return "", false
+	}
+	if o.Through != nil && o.Operand == nil {
+		return "", false
+	}
+	if o.Not && (o.Any || o.Bool != "") {
+		return "", false
+	}
+
 	switch {
 	case o.Any:
 		return "ANY", true
@@ -1146,7 +1187,7 @@ func evaluateObjectText(o *EvaluateObject) (string, bool) {
 			return "", false
 		}
 		inner = c
-	case o.Operand != nil:
+	default:
 		v, ok := valueText(o.Operand)
 		if !ok {
 			return "", false
@@ -1159,8 +1200,6 @@ func evaluateObjectText(o *EvaluateObject) (string, bool) {
 			}
 			inner += " THROUGH " + t
 		}
-	default:
-		return "", false
 	}
 	return negate(o.Not) + inner, true
 }

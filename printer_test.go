@@ -1675,6 +1675,48 @@ func TestPrinterErrors(t *testing.T) {
 				}},
 			}}}},
 		},
+		{
+			name: "evaluate subject with conflicting fields",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&EvaluateStatement{
+							Subjects: []*EvaluateSubject{{Bool: "TRUE", Operand: &Identifier{Name: &Word{Value: "X"}}}},
+							Whens:    []*EvaluateWhen{{Objects: []*EvaluateObject{{Any: true}}, Body: []Statement{&ContinueStatement{}}}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "evaluate object combines any with not",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&EvaluateStatement{
+							Subjects: []*EvaluateSubject{{Operand: &Identifier{Name: &Word{Value: "X"}}}},
+							Whens:    []*EvaluateWhen{{Objects: []*EvaluateObject{{Any: true, Not: true}}, Body: []Statement{&ContinueStatement{}}}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "evaluate object range without operand",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&EvaluateStatement{
+							Subjects: []*EvaluateSubject{{Operand: &Identifier{Name: &Word{Value: "X"}}}},
+							Whens: []*EvaluateWhen{{Objects: []*EvaluateObject{{
+								Cond:    &RelationCondition{Left: &Identifier{Name: &Word{Value: "A"}}, Op: ">", Right: &Identifier{Name: &Word{Value: "B"}}},
+								Through: &NumericLiteral{Value: "9"},
+							}}, Body: []Statement{&ContinueStatement{}}}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
 	}
 
 	for _, tc := range testCases {
