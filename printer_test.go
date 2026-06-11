@@ -1160,6 +1160,16 @@ func TestPrinterErrors(t *testing.T) {
 			}}}},
 		},
 		{
+			name: "stop with both run and literal",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&StopStatement{Run: true, Literal: &StringLiteral{Value: `"X"`}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
 			name: "typed-nil move statement",
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				&ProcedureDivision{Paragraphs: []*Paragraph{

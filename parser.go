@@ -3404,76 +3404,129 @@ func parseIdentifier(p *parser, name Token) (*Identifier, error) {
 		id.Qualifiers = append(id.Qualifiers, &Word{Pos: q.Pos, Value: string(q.Value)})
 	}
 
+	// An identifier may carry a subscript and/or a reference-modifier, in that
+	// order (SPEC.md: identifier = qualified-name [ subscript ] [ reference-modifier ]),
+	// e.g. A(I)(1:3).
 	open, err := p.peekSymbol("(")
 	if err != nil {
 		return nil, err
 	}
 	if open {
-		if err := parseSubscriptOrRefMod(p, id); err != nil {
+		isRefMod, err := parseSubscriptOrRefMod(p, id)
+		if err != nil {
 			return nil, err
+		}
+		// A reference-modifier may follow a subscript; a second parenthesized group
+		// after a subscript must be the reference-modifier (it requires a colon).
+		if !isRefMod {
+			open2, err := p.peekSymbol("(")
+			if err != nil {
+				return nil, err
+			}
+			if open2 {
+				if err := parseReferenceModifier(p, id); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	return id, nil
 }
 
-// parseSubscriptOrRefMod parses the parenthesized suffix of an identifier. A
+// parseSubscriptOrRefMod parses the first parenthesized suffix of an identifier. A
 // top-level ":" marks a reference-modifier "(start:length)"; otherwise it is a
-// subscript list "(sub {sub})". The opening parenthesis has not yet been consumed.
-func parseSubscriptOrRefMod(p *parser, id *Identifier) error {
+// subscript list "(sub {sub})". It reports whether the suffix was a
+// reference-modifier. The opening parenthesis has not yet been consumed.
+func parseSubscriptOrRefMod(p *parser, id *Identifier) (bool, error) {
 	open, err := p.expectSymbol("(")
 	if err != nil {
-		return err
+		return false, err
 	}
 	first, err := parseExpr(p)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	isColon, err := p.peekSymbol(":")
 	if err != nil {
-		return err
+		return false, err
 	}
 	if isColon {
 		p.consume() // ":"
-		rm := &ReferenceModifier{Pos: open.Pos, Start: first}
-		closing, err := p.peekSymbol(")")
+		rm, err := finishReferenceModifier(p, open, first)
 		if err != nil {
-			return err
-		}
-		if !closing {
-			length, err := parseExpr(p)
-			if err != nil {
-				return err
-			}
-			rm.Length = length
-		}
-		if _, err := p.expectSymbol(")"); err != nil {
-			return err
+			return false, err
 		}
 		id.RefMod = rm
-		return nil
+		return true, nil
 	}
 
 	subs := []Expr{first}
 	for {
 		closing, err := p.peekSymbol(")")
 		if err != nil {
-			return err
+			return false, err
 		}
 		if closing {
 			break
 		}
 		sub, err := parseExpr(p)
 		if err != nil {
-			return err
+			return false, err
 		}
 		subs = append(subs, sub)
 	}
 	if _, err := p.expectSymbol(")"); err != nil {
-		return err
+		return false, err
 	}
 	id.Subscripts = subs
+	return false, nil
+}
+
+// parseReferenceModifier parses a "(start:length)" reference-modifier, requiring
+// the colon. It is used for the optional reference-modifier that may follow a
+// subscript; a parenthesized group there without a colon (a second subscript list)
+// is invalid and reported via the missing-colon error.
+func parseReferenceModifier(p *parser, id *Identifier) error {
+	open, err := p.expectSymbol("(")
+	if err != nil {
+		return err
+	}
+	start, err := parseExpr(p)
+	if err != nil {
+		return err
+	}
+	if _, err := p.expectSymbol(":"); err != nil {
+		return err
+	}
+	rm, err := finishReferenceModifier(p, open, start)
+	if err != nil {
+		return err
+	}
+	id.RefMod = rm
 	return nil
+}
+
+// finishReferenceModifier parses the optional length and closing ")" of a
+// reference-modifier whose opening "(" (open), start expression, and ":" have
+// already been consumed.
+func finishReferenceModifier(p *parser, open Token, start Expr) (*ReferenceModifier, error) {
+	rm := &ReferenceModifier{Pos: open.Pos, Start: start}
+	closing, err := p.peekSymbol(")")
+	if err != nil {
+		return nil, err
+	}
+	if !closing {
+		length, err := parseExpr(p)
+		if err != nil {
+			return nil, err
+		}
+		rm.Length = length
+	}
+	if _, err := p.expectSymbol(")"); err != nil {
+		return nil, err
+	}
+	return rm, nil
 }
 
 // parseExpr parses an arithmetic expression: terms joined by "+"/"-"
@@ -3523,28 +3576,31 @@ func parseTerm(p *parser) (Expr, error) {
 	}
 }
 
-// parseFactor parses a factor: an optional leading sign, a primary, and a
-// left-associative chain of "**" exponentiations. COBOL evaluates equal-precedence
-// operators left to right, matching SPEC.md's `factor = [sign] primary { "**"
-// primary }`.
+// parseFactor parses a factor: an optional leading sign applied to the first
+// primary, followed by a left-associative chain of "**" exponentiations. Per
+// SPEC.md (`factor = [sign] primary { "**" primary }`) the sign binds only to the
+// first primary (so "-A ** B" is "(-A) ** B"), and exponentiation — equal-
+// precedence, evaluated left to right in COBOL — still parses after a signed
+// primary.
 func parseFactor(p *parser) (Expr, error) {
 	signed, err := p.peekSymbol("+", "-")
 	if err != nil {
 		return nil, err
 	}
+	var sign *Token
 	if signed {
 		op, _ := p.expectSymbol("+", "-")
-		operand, err := parseFactor(p)
-		if err != nil {
-			return nil, err
-		}
-		return &UnaryExpr{Pos: op.Pos, Op: string(op.Value), Operand: operand}, nil
+		sign = &op
 	}
 
 	left, err := parsePrimary(p)
 	if err != nil {
 		return nil, err
 	}
+	if sign != nil {
+		left = &UnaryExpr{Pos: sign.Pos, Op: string(sign.Value), Operand: left}
+	}
+
 	for {
 		is, err := p.peekSymbol("**")
 		if err != nil {

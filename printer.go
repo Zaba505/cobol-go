@@ -1161,26 +1161,23 @@ func printContinueStatement(stmt *ContinueStatement, next printerAction) printer
 }
 
 // printStopStatement prints a STOP statement (the indented verb; the sentence
-// emits the terminating period): STOP RUN or STOP <literal>. A typed-nil statement
-// or a STOP form with neither RUN nor a literal is rejected with an
-// [UnsupportedNodeError].
+// emits the terminating period): STOP RUN or STOP <literal>. Exactly one of Run or
+// Literal must be present; a typed-nil statement, neither set, or both set
+// (RUN would silently drop the literal) is rejected with an [UnsupportedNodeError].
 func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
-		if stmt == nil {
+		if stmt == nil || stmt.Run == (stmt.Literal != nil) {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		switch {
-		case stmt.Run:
+		if stmt.Run {
 			pr.write("    STOP RUN")
-		case stmt.Literal != nil:
-			text, ok := valueText(stmt.Literal)
-			if !ok {
-				return failPrint(UnsupportedNodeError{Node: stmt.Literal})
-			}
-			pr.write("    STOP " + text)
-		default:
-			return failPrint(UnsupportedNodeError{Node: stmt})
+			return next
 		}
+		text, ok := valueText(stmt.Literal)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Literal})
+		}
+		pr.write("    STOP " + text)
 		return next
 	}
 }

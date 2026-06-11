@@ -563,6 +563,56 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "unary sign binds to the first primary before exponentiation",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    COMPUTE X = -A ** B.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ComputeStatement{
+														Pos:     Pos{Line: 4, Column: 5},
+														Targets: []ComputeTarget{{Pos: Pos{Line: 4, Column: 13}, Name: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "X"}}}},
+														// (-A) ** B — the sign binds to A, then exponentiation.
+														Expr: &BinaryExpr{
+															Pos: Pos{Line: 4, Column: 17},
+															Op:  "**",
+															Left: &UnaryExpr{
+																Pos:     Pos{Line: 4, Column: 17},
+																Op:      "-",
+																Operand: &Identifier{Pos: Pos{Line: 4, Column: 18}, Name: &Word{Pos: Pos{Line: 4, Column: 18}, Value: "A"}},
+															},
+															Right: &Identifier{Pos: Pos{Line: 4, Column: 23}, Name: &Word{Pos: Pos{Line: 4, Column: 23}, Value: "B"}},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "AND binds tighter than OR",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +
@@ -942,6 +992,19 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedTokenError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 13}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "two subscript groups (second must be a reference-modifier)",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE A(I)(J) TO B.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				// The second group lacks a ":", so the reference-modifier colon is required.
+				require.Equal(t, Pos{Line: 4, Column: 16}, target.Actual.Pos)
 			},
 		},
 		{
