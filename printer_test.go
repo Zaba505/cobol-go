@@ -1283,6 +1283,16 @@ func TestPrinterErrors(t *testing.T) {
 			}}}},
 		},
 		{
+			name: "perform with test after but no until",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&PerformStatement{Inline: true, TestAfter: true, EndPerform: true, Body: []Statement{&ContinueStatement{}}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
 			name: "arithmetic with targets but no connector",
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				&ProcedureDivision{Paragraphs: []*Paragraph{

@@ -2394,7 +2394,9 @@ func parseProcedureHeader(p *parser, _ *ProcedureDivision) (parserAction[*Proced
 // of sections); the first header decides which, and the two forms are mutually
 // exclusive.
 func parseProcedureBody(p *parser, div *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
-	if _, _, ok := p.peek(); !ok {
+	if _, err, ok := p.peek(); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, nil
 	}
 
@@ -2510,7 +2512,9 @@ func parseSection(p *parser) (*Section, error) {
 // parseSectionParagraphOpt parses one paragraph of a section and appends it, then
 // returns itself; it ends the section at the next section header or end of input.
 func parseSectionParagraphOpt(p *parser, sec *Section) (parserAction[*Section], error) {
-	if _, _, ok := p.peek(); !ok {
+	if _, err, ok := p.peek(); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, nil
 	}
 	section, err := p.atSectionHeader()
