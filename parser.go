@@ -3783,9 +3783,22 @@ func parseCallArgument(p *parser) (*CallArgument, error) {
 		mode = strings.ToUpper(string(m.Value))
 	}
 
+	// An operand is required here. parseOperand accepts any identifier token, so
+	// reject a reserved keyword (e.g. RETURNING or a scope terminator) that would
+	// otherwise be silently swallowed as a data-name, hiding the clause it begins.
+	lead, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenIdentifier, TokenString, TokenNumber}}
+	}
+	if !isOperandStart(lead) {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier, TokenString, TokenNumber}, Actual: lead}
+	}
+
 	// The operand begins at the next token; capture its position before parsing so
 	// the argument points at its start when no BY phrase precedes it.
-	lead, _, _ := p.peek()
 	op, err := parseOperand(p)
 	if err != nil {
 		return nil, err

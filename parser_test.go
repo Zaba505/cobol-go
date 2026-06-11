@@ -1629,6 +1629,18 @@ func TestParserErrors(t *testing.T) {
 				require.Equal(t, Pos{Line: 4, Column: 23}, target.Actual.Pos)
 			},
 		},
+		{
+			name: "call using with no operand before returning",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CALL \"P\" USING RETURNING WS-RC.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 20}, target.Actual.Pos)
+			},
+		},
 	}
 
 	for _, tc := range testCases {

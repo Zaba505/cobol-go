@@ -976,8 +976,22 @@ func printCallStatement(stmt *CallStatement, depth int, next printerAction) prin
 		if stmt == nil {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		target, ok := valueText(stmt.Target)
-		if !ok {
+		// The grammar restricts a CALL target to an alphanumeric literal or an
+		// identifier; a numeric (or any other value node) would print invalid COBOL.
+		var target string
+		switch t := stmt.Target.(type) {
+		case *StringLiteral:
+			if t == nil {
+				return failPrint(UnsupportedNodeError{Node: stmt.Target})
+			}
+			target = t.Value
+		case *Identifier:
+			text, ok := identifierText(t)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Target})
+			}
+			target = text
+		default:
 			return failPrint(UnsupportedNodeError{Node: stmt.Target})
 		}
 		pr.write(indent(depth) + "CALL " + target)
