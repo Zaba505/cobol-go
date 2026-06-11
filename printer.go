@@ -792,6 +792,8 @@ func printStatement(stmt Statement, depth int, next printerAction) printerAction
 		return printPerformStatement(s, depth, next)
 	case *EvaluateStatement:
 		return printEvaluateStatement(s, depth, next)
+	case *CallStatement:
+		return printCallStatement(s, depth, next)
 	case *GoToStatement:
 		return printGoToStatement(s, depth, next)
 	case *ContinueStatement:
@@ -958,6 +960,74 @@ func printComputeStatement(stmt *ComputeStatement, depth int, next printerAction
 		pr.write(" = " + e)
 		if stmt.EndScope {
 			pr.write(" END-COMPUTE")
+		}
+		return next
+	}
+}
+
+// printCallStatement prints a CALL statement on one line: the verb, the called
+// program (a literal or identifier), an optional USING phrase whose operands each
+// carry an optional BY mode, an optional RETURNING identifier, and an optional
+// END-CALL scope terminator. The sentence-terminating period is emitted by the
+// enclosing sentence. A typed-nil statement, a target that is not an alphanumeric
+// literal or identifier, a nil USING argument, an unsupported BY mode, or an
+// unprintable operand is rejected with an [UnsupportedNodeError].
+func printCallStatement(stmt *CallStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		// The grammar restricts a CALL target to an alphanumeric literal or an
+		// identifier; a numeric (or any other value node) would print invalid COBOL.
+		var target string
+		switch t := stmt.Target.(type) {
+		case *StringLiteral:
+			if t == nil {
+				return failPrint(UnsupportedNodeError{Node: stmt.Target})
+			}
+			target = t.Value
+		case *Identifier:
+			text, ok := identifierText(t)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Target})
+			}
+			target = text
+		default:
+			return failPrint(UnsupportedNodeError{Node: stmt.Target})
+		}
+		pr.write(indent(depth) + "CALL " + target)
+		if len(stmt.Using) > 0 {
+			pr.write(" USING")
+			for _, arg := range stmt.Using {
+				if arg == nil {
+					return failPrint(UnsupportedNodeError{Node: arg})
+				}
+				if arg.Mode != "" {
+					// Mode is a free-form string on the node; only the three COBOL
+					// passing mechanisms print as valid BY phrases.
+					switch arg.Mode {
+					case "REFERENCE", "CONTENT", "VALUE":
+						pr.write(" BY " + arg.Mode)
+					default:
+						return failPrint(UnsupportedNodeError{Node: arg})
+					}
+				}
+				text, ok := valueText(arg.Operand)
+				if !ok {
+					return failPrint(UnsupportedNodeError{Node: arg.Operand})
+				}
+				pr.write(" " + text)
+			}
+		}
+		if stmt.Returning != nil {
+			text, ok := identifierText(stmt.Returning)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Returning})
+			}
+			pr.write(" RETURNING " + text)
+		}
+		if stmt.EndCall {
+			pr.write(" END-CALL")
 		}
 		return next
 	}

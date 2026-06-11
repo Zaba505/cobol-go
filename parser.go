@@ -140,6 +140,33 @@ type AcceptStatement struct {
 
 func (*AcceptStatement) statement() {}
 
+// CallStatement is a CALL statement (SPEC.md "call-statement"): an interprogram
+// call. Pos is the position of the CALL keyword; Target is the called program — an
+// AlphanumericLiteral (*StringLiteral) or an identifier (*Identifier). Using holds
+// the USING arguments in source order; Returning is the optional RETURNING
+// identifier, nil when absent; EndCall reports an explicit END-CALL scope
+// terminator.
+type CallStatement struct {
+	Pos       Pos
+	Target    Type // *StringLiteral or *Identifier
+	Using     []*CallArgument
+	Returning *Identifier
+	EndCall   bool
+}
+
+func (*CallStatement) statement() {}
+
+// CallArgument is one operand of a CALL … USING phrase. Pos is the position of the
+// argument (the BY keyword when present, otherwise the operand). Mode is the
+// passing mechanism in canonical upper case — "REFERENCE", "CONTENT", or "VALUE" —
+// or "" when no BY phrase preceded this operand. Operand is the passed value, an
+// identifier or a literal.
+type CallArgument struct {
+	Pos     Pos
+	Mode    string
+	Operand Type
+}
+
 // GoToStatement is a GO TO statement. Pos is the position of the GO keyword;
 // Targets are the procedure-names; DependingOn is the GO TO … DEPENDING ON
 // selector identifier, nil for the unconditional form.
@@ -2702,14 +2729,14 @@ func parseStatementOpt(stop stopFunc) parserAction[*[]Statement] {
 // reserved word cannot be a data-name, so an operand list cannot contain one).
 var procedureVerbs = []string{
 	"DISPLAY", "MOVE", "ACCEPT", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
-	"COMPUTE", "IF", "PERFORM", "EVALUATE", "GO", "CONTINUE", "STOP",
+	"COMPUTE", "IF", "PERFORM", "EVALUATE", "CALL", "GO", "CONTINUE", "STOP",
 }
 
 // procedureScopeTerminators are the explicit scope terminators that close one
 // statement without ending the sentence.
 var procedureScopeTerminators = []string{
 	"END-IF", "END-PERFORM", "END-COMPUTE", "END-ADD", "END-SUBTRACT",
-	"END-MULTIPLY", "END-DIVIDE", "END-EVALUATE",
+	"END-MULTIPLY", "END-DIVIDE", "END-EVALUATE", "END-CALL",
 }
 
 // procedurePhraseKeywords are the clause/phrase keywords that introduce a part of
@@ -2719,6 +2746,7 @@ var procedurePhraseKeywords = []string{
 	"CORRESPONDING", "CORR", "THEN", "ELSE", "THROUGH", "THRU", "TIMES",
 	"UNTIL", "VARYING", "WITH", "TEST", "BEFORE", "AFTER", "NO", "ADVANCING",
 	"DEPENDING", "ON", "RUN", "WHEN", "ALSO", "ANY", "OTHER",
+	"USING", "RETURNING",
 }
 
 // isStatementVerb reports whether tok is a recognized statement-leading verb.
@@ -2769,6 +2797,8 @@ func parseStatement(p *parser) (Statement, error) {
 		return parsePerformStatement(p, tok)
 	case keywordIs(tok, "EVALUATE"):
 		return parseEvaluateStatement(p, tok)
+	case keywordIs(tok, "CALL"):
+		return parseCallStatement(p, tok)
 	case keywordIs(tok, "GO"):
 		return parseGoToStatement(p, tok)
 	case keywordIs(tok, "CONTINUE"):
@@ -2777,7 +2807,7 @@ func parseStatement(p *parser) (Statement, error) {
 		return parseStopStatement(p, tok)
 	default:
 		return nil, unexpectedKeyword(tok, "DISPLAY", "MOVE", "ACCEPT",
-			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "PERFORM", "EVALUATE", "GO", "CONTINUE", "STOP")
+			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "PERFORM", "EVALUATE", "CALL", "GO", "CONTINUE", "STOP")
 	}
 }
 
@@ -3642,6 +3672,142 @@ func parseComputeStatement(p *parser, kw Token) (Statement, error) {
 		stmt.EndScope = true
 	}
 	return stmt, nil
+}
+
+// parseCallStatement parses a CALL statement whose verb kw has already been read:
+// the called program (an alphanumeric literal or an identifier), an optional USING
+// phrase of operands each with an optional BY REFERENCE/CONTENT/VALUE mode, an
+// optional RETURNING identifier, and an optional END-CALL scope terminator.
+func parseCallStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &CallStatement{Pos: kw.Pos}
+
+	// Target: an AlphanumericLiteral or an identifier (a numeric literal is not a
+	// valid program-name).
+	tok, err := p.expect(TokenIdentifier, TokenString)
+	if err != nil {
+		return nil, err
+	}
+	if tok.Type == TokenString {
+		stmt.Target = &StringLiteral{Pos: tok.Pos, Value: string(tok.Value)}
+	} else {
+		id, err := parseIdentifier(p, tok)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Target = id
+	}
+
+	using, err := p.peekKeyword("USING")
+	if err != nil {
+		return nil, err
+	}
+	if using {
+		p.consume()
+		args, err := parseCallUsing(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Using = args
+	}
+
+	returning, err := p.peekKeyword("RETURNING")
+	if err != nil {
+		return nil, err
+	}
+	if returning {
+		p.consume()
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Returning = id
+	}
+
+	endCall, err := p.peekKeyword("END-CALL")
+	if err != nil {
+		return nil, err
+	}
+	if endCall {
+		p.consume()
+		stmt.EndCall = true
+	}
+	return stmt, nil
+}
+
+// parseCallUsing parses the operands of a CALL … USING phrase: one or more
+// arguments, each an operand optionally preceded by a BY REFERENCE/CONTENT/VALUE
+// mode. It requires at least one argument and stops at the first token that can
+// neither introduce a mode nor begin an operand.
+func parseCallUsing(p *parser) ([]*CallArgument, error) {
+	first, err := parseCallArgument(p)
+	if err != nil {
+		return nil, err
+	}
+	args := []*CallArgument{first}
+	for {
+		by, err := p.peekKeyword("BY")
+		if err != nil {
+			return nil, err
+		}
+		if !by {
+			tok, err, ok := p.peek()
+			if err != nil {
+				return nil, err
+			}
+			if !ok || !isOperandStart(tok) {
+				return args, nil
+			}
+		}
+		arg, err := parseCallArgument(p)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, arg)
+	}
+}
+
+// parseCallArgument parses one CALL … USING argument: an optional BY
+// REFERENCE/CONTENT/VALUE mode followed by an operand. The argument's position is
+// the BY keyword when present, otherwise the operand.
+func parseCallArgument(p *parser) (*CallArgument, error) {
+	byTok, by, err := p.acceptKeyword("BY")
+	if err != nil {
+		return nil, err
+	}
+	var mode string
+	if by {
+		m, err := p.expectKeyword("REFERENCE", "CONTENT", "VALUE")
+		if err != nil {
+			return nil, err
+		}
+		mode = strings.ToUpper(string(m.Value))
+	}
+
+	// An operand is required here. parseOperand accepts any identifier token, so
+	// reject a reserved keyword (e.g. RETURNING or a scope terminator) that would
+	// otherwise be silently swallowed as a data-name, hiding the clause it begins.
+	lead, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenIdentifier, TokenString, TokenNumber}}
+	}
+	if !isOperandStart(lead) {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier, TokenString, TokenNumber}, Actual: lead}
+	}
+
+	// The operand begins at the next token; capture its position before parsing so
+	// the argument points at its start when no BY phrase precedes it.
+	op, err := parseOperand(p)
+	if err != nil {
+		return nil, err
+	}
+	pos := lead.Pos
+	if by {
+		pos = byTok.Pos
+	}
+	return &CallArgument{Pos: pos, Mode: mode, Operand: op}, nil
 }
 
 // The following identifier and arithmetic-expression sub-parsers are recursive

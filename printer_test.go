@@ -576,6 +576,44 @@ func TestPrinter(t *testing.T) {
 				"PROCEDURE DIVISION.\n" +
 				"    STOP RUN.\n",
 		},
+		{
+			name: "procedure division call",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "P"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										{Statements: []Statement{&CallStatement{
+											Target: &StringLiteral{Value: `"PROG"`},
+										}}},
+										{Statements: []Statement{&CallStatement{
+											Target: &Identifier{Name: &Word{Value: "WS-PROG"}},
+											Using: []*CallArgument{
+												{Mode: "REFERENCE", Operand: &Identifier{Name: &Word{Value: "WS-A"}}},
+												{Mode: "CONTENT", Operand: &StringLiteral{Value: `"lit"`}},
+												{Operand: &Identifier{Name: &Word{Value: "WS-B"}}},
+											},
+											Returning: &Identifier{Name: &Word{Value: "WS-RC"}},
+											EndCall:   true,
+										}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CALL \"PROG\".\n" +
+				"    CALL WS-PROG USING BY REFERENCE WS-A BY CONTENT \"lit\" WS-B RETURNING WS-RC END-CALL.\n",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -663,6 +701,16 @@ func TestPrinterRoundTrip(t *testing.T) {
 				"PROCEDURE DIVISION.\n" +
 				"    STOP RUN.\n",
 		},
+		{
+			name: "call statement",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CALL \"PROG\".\n" +
+				"    CALL WS-PROG USING WS-A WS-B RETURNING WS-RC END-CALL.\n" +
+				"    CALL \"P\" USING BY REFERENCE WS-A BY CONTENT \"lit\" BY VALUE WS-C.\n" +
+				"    STOP RUN.\n",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -705,6 +753,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_conditional_cob", fixture: "procedure_conditional.cob"},
 		{name: "procedure_perform_cob", fixture: "procedure_perform.cob"},
 		{name: "procedure_evaluate_cob", fixture: "procedure_evaluate.cob"},
+		{name: "procedure_call_cob", fixture: "procedure_call.cob"},
 		{name: "procedure_sections_cob", fixture: "procedure_sections.cob"},
 		{name: "full_program_cob", fixture: "full_program.cob"},
 	}
@@ -958,6 +1007,14 @@ func clearStatementPos(stmt Statement) {
 		for _, st := range s.Other {
 			clearStatementPos(st)
 		}
+	case *CallStatement:
+		s.Pos = Pos{}
+		clearTypePos(s.Target)
+		for _, arg := range s.Using {
+			arg.Pos = Pos{}
+			clearTypePos(arg.Operand)
+		}
+		clearIdentifierPos(s.Returning)
 	case *GoToStatement:
 		s.Pos = Pos{}
 		for _, t := range s.Targets {
@@ -1712,6 +1769,29 @@ func TestPrinterErrors(t *testing.T) {
 								Cond:    &RelationCondition{Left: &Identifier{Name: &Word{Value: "A"}}, Op: ">", Right: &Identifier{Name: &Word{Value: "B"}}},
 								Through: &NumericLiteral{Value: "9"},
 							}}, Body: []Statement{&ContinueStatement{}}}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "call target not literal or identifier",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&CallStatement{Target: &NumericLiteral{Value: "5"}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "call using with unsupported by mode",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&CallStatement{
+							Target: &StringLiteral{Value: `"P"`},
+							Using:  []*CallArgument{{Mode: "BOGUS", Operand: &Identifier{Name: &Word{Value: "WS-A"}}}},
 						},
 					}}}},
 				}},

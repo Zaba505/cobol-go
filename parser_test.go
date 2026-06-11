@@ -1130,6 +1130,143 @@ func TestParser(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "call statement with literal target",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CALL \"PROG\".\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&CallStatement{
+														Pos:    Pos{Line: 4, Column: 5},
+														Target: &StringLiteral{Pos: Pos{Line: 4, Column: 10}, Value: "\"PROG\""},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "call statement with using returning and end-call",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CALL WS-PROG USING WS-A WS-B RETURNING WS-RC END-CALL.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&CallStatement{
+														Pos:    Pos{Line: 4, Column: 5},
+														Target: &Identifier{Pos: Pos{Line: 4, Column: 10}, Name: &Word{Pos: Pos{Line: 4, Column: 10}, Value: "WS-PROG"}},
+														Using: []*CallArgument{
+															{Pos: Pos{Line: 4, Column: 24}, Operand: &Identifier{Pos: Pos{Line: 4, Column: 24}, Name: &Word{Pos: Pos{Line: 4, Column: 24}, Value: "WS-A"}}},
+															{Pos: Pos{Line: 4, Column: 29}, Operand: &Identifier{Pos: Pos{Line: 4, Column: 29}, Name: &Word{Pos: Pos{Line: 4, Column: 29}, Value: "WS-B"}}},
+														},
+														Returning: &Identifier{Pos: Pos{Line: 4, Column: 44}, Name: &Word{Pos: Pos{Line: 4, Column: 44}, Value: "WS-RC"}},
+														EndCall:   true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "call statement with by reference content and value modes",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CALL \"P\" USING BY REFERENCE WS-A BY CONTENT WS-B BY VALUE WS-C.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&CallStatement{
+														Pos:    Pos{Line: 4, Column: 5},
+														Target: &StringLiteral{Pos: Pos{Line: 4, Column: 10}, Value: "\"P\""},
+														Using: []*CallArgument{
+															{Pos: Pos{Line: 4, Column: 20}, Mode: "REFERENCE", Operand: &Identifier{Pos: Pos{Line: 4, Column: 33}, Name: &Word{Pos: Pos{Line: 4, Column: 33}, Value: "WS-A"}}},
+															{Pos: Pos{Line: 4, Column: 38}, Mode: "CONTENT", Operand: &Identifier{Pos: Pos{Line: 4, Column: 49}, Name: &Word{Pos: Pos{Line: 4, Column: 49}, Value: "WS-B"}}},
+															{Pos: Pos{Line: 4, Column: 54}, Mode: "VALUE", Operand: &Identifier{Pos: Pos{Line: 4, Column: 63}, Name: &Word{Pos: Pos{Line: 4, Column: 63}, Value: "WS-C"}}},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1466,6 +1603,42 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedKeywordError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 6, Column: 9}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "call with numeric literal target",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CALL 5.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 10}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "call using with invalid by mode",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CALL \"P\" USING BY WRONG WS-A.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 23}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "call using with no operand before returning",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CALL \"P\" USING RETURNING WS-RC.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 20}, target.Actual.Pos)
 			},
 		},
 	}
