@@ -109,18 +109,18 @@ func TestPrinter(t *testing.T) {
 				"DATA DIVISION.\n" +
 				"FILE SECTION.\n" +
 				"FD CUST-FILE.\n" +
-				"    01 CUST-REC.\n" +
+				"01 CUST-REC.\n" +
 				"    05 CUST-ID PIC 9(5).\n" +
 				"    05 FILLER PIC X(20).\n" +
 				"WORKING-STORAGE SECTION.\n" +
-				"    01 COUNTER PIC 9(2) USAGE COMP-3 VALUE ZERO.\n" +
-				"    01 STATUS-FLAG PIC X VALUE \"N\".\n" +
+				"01 COUNTER PIC 9(2) USAGE COMP-3 VALUE ZERO.\n" +
+				"01 STATUS-FLAG PIC X VALUE \"N\".\n" +
 				"    88 PENDING VALUE \"A\" THROUGH \"M\".\n" +
 				"    05 ITEM OCCURS 1 TO 10 TIMES DEPENDING ON N ASCENDING KEY IS K INDEXED BY IDX PIC 9(4).\n" +
 				"    05 F3 PIC S9 SIGN IS LEADING SEPARATE CHARACTER JUSTIFIED RIGHT SYNCHRONIZED LEFT BLANK WHEN ZERO GLOBAL EXTERNAL.\n" +
-				"    66 RN RENAMES A THROUGH B.\n" +
+				"66 RN RENAMES A THROUGH B.\n" +
 				"LINKAGE SECTION.\n" +
-				"    01 LK PIC X(10).\n" +
+				"01 LK PIC X(10).\n" +
 				"PROCEDURE DIVISION.\n" +
 				"    STOP RUN.\n",
 		},
@@ -315,12 +315,12 @@ func TestPrinter(t *testing.T) {
 				"PROGRAM-ID. P.\n" +
 				"PROCEDURE DIVISION.\n" +
 				"    IF A > B\n" +
-				"    MOVE 1 TO C\n" +
+				"        MOVE 1 TO C\n" +
 				"    ELSE\n" +
-				"    MOVE 2 TO C\n" +
+				"        MOVE 2 TO C\n" +
 				"    END-IF.\n" +
 				"    IF FLAG\n" +
-				"    DISPLAY \"x\".\n",
+				"        DISPLAY \"x\".\n",
 		},
 		{
 			name: "procedure division perform",
@@ -373,10 +373,10 @@ func TestPrinter(t *testing.T) {
 				"PROCEDURE DIVISION.\n" +
 				"    PERFORM P1 THROUGH P2 5 TIMES.\n" +
 				"    PERFORM WITH TEST AFTER UNTIL A > 10\n" +
-				"    ADD 1 TO A\n" +
+				"        ADD 1 TO A\n" +
 				"    END-PERFORM.\n" +
 				"    PERFORM VARYING I FROM 1 BY 1 UNTIL I > N\n" +
-				"    DISPLAY I\n" +
+				"        DISPLAY I\n" +
 				"    END-PERFORM.\n",
 		},
 		{
@@ -632,6 +632,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_conditional_cob", fixture: "procedure_conditional.cob"},
 		{name: "procedure_perform_cob", fixture: "procedure_perform.cob"},
 		{name: "procedure_sections_cob", fixture: "procedure_sections.cob"},
+		{name: "full_program_cob", fixture: "full_program.cob"},
 	}
 
 	for _, tc := range testCases {
@@ -656,6 +657,63 @@ func TestRoundTripFromTestdata(t *testing.T) {
 			require.Equal(t, withoutPos(first), withoutPos(second))
 		})
 	}
+}
+
+// TestPrintFullProgramLayout pins the printer's canonical free-format layout for a
+// complete program spanning all four divisions. The round-trip test above proves
+// structural fidelity but, by design, ignores positions — so it cannot observe
+// indentation. This test renders the same full-program fixture and asserts the
+// exact bytes, fixing the hierarchical layout: subordinate data items indent under
+// their group (88 under 01), and inline IF/PERFORM bodies indent under their header
+// while ELSE/END-IF/END-PERFORM align with it.
+func TestPrintFullProgramLayout(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "full_program.cob"))
+	require.NoError(t, err)
+
+	f, err := Parse(bytes.NewReader(data))
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	require.NoError(t, Print(&buf, f))
+
+	const expected = `IDENTIFICATION DIVISION.
+PROGRAM-ID. demo.
+ENVIRONMENT DIVISION.
+CONFIGURATION SECTION.
+SOURCE-COMPUTER. IBM-370.
+OBJECT-COMPUTER. IBM-370.
+SPECIAL-NAMES.
+    CURRENCY SIGN IS "$".
+INPUT-OUTPUT SECTION.
+FILE-CONTROL.
+    SELECT REPORT-FILE ASSIGN TO "report.txt"
+        ORGANIZATION IS LINE SEQUENTIAL
+        ACCESS MODE IS SEQUENTIAL.
+DATA DIVISION.
+FILE SECTION.
+FD REPORT-FILE.
+01 REPORT-RECORD PIC X(40).
+WORKING-STORAGE SECTION.
+01 COUNTER PIC 9(2) VALUE ZERO.
+01 TOTAL PIC S9(5)V99 VALUE 0.
+01 STATUS-FLAG PIC X VALUE "N".
+    88 DONE VALUE "Y".
+PROCEDURE DIVISION.
+MAIN-PARAGRAPH.
+    PERFORM VARYING COUNTER FROM 1 BY 1 UNTIL COUNTER > 5
+        COMPUTE TOTAL = TOTAL + COUNTER
+        DISPLAY "COUNTER = " COUNTER
+    END-PERFORM.
+    IF TOTAL > 10
+        DISPLAY "Total exceeds ten."
+    ELSE
+        DISPLAY "Total is ten or less."
+    END-IF.
+    STOP RUN.
+`
+	require.Equal(t, expected, buf.String())
 }
 
 // withoutPos zeroes every Pos in f and returns it, so round-trip comparisons

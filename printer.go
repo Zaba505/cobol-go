@@ -8,7 +8,20 @@ package cobol
 import (
 	"fmt"
 	"io"
+	"strings"
 )
+
+// indentUnit is one level of free-format indentation. In free format columns are
+// insignificant (SPEC.md "Reference format independence"), so the printer chooses a
+// canonical layout: each nesting level — a statement under a paragraph, an inline
+// IF/PERFORM body under its header, a subordinate data item under its group — is
+// offset by one indentUnit from its parent.
+const indentUnit = "    "
+
+// indent returns the leading whitespace for the given nesting depth.
+func indent(depth int) string {
+	return strings.Repeat(indentUnit, depth)
+}
 
 // Print the given [File] to the given writer as COBOL source.
 func Print(w io.Writer, f *File) error {
@@ -421,7 +434,7 @@ func printFileDescriptionEntry(entry *FileDescriptionEntry, next printerAction) 
 			return failPrint(UnsupportedNodeError{Node: entry})
 		}
 		pr.writef("%s %s.\n", entry.Kind, entry.Name.Value)
-		return printDataEntryAt(entry.Records, 0, next)
+		return printDataEntryAt(entry.Records, dataEntryDepths(entry.Records), 0, next)
 	}
 }
 
@@ -434,33 +447,73 @@ func printDataSection(header string, sec *DataSection, next printerAction) print
 			return next
 		}
 		pr.writef("%s SECTION.\n", header)
-		return printDataEntryAt(sec.Entries, 0, next)
+		return printDataEntryAt(sec.Entries, dataEntryDepths(sec.Entries), 0, next)
 	}
 }
 
-// printDataEntryAt prints the data-description entry at index i of entries, then
-// continues with the entry after it; once i is past the last entry it continues
-// with next.
-func printDataEntryAt(entries []*DataDescriptionEntry, i int, next printerAction) printerAction {
+// dataEntryDepths maps each entry in a record to its nesting depth from the level
+// numbers, which carry the subordination an entry list flattens: a group item's
+// subordinates have higher level numbers than it. Levels 01–49 nest via a stack of
+// open group levels; an 88 condition-name sits one level under the entry it
+// qualifies; 66 (RENAMES) and 77 (independent item) sit at the record level. The
+// printer uses these depths to indent each entry under its parent (free-format
+// columns are insignificant — SPEC.md "Reference format independence").
+func dataEntryDepths(entries []*DataDescriptionEntry) []int {
+	depths := make([]int, len(entries))
+	var stack []int  // levels of the currently-open group items (01–49)
+	parentDepth := 0 // depth of the most recent non-88 entry — the parent of any 88
+	for i, e := range entries {
+		if e == nil {
+			// A nil entry has no level to subordinate; printDataEntry rejects it.
+			continue
+		}
+		switch e.Level {
+		case 88:
+			depths[i] = parentDepth + 1
+		case 66, 77:
+			// RENAMES (66) and independent items (77) sit at the record level
+			// (depth 0). They don't disturb the 01–49 nesting stack — the
+			// hierarchy is defined by 01–49 level numbers alone, and a later 01
+			// pops the stack on its own — but they do become the parent of any
+			// subordinate 88 (a 77 may carry condition-names).
+			depths[i] = 0
+			parentDepth = 0
+		default: // 01–49
+			for len(stack) > 0 && stack[len(stack)-1] >= e.Level {
+				stack = stack[:len(stack)-1]
+			}
+			depths[i] = len(stack)
+			stack = append(stack, e.Level)
+			parentDepth = depths[i]
+		}
+	}
+	return depths
+}
+
+// printDataEntryAt prints the data-description entry at index i of entries (at the
+// matching depth in depths), then continues with the entry after it; once i is past
+// the last entry it continues with next.
+func printDataEntryAt(entries []*DataDescriptionEntry, depths []int, i int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if i >= len(entries) {
 			return next
 		}
-		return printDataEntry(entries[i], printDataEntryAt(entries, i+1, next))
+		return printDataEntry(entries[i], depths[i], printDataEntryAt(entries, depths, i+1, next))
 	}
 }
 
 // printDataEntry prints one data-description entry: the level-number (two
 // digits), the data-name or FILLER, then each clause, terminated with a separator
-// period. The level is indented four spaces (a canonical layout; free-format
-// round-trips ignore positions — SPEC "Reference format independence"). A nil
-// entry or an unsupported clause type stops the loop with an [UnsupportedNodeError].
-func printDataEntry(entry *DataDescriptionEntry, next printerAction) printerAction {
+// period. The entry is indented by depth — its subordination level within the
+// record (a canonical layout; free-format round-trips ignore positions — SPEC
+// "Reference format independence"). A nil entry or an unsupported clause type stops
+// the loop with an [UnsupportedNodeError].
+func printDataEntry(entry *DataDescriptionEntry, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if entry == nil {
 			return failPrint(UnsupportedNodeError{Node: entry})
 		}
-		pr.writef("    %02d", entry.Level)
+		pr.writef("%s%02d", indent(depth), entry.Level)
 		if entry.Filler {
 			pr.write(" FILLER")
 		} else if entry.Name != nil {
@@ -713,7 +766,7 @@ func printSentenceStatementAt(sent *Sentence, j int, next printerAction) printer
 		if j == len(sent.Statements)-1 {
 			sep = ".\n"
 		}
-		return printStatement(sent.Statements[j], writeThen(sep, printSentenceStatementAt(sent, j+1, next)))
+		return printStatement(sent.Statements[j], 1, writeThen(sep, printSentenceStatementAt(sent, j+1, next)))
 	}
 }
 
@@ -721,28 +774,28 @@ func printSentenceStatementAt(sent *Sentence, j int, next printerAction) printer
 // which continues with next when done. An unknown statement type (or a nil
 // Statement) stops the loop with an [UnsupportedNodeError] rather than silently
 // dropping the statement from the output.
-func printStatement(stmt Statement, next printerAction) printerAction {
+func printStatement(stmt Statement, depth int, next printerAction) printerAction {
 	switch s := stmt.(type) {
 	case *DisplayStatement:
-		return printDisplayStatement(s, next)
+		return printDisplayStatement(s, depth, next)
 	case *MoveStatement:
-		return printMoveStatement(s, next)
+		return printMoveStatement(s, depth, next)
 	case *AcceptStatement:
-		return printAcceptStatement(s, next)
+		return printAcceptStatement(s, depth, next)
 	case *ArithmeticStatement:
-		return printArithmeticStatement(s, next)
+		return printArithmeticStatement(s, depth, next)
 	case *ComputeStatement:
-		return printComputeStatement(s, next)
+		return printComputeStatement(s, depth, next)
 	case *IfStatement:
-		return printIfStatement(s, next)
+		return printIfStatement(s, depth, next)
 	case *PerformStatement:
-		return printPerformStatement(s, next)
+		return printPerformStatement(s, depth, next)
 	case *GoToStatement:
-		return printGoToStatement(s, next)
+		return printGoToStatement(s, depth, next)
 	case *ContinueStatement:
-		return printContinueStatement(s, next)
+		return printContinueStatement(s, depth, next)
 	case *StopStatement:
-		return printStopStatement(s, next)
+		return printStopStatement(s, depth, next)
 	default:
 		return failPrint(UnsupportedNodeError{Node: stmt})
 	}
@@ -753,12 +806,12 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 // ADVANCING phrase. The sentence-terminating period is emitted by the enclosing
 // sentence, not here. A typed-nil statement is rejected with an
 // [UnsupportedNodeError].
-func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAction {
+func printDisplayStatement(stmt *DisplayStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		pr.write("    DISPLAY")
+		pr.write(indent(depth) + "DISPLAY")
 		for _, op := range stmt.Operands {
 			text, ok := valueText(op)
 			if !ok {
@@ -781,12 +834,12 @@ func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAc
 // sending operand, "TO", and the receiving identifiers. A typed-nil statement, one
 // with no receiving identifier (MOVE requires at least one), or an unprintable
 // operand is rejected with an [UnsupportedNodeError].
-func printMoveStatement(stmt *MoveStatement, next printerAction) printerAction {
+func printMoveStatement(stmt *MoveStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil || len(stmt.Targets) == 0 {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		pr.write("    MOVE ")
+		pr.write(indent(depth) + "MOVE ")
 		if stmt.Corresponding {
 			pr.write("CORRESPONDING ")
 		}
@@ -810,7 +863,7 @@ func printMoveStatement(stmt *MoveStatement, next printerAction) printerAction {
 // printAcceptStatement prints an ACCEPT statement: the receiving identifier and an
 // optional FROM source. A typed-nil statement or an unprintable target is rejected
 // with an [UnsupportedNodeError].
-func printAcceptStatement(stmt *AcceptStatement, next printerAction) printerAction {
+func printAcceptStatement(stmt *AcceptStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil {
 			return failPrint(UnsupportedNodeError{Node: stmt})
@@ -819,7 +872,7 @@ func printAcceptStatement(stmt *AcceptStatement, next printerAction) printerActi
 		if !ok {
 			return failPrint(UnsupportedNodeError{Node: stmt.Target})
 		}
-		pr.write("    ACCEPT " + target)
+		pr.write(indent(depth) + "ACCEPT " + target)
 		if stmt.From != nil {
 			pr.write(" FROM " + stmt.From.Value)
 		}
@@ -834,14 +887,14 @@ func printAcceptStatement(stmt *AcceptStatement, next printerAction) printerActi
 // [UnsupportedNodeError]. The connector and in-place targets are paired: a
 // connector without targets, or targets without a connector (which would silently
 // drop the targets), is also rejected.
-func printArithmeticStatement(stmt *ArithmeticStatement, next printerAction) printerAction {
+func printArithmeticStatement(stmt *ArithmeticStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil || stmt.Verb == "" || len(stmt.Operands) == 0 ||
 			(len(stmt.Targets) == 0 && stmt.Giving == nil) ||
 			(stmt.Connector == "") != (len(stmt.Targets) == 0) {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		pr.write("    " + stmt.Verb)
+		pr.write(indent(depth) + stmt.Verb)
 		for _, op := range stmt.Operands {
 			text, ok := valueText(op)
 			if !ok {
@@ -880,12 +933,12 @@ func printArithmeticStatement(stmt *ArithmeticStatement, next printerAction) pri
 // optionally ROUNDED), "=", the arithmetic expression, and an optional
 // END-COMPUTE. A statement with no targets or an unprintable expression is
 // rejected with an [UnsupportedNodeError].
-func printComputeStatement(stmt *ComputeStatement, next printerAction) printerAction {
+func printComputeStatement(stmt *ComputeStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil || len(stmt.Targets) == 0 {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		pr.write("    COMPUTE")
+		pr.write(indent(depth) + "COMPUTE")
 		for _, tgt := range stmt.Targets {
 			text, ok := identifierText(tgt.Name)
 			if !ok {
@@ -913,7 +966,7 @@ func printComputeStatement(stmt *ComputeStatement, next printerAction) printerAc
 // END-IF. The sentence-terminating period is emitted by the enclosing sentence, so
 // the final line carries no period here. A typed-nil statement or a missing
 // condition is rejected with an [UnsupportedNodeError].
-func printIfStatement(stmt *IfStatement, next printerAction) printerAction {
+func printIfStatement(stmt *IfStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil || stmt.Cond == nil {
 			return failPrint(UnsupportedNodeError{Node: stmt})
@@ -922,17 +975,17 @@ func printIfStatement(stmt *IfStatement, next printerAction) printerAction {
 		if !ok {
 			return failPrint(UnsupportedNodeError{Node: stmt.Cond})
 		}
-		pr.write("    IF " + cond)
+		pr.write(indent(depth) + "IF " + cond)
 
 		end := next
 		if stmt.EndIf {
-			end = writeThen("\n    END-IF", end)
+			end = writeThen("\n"+indent(depth)+"END-IF", end)
 		}
 		tail := end
 		if stmt.HasElse {
-			tail = writeThen("\n    ELSE", printBranchStatementAt(stmt.Else, 0, end))
+			tail = writeThen("\n"+indent(depth)+"ELSE", printBranchStatementAt(stmt.Else, 0, depth+1, end))
 		}
-		return printBranchStatementAt(stmt.Then, 0, tail)
+		return printBranchStatementAt(stmt.Then, 0, depth+1, tail)
 	}
 }
 
@@ -943,7 +996,7 @@ func printIfStatement(stmt *IfStatement, next printerAction) printerAction {
 // out-of-line PERFORM with no target, an inline PERFORM without END-PERFORM (which
 // would merge with following statements on re-parse), or an unprintable loop is
 // rejected with an [UnsupportedNodeError].
-func printPerformStatement(stmt *PerformStatement, next printerAction) printerAction {
+func printPerformStatement(stmt *PerformStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil {
 			return failPrint(UnsupportedNodeError{Node: stmt})
@@ -957,7 +1010,7 @@ func printPerformStatement(stmt *PerformStatement, next printerAction) printerAc
 			if stmt.Target == nil {
 				return failPrint(UnsupportedNodeError{Node: stmt})
 			}
-			pr.write("    PERFORM " + stmt.Target.Value)
+			pr.write(indent(depth) + "PERFORM " + stmt.Target.Value)
 			if stmt.Through != nil {
 				pr.write(" THROUGH " + stmt.Through.Value)
 			}
@@ -970,8 +1023,8 @@ func printPerformStatement(stmt *PerformStatement, next printerAction) printerAc
 		if !stmt.EndPerform {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		pr.write("    PERFORM" + loop)
-		return printBranchStatementAt(stmt.Body, 0, writeThen("\n    END-PERFORM", next))
+		pr.write(indent(depth) + "PERFORM" + loop)
+		return printBranchStatementAt(stmt.Body, 0, depth+1, writeThen("\n"+indent(depth)+"END-PERFORM", next))
 	}
 }
 
@@ -1026,14 +1079,15 @@ func performLoopText(stmt *PerformStatement) (string, bool) {
 
 // printBranchStatementAt prints the branch statement at index i on its own line
 // (preceded by a newline so it sits under the IF/PERFORM header), then continues
-// with the next; once i is past the last statement it continues with next.
-func printBranchStatementAt(stmts []Statement, i int, next printerAction) printerAction {
+// with the next; once i is past the last statement it continues with next. The
+// statements are indented at depth — one level deeper than their enclosing header.
+func printBranchStatementAt(stmts []Statement, i int, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if i >= len(stmts) {
 			return next
 		}
 		pr.write("\n")
-		return printStatement(stmts[i], printBranchStatementAt(stmts, i+1, next))
+		return printStatement(stmts[i], depth, printBranchStatementAt(stmts, i+1, depth, next))
 	}
 }
 
@@ -1125,12 +1179,12 @@ func negate(not bool) string {
 // printGoToStatement prints a GO TO statement: the procedure-names and an optional
 // DEPENDING ON selector. A typed-nil statement, one with no targets, or an
 // unprintable selector is rejected with an [UnsupportedNodeError].
-func printGoToStatement(stmt *GoToStatement, next printerAction) printerAction {
+func printGoToStatement(stmt *GoToStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil || len(stmt.Targets) == 0 {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		pr.write("    GO TO")
+		pr.write(indent(depth) + "GO TO")
 		for _, t := range stmt.Targets {
 			if t == nil {
 				return failPrint(UnsupportedNodeError{Node: stmt})
@@ -1150,12 +1204,12 @@ func printGoToStatement(stmt *GoToStatement, next printerAction) printerAction {
 
 // printContinueStatement prints a CONTINUE statement. A typed-nil statement is
 // rejected with an [UnsupportedNodeError].
-func printContinueStatement(stmt *ContinueStatement, next printerAction) printerAction {
+func printContinueStatement(stmt *ContinueStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		pr.write("    CONTINUE")
+		pr.write(indent(depth) + "CONTINUE")
 		return next
 	}
 }
@@ -1164,20 +1218,20 @@ func printContinueStatement(stmt *ContinueStatement, next printerAction) printer
 // emits the terminating period): STOP RUN or STOP <literal>. Exactly one of Run or
 // Literal must be present; a typed-nil statement, neither set, or both set
 // (RUN would silently drop the literal) is rejected with an [UnsupportedNodeError].
-func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
+func printStopStatement(stmt *StopStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil || stmt.Run == (stmt.Literal != nil) {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
 		if stmt.Run {
-			pr.write("    STOP RUN")
+			pr.write(indent(depth) + "STOP RUN")
 			return next
 		}
 		text, ok := valueText(stmt.Literal)
 		if !ok {
 			return failPrint(UnsupportedNodeError{Node: stmt.Literal})
 		}
-		pr.write("    STOP " + text)
+		pr.write(indent(depth) + "STOP " + text)
 		return next
 	}
 }
