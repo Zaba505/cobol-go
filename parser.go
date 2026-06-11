@@ -24,10 +24,25 @@ type File struct {
 }
 
 // Program is a single COBOL program: an ordered list of divisions. Pos is the
-// position of the program's first division header keyword.
+// position of the program's first division header keyword. Nested holds the
+// contained (nested) programs declared at the end of this program's PROCEDURE
+// DIVISION, in source order; it is nil when there are none. End is the END PROGRAM
+// marker terminating the program, nil when the program is not explicitly ended (a
+// lone program may omit it).
 type Program struct {
 	Pos       Pos
 	Divisions []Division
+	Nested    []*Program
+	End       *EndProgram
+}
+
+// EndProgram is the END PROGRAM marker that terminates a program (SPEC.md
+// "source-file": "END" "PROGRAM" program-name "."). Pos is the position of the END
+// keyword; Name is the program-name (a [Word] or [StringLiteral]), which by rule
+// matches the program's PROGRAM-ID.
+type EndProgram struct {
+	Pos  Pos
+	Name Type
 }
 
 // Division is implemented by the concrete COBOL division AST nodes
@@ -65,18 +80,97 @@ type ProgramID struct {
 }
 
 // ProcedureDivision is the PROCEDURE DIVISION. Pos is the position of the
-// PROCEDURE keyword. Its body is either a sequence of paragraphs (Paragraphs,
-// with Sections nil) or a sequence of sections (Sections, with Paragraphs nil) —
-// the two forms are mutually exclusive. Statements that appear directly under the
-// division header, before any paragraph-name, form an anonymous leading paragraph
-// (a [Paragraph] with a nil Name).
+// PROCEDURE keyword. Using holds the USING phrase parameters (program linkage) in
+// source order; Returning is the optional RETURNING data-name, nil when absent.
+// Declaratives holds the DECLARATIVES sections, nil when there is no DECLARATIVES
+// block. Its body is either a sequence of paragraphs (Paragraphs, with Sections
+// nil) or a sequence of sections (Sections, with Paragraphs nil) — the two forms
+// are mutually exclusive. Statements that appear directly under the division
+// header, before any paragraph-name, form an anonymous leading paragraph (a
+// [Paragraph] with a nil Name).
 type ProcedureDivision struct {
-	Pos        Pos
-	Paragraphs []*Paragraph
-	Sections   []*Section
+	Pos          Pos
+	Using        []*Parameter
+	Returning    *Word
+	Declaratives []*DeclarativeSection
+	Paragraphs   []*Paragraph
+	Sections     []*Section
 }
 
 func (*ProcedureDivision) division() {}
+
+// Parameter is one data-name of a PROCEDURE DIVISION USING phrase (SPEC.md
+// "using-phrase"). Pos is the position of the parameter (the BY keyword when
+// present, otherwise the data-name). Mode is the passing mechanism in canonical
+// upper case — "REFERENCE" or "VALUE" — or "" when no BY phrase preceded it. Name
+// is the parameter data-name.
+type Parameter struct {
+	Pos  Pos
+	Mode string
+	Name *Word
+}
+
+// DeclarativeSection is one section of the PROCEDURE DIVISION DECLARATIVES (SPEC.md
+// "declaratives"). Pos is the position of the section-name; Name is the
+// section-name; Use is the section's USE statement (its mandatory first sentence);
+// Paragraphs are the section's paragraphs in source order.
+type DeclarativeSection struct {
+	Pos        Pos
+	Name       *Word
+	Use        *UseStatement
+	Paragraphs []*Paragraph
+}
+
+// UseStatement is the USE statement that opens a DECLARATIVES section (SPEC.md
+// "declaratives": "USE" «use-spec» "."). Pos is the position of the USE keyword;
+// Spec is the form-specific specification.
+type UseStatement struct {
+	Pos  Pos
+	Spec UseSpec
+}
+
+// UseSpec is implemented by the concrete USE specification forms: [ExceptionUse],
+// [DebuggingUse], and [ReportingUse].
+type UseSpec interface {
+	useSpec()
+}
+
+// ExceptionUse is the I-O error-handling USE form: "USE [GLOBAL] AFTER STANDARD
+// (EXCEPTION | ERROR) PROCEDURE ON (file-name… | INPUT | OUTPUT | I-O | EXTEND)".
+// Global reports the GLOBAL phrase; Error reports the ERROR spelling (vs the
+// EXCEPTION synonym). Mode is the open-mode target ("INPUT", "OUTPUT", "I-O", or
+// "EXTEND") and is "" when Files names one or more file-names instead.
+type ExceptionUse struct {
+	Pos    Pos
+	Global bool
+	Error  bool
+	Mode   string
+	Files  []*Word
+}
+
+func (*ExceptionUse) useSpec() {}
+
+// DebuggingUse is the debugging USE form: "USE [FOR] DEBUGGING ON (procedure-name…
+// | ALL PROCEDURES)". AllProcs reports the ALL PROCEDURES target; otherwise Targets
+// names the procedure-names being debugged, in source order.
+type DebuggingUse struct {
+	Pos      Pos
+	AllProcs bool
+	Targets  []*Word
+}
+
+func (*DebuggingUse) useSpec() {}
+
+// ReportingUse is the report-writer USE form: "USE [GLOBAL] BEFORE REPORTING
+// report-group". Global reports the GLOBAL phrase; Report is the report-group
+// data-name.
+type ReportingUse struct {
+	Pos    Pos
+	Global bool
+	Report *Word
+}
+
+func (*ReportingUse) useSpec() {}
 
 // Section is a named section in the PROCEDURE DIVISION body. Pos is the position
 // of the section-name; Segment is the optional priority number; Paragraphs are
@@ -936,6 +1030,38 @@ func (p *parser) atSectionHeader() (bool, error) {
 	return ok2 && keywordIs(second, "SECTION"), nil
 }
 
+// atProgramBoundary reports whether the parser is positioned at a token that ends
+// the PROCEDURE DIVISION body and belongs to the enclosing program layer: the END
+// of an END PROGRAM marker, or the IDENTIFICATION/ID header of a nested program.
+// END is its own token, distinct from scope terminators such as END-IF.
+func (p *parser) atProgramBoundary() (bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	return keywordIs(tok, "END", "IDENTIFICATION", "ID"), nil
+}
+
+// atEndDeclaratives reports whether the parser is positioned at the END
+// DECLARATIVES marker: the END keyword followed by DECLARATIVES.
+func (p *parser) atEndDeclaratives() (bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if !ok || !keywordIs(tok, "END") {
+		return false, nil
+	}
+	second, err, ok2 := p.peekSecond()
+	if err != nil {
+		return false, err
+	}
+	return ok2 && keywordIs(second, "DECLARATIVES"), nil
+}
+
 // atParagraphHeader reports whether the parser is positioned at a paragraph header:
 // a non-verb name followed by a separator period.
 func (p *parser) atParagraphHeader() (bool, error) {
@@ -1195,10 +1321,7 @@ func parseFile(p *parser, f *File) (parserAction[*File], error) {
 		return nil, nil
 	}
 
-	prog := &Program{Pos: tok.Pos}
-	for action := dispatchDivision(tok); action != nil && err == nil; {
-		action, err = action(p, prog)
-	}
+	prog, err := parseProgram(p, tok)
 	if err != nil {
 		return nil, err
 	}
@@ -1207,10 +1330,28 @@ func parseFile(p *parser, f *File) (parserAction[*File], error) {
 	return parseFile, nil
 }
 
+// parseProgram builds one program whose first division header keyword firstKw has
+// already been read, by driving the division action chain. The program ends at its
+// END PROGRAM marker (recorded on prog.End by parseEndProgram) or at end of input.
+// It is shared by the top-level loop (parseFile) and nested-program parsing
+// (parseNestedProgram), so nesting recurses through it to any depth.
+func parseProgram(p *parser, firstKw Token) (*Program, error) {
+	prog := &Program{Pos: firstKw.Pos}
+	var err error
+	for action := dispatchDivision(firstKw); action != nil && err == nil; {
+		action, err = action(p, prog)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return prog, nil
+}
+
 // dispatchDivision returns the division parser for the already-read division
 // header keyword kw. IDENTIFICATION/ID, ENVIRONMENT, DATA, and PROCEDURE are
-// dispatched to their parsers; any other keyword falls through to the default and
-// is reported as an unexpected division header.
+// dispatched to their parsers; END dispatches the END PROGRAM marker that
+// terminates the program; any other keyword falls through to the default and is
+// reported as an unexpected division header.
 func dispatchDivision(kw Token) parserAction[*Program] {
 	switch {
 	case keywordIs(kw, "IDENTIFICATION", "ID"):
@@ -1221,10 +1362,59 @@ func dispatchDivision(kw Token) parserAction[*Program] {
 		return parseDataDivision(kw)
 	case keywordIs(kw, "PROCEDURE"):
 		return parseProcedureDivision(kw)
+	case keywordIs(kw, "END"):
+		return parseEndProgram(kw)
 	default:
 		return func(_ *parser, _ *Program) (parserAction[*Program], error) {
 			return nil, unexpectedKeyword(kw, "IDENTIFICATION", "ID", "ENVIRONMENT", "DATA", "PROCEDURE")
 		}
+	}
+}
+
+// parseEndProgram parses the END PROGRAM marker whose END keyword kw has already
+// been read: "PROGRAM" program-name ".". It records the marker on prog.End and
+// returns (nil, nil) to complete the program.
+func parseEndProgram(kw Token) parserAction[*Program] {
+	return func(p *parser, prog *Program) (parserAction[*Program], error) {
+		if _, err := p.expectKeyword("PROGRAM"); err != nil {
+			return nil, err
+		}
+		name, err := p.expect(TokenIdentifier, TokenString)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expectPeriod(); err != nil {
+			return nil, err
+		}
+		prog.End = &EndProgram{Pos: kw.Pos, Name: valueNode(name)}
+		return nil, nil
+	}
+}
+
+// parseNestedProgram parses one nested (contained) program whose first division
+// header keyword firstKw has already been read, appends it to the parent's Nested,
+// then continues with the next nested sibling (another IDENTIFICATION/ID header) or
+// dispatches the parent's END PROGRAM marker. Each nested program is itself ended
+// by its own END PROGRAM, so parseProgram consumes it before control returns here.
+func parseNestedProgram(firstKw Token) parserAction[*Program] {
+	return func(p *parser, parent *Program) (parserAction[*Program], error) {
+		child, err := parseProgram(p, firstKw)
+		if err != nil {
+			return nil, err
+		}
+		parent.Nested = append(parent.Nested, child)
+
+		tok, err, ok := p.advance()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, nil
+		}
+		if keywordIs(tok, "IDENTIFICATION", "ID") {
+			return parseNestedProgram(tok), nil
+		}
+		return dispatchDivision(tok), nil
 	}
 }
 
@@ -2433,10 +2623,11 @@ func parseRenamesClause(p *parser, entry *DataDescriptionEntry) (parserAction[*D
 	return nil, nil
 }
 
-// parseProcedureDivision parses the PROCEDURE DIVISION whose header keyword kw
-// has already been read. For this slice the procedure division is terminal: its
-// body runs to end of input. The USING/RETURNING phrases, DECLARATIVES, and
-// END PROGRAM are deferred to later stories.
+// parseProcedureDivision parses the PROCEDURE DIVISION whose header keyword kw has
+// already been read. After the body, the procedure division is no longer terminal:
+// it reads the boundary token and either parses the program's nested programs (an
+// IDENTIFICATION/ID header), dispatches the program's END PROGRAM marker (END), or
+// ends at end of input — mirroring how the other divisions hand off to the next.
 func parseProcedureDivision(kw Token) parserAction[*Program] {
 	return func(p *parser, prog *Program) (parserAction[*Program], error) {
 		div := &ProcedureDivision{Pos: kw.Pos}
@@ -2448,21 +2639,391 @@ func parseProcedureDivision(kw Token) parserAction[*Program] {
 		if err != nil {
 			return nil, err
 		}
-
 		prog.Divisions = append(prog.Divisions, div)
-		return nil, nil
+
+		tok, err, ok := p.advance()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, nil
+		}
+		if keywordIs(tok, "IDENTIFICATION", "ID") {
+			return parseNestedProgram(tok), nil
+		}
+		return dispatchDivision(tok), nil
 	}
 }
 
-// parseProcedureHeader consumes "DIVISION" "." after the PROCEDURE keyword.
-func parseProcedureHeader(p *parser, _ *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
+// parseProcedureHeader consumes "DIVISION" after the PROCEDURE keyword, then the
+// optional USING and RETURNING phrases (SPEC.md "using-phrase", "returning-phrase")
+// and the terminating period. It hands off to parseDeclarativesOpt so an optional
+// DECLARATIVES block is parsed before the body.
+func parseProcedureHeader(p *parser, div *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
 	if _, err := p.expectKeyword("DIVISION"); err != nil {
+		return nil, err
+	}
+
+	if using, err := p.peekKeyword("USING"); err != nil {
+		return nil, err
+	} else if using {
+		p.consume()
+		params, err := parseProcedureUsing(p)
+		if err != nil {
+			return nil, err
+		}
+		div.Using = params
+	}
+
+	if returning, err := p.peekKeyword("RETURNING"); err != nil {
+		return nil, err
+	} else if returning {
+		p.consume()
+		name, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		div.Returning = &Word{Pos: name.Pos, Value: string(name.Value)}
+	}
+
+	if _, err := p.expectPeriod(); err != nil {
+		return nil, err
+	}
+	return parseDeclarativesOpt, nil
+}
+
+// parseProcedureUsing parses the data-names of a PROCEDURE DIVISION USING phrase:
+// one or more parameters, each a data-name optionally preceded by a BY
+// REFERENCE/VALUE mode. It continues while the next token is BY or a data-name and
+// stops at the RETURNING keyword or the header period.
+func parseProcedureUsing(p *parser) ([]*Parameter, error) {
+	var params []*Parameter
+	for {
+		byTok, by, err := p.acceptKeyword("BY")
+		if err != nil {
+			return nil, err
+		}
+		var mode string
+		if by {
+			m, err := p.expectKeyword("REFERENCE", "VALUE")
+			if err != nil {
+				return nil, err
+			}
+			mode = strings.ToUpper(string(m.Value))
+		}
+
+		name, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		pos := name.Pos
+		if by {
+			pos = byTok.Pos
+		}
+		params = append(params, &Parameter{
+			Pos:  pos,
+			Mode: mode,
+			Name: &Word{Pos: name.Pos, Value: string(name.Value)},
+		})
+
+		// Another parameter follows when the next token is a BY phrase or a
+		// data-name; RETURNING and the header period end the phrase.
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		if keywordIs(tok, "BY") {
+			continue
+		}
+		if tok.Type == TokenIdentifier && !keywordIs(tok, "RETURNING") {
+			continue
+		}
+		break
+	}
+	return params, nil
+}
+
+// parseDeclarativesOpt parses the optional DECLARATIVES block (SPEC.md
+// "declaratives") that may precede the procedure body. With no DECLARATIVES keyword
+// it hands straight off to the body; otherwise it consumes "DECLARATIVES" "." and
+// loops over the declarative sections.
+func parseDeclarativesOpt(p *parser, div *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
+	decl, err := p.peekKeyword("DECLARATIVES")
+	if err != nil {
+		return nil, err
+	}
+	if !decl {
+		return parseProcedureBody, nil
+	}
+	p.consume()
+	if _, err := p.expectPeriod(); err != nil {
+		return nil, err
+	}
+	return parseDeclarativeSectionOpt, nil
+}
+
+// parseDeclarativeSectionOpt parses one declarative section and appends it, then
+// returns itself; at the END DECLARATIVES marker it consumes "END" "DECLARATIVES"
+// "." and hands off to the procedure body.
+func parseDeclarativeSectionOpt(p *parser, div *ProcedureDivision) (parserAction[*ProcedureDivision], error) {
+	end, err := p.atEndDeclaratives()
+	if err != nil {
+		return nil, err
+	}
+	if end {
+		p.consume() // END
+		if _, err := p.expectKeyword("DECLARATIVES"); err != nil {
+			return nil, err
+		}
+		if _, err := p.expectPeriod(); err != nil {
+			return nil, err
+		}
+		return parseProcedureBody, nil
+	}
+
+	sec, err := parseDeclarativeSection(p)
+	if err != nil {
+		return nil, err
+	}
+	div.Declaratives = append(div.Declaratives, sec)
+	return parseDeclarativeSectionOpt, nil
+}
+
+// parseDeclarativeSection parses one DECLARATIVES section: a section header
+// (name SECTION .), its mandatory USE statement, and the paragraphs that run until
+// the next declarative section header or END DECLARATIVES.
+func parseDeclarativeSection(p *parser) (*DeclarativeSection, error) {
+	name, err := p.expect(TokenIdentifier, TokenNumber)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("SECTION"); err != nil {
 		return nil, err
 	}
 	if _, err := p.expectPeriod(); err != nil {
 		return nil, err
 	}
-	return parseProcedureBody, nil
+	sec := &DeclarativeSection{Pos: name.Pos, Name: &Word{Pos: name.Pos, Value: string(name.Value)}}
+
+	use, err := parseUseStatement(p)
+	if err != nil {
+		return nil, err
+	}
+	sec.Use = use
+
+	for action := parseDeclarativeParagraphOpt; action != nil && err == nil; {
+		action, err = action(p, sec)
+	}
+	return sec, err
+}
+
+// parseDeclarativeParagraphOpt parses one paragraph of a declarative section and
+// appends it, then returns itself; it ends the section at END DECLARATIVES, at the
+// next declarative section header, or at end of input.
+func parseDeclarativeParagraphOpt(p *parser, sec *DeclarativeSection) (parserAction[*DeclarativeSection], error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	// END DECLARATIVES is checked before the section header: its END token would
+	// otherwise fall through to the paragraph-start error below.
+	if end, err := p.atEndDeclaratives(); err != nil {
+		return nil, err
+	} else if end {
+		return nil, nil
+	}
+	if section, err := p.atSectionHeader(); err != nil {
+		return nil, err
+	} else if section {
+		return nil, nil
+	}
+
+	header, err := p.atParagraphHeader()
+	if err != nil {
+		return nil, err
+	}
+	if !header && !isStatementVerb(tok) {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+	}
+
+	para, err := parseParagraph(p)
+	if err != nil {
+		return nil, err
+	}
+	sec.Paragraphs = append(sec.Paragraphs, para)
+	return parseDeclarativeParagraphOpt, nil
+}
+
+// parseUseStatement parses a USE statement (SPEC.md "declaratives": "USE"
+// «use-spec» "."): the USE keyword, a form-specific specification, and the
+// terminating period.
+func parseUseStatement(p *parser) (*UseStatement, error) {
+	kw, err := p.expectKeyword("USE")
+	if err != nil {
+		return nil, err
+	}
+	spec, err := parseUseSpec(p)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expectPeriod(); err != nil {
+		return nil, err
+	}
+	return &UseStatement{Pos: kw.Pos, Spec: spec}, nil
+}
+
+// parseUseSpec parses the body of a USE statement, dispatching among its forms: the
+// optional GLOBAL phrase precedes AFTER (exception/error procedure) and BEFORE
+// (report-writer) forms; FOR/DEBUGGING begins the debugging form.
+func parseUseSpec(p *parser) (UseSpec, error) {
+	first, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenIdentifier}}
+	}
+	pos := first.Pos
+
+	global := false
+	if _, ok, err := p.acceptKeyword("GLOBAL"); err != nil {
+		return nil, err
+	} else if ok {
+		global = true
+	}
+
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenIdentifier}}
+	}
+	switch {
+	case keywordIs(tok, "AFTER"):
+		return parseExceptionUse(p, pos, global)
+	case keywordIs(tok, "BEFORE"):
+		return parseReportingUse(p, pos, global)
+	case keywordIs(tok, "FOR", "DEBUGGING"):
+		return parseDebuggingUse(p, pos)
+	default:
+		return nil, unexpectedKeyword(tok, "AFTER", "BEFORE", "FOR", "DEBUGGING")
+	}
+}
+
+// parseExceptionUse parses the I-O error-handling USE form: "AFTER STANDARD
+// (EXCEPTION | ERROR) PROCEDURE ON (file-name… | INPUT | OUTPUT | I-O | EXTEND)".
+// The GLOBAL phrase, if any, has already been consumed into global.
+func parseExceptionUse(p *parser, pos Pos, global bool) (UseSpec, error) {
+	if _, err := p.expectKeyword("AFTER"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("STANDARD"); err != nil {
+		return nil, err
+	}
+	kind, err := p.expectKeyword("EXCEPTION", "ERROR")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("PROCEDURE"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("ON"); err != nil {
+		return nil, err
+	}
+
+	use := &ExceptionUse{Pos: pos, Global: global, Error: keywordIs(kind, "ERROR")}
+	if mode, ok, err := p.acceptKeyword("INPUT", "OUTPUT", "I-O", "EXTEND"); err != nil {
+		return nil, err
+	} else if ok {
+		use.Mode = strings.ToUpper(string(mode.Value))
+		return use, nil
+	}
+
+	// Otherwise one or more file-names, running to the terminating period.
+	for {
+		file, err := p.expect(TokenIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		use.Files = append(use.Files, &Word{Pos: file.Pos, Value: string(file.Value)})
+
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || tok.Type != TokenIdentifier {
+			break
+		}
+	}
+	return use, nil
+}
+
+// parseReportingUse parses the report-writer USE form: "BEFORE REPORTING
+// report-group". The GLOBAL phrase, if any, has already been consumed into global.
+func parseReportingUse(p *parser, pos Pos, global bool) (UseSpec, error) {
+	if _, err := p.expectKeyword("BEFORE"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("REPORTING"); err != nil {
+		return nil, err
+	}
+	name, err := p.expect(TokenIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	return &ReportingUse{Pos: pos, Global: global, Report: &Word{Pos: name.Pos, Value: string(name.Value)}}, nil
+}
+
+// parseDebuggingUse parses the debugging USE form: "[FOR] DEBUGGING ON
+// (procedure-name… | ALL PROCEDURES)".
+func parseDebuggingUse(p *parser, pos Pos) (UseSpec, error) {
+	if err := p.skipOptionalKeyword("FOR"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("DEBUGGING"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expectKeyword("ON"); err != nil {
+		return nil, err
+	}
+
+	use := &DebuggingUse{Pos: pos}
+	if _, ok, err := p.acceptKeyword("ALL"); err != nil {
+		return nil, err
+	} else if ok {
+		if _, err := p.expectKeyword("PROCEDURES"); err != nil {
+			return nil, err
+		}
+		use.AllProcs = true
+		return use, nil
+	}
+
+	// Otherwise one or more procedure-names (which may be all digits), running to
+	// the terminating period.
+	for {
+		name, err := p.expect(TokenIdentifier, TokenNumber)
+		if err != nil {
+			return nil, err
+		}
+		use.Targets = append(use.Targets, &Word{Pos: name.Pos, Value: string(name.Value)})
+
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || (tok.Type != TokenIdentifier && tok.Type != TokenNumber) {
+			break
+		}
+	}
+	return use, nil
 }
 
 // parseProcedureBody parses the procedure body. The body is either paragraph-form
@@ -2503,6 +3064,12 @@ func parseParagraphOpt(p *parser, div *ProcedureDivision) (parserAction[*Procedu
 		return nil, nil
 	}
 
+	if boundary, err := p.atProgramBoundary(); err != nil {
+		return nil, err
+	} else if boundary {
+		return nil, nil
+	}
+
 	section, err := p.atSectionHeader()
 	if err != nil {
 		return nil, err
@@ -2537,6 +3104,12 @@ func parseSectionOpt(p *parser, div *ProcedureDivision) (parserAction[*Procedure
 		return nil, err
 	}
 	if !ok {
+		return nil, nil
+	}
+
+	if boundary, err := p.atProgramBoundary(); err != nil {
+		return nil, err
+	} else if boundary {
 		return nil, nil
 	}
 
@@ -2595,6 +3168,13 @@ func parseSectionParagraphOpt(p *parser, sec *Section) (parserAction[*Section], 
 	if !ok {
 		return nil, nil
 	}
+
+	if boundary, err := p.atProgramBoundary(); err != nil {
+		return nil, err
+	} else if boundary {
+		return nil, nil
+	}
+
 	section, err := p.atSectionHeader()
 	if err != nil {
 		return nil, err

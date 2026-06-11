@@ -614,6 +614,136 @@ func TestPrinter(t *testing.T) {
 				"    CALL \"PROG\".\n" +
 				"    CALL WS-PROG USING BY REFERENCE WS-A BY CONTENT \"lit\" WS-B RETURNING WS-RC END-CALL.\n",
 		},
+		{
+			name: "procedure header using and returning",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "P"}},
+							},
+							&ProcedureDivision{
+								Using: []*Parameter{
+									{Mode: "REFERENCE", Name: &Word{Value: "WS-A"}},
+									{Name: &Word{Value: "WS-B"}},
+									{Mode: "VALUE", Name: &Word{Value: "WS-C"}},
+								},
+								Returning: &Word{Value: "WS-RC"},
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION USING BY REFERENCE WS-A WS-B BY VALUE WS-C RETURNING WS-RC.\n" +
+				"    STOP RUN.\n",
+		},
+		{
+			name: "declaratives block and end program",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "D"}},
+							},
+							&ProcedureDivision{
+								Declaratives: []*DeclarativeSection{
+									{
+										Name: &Word{Value: "S1"},
+										Use:  &UseStatement{Spec: &ExceptionUse{Global: true, Error: true, Files: []*Word{{Value: "F1"}, {Value: "F2"}}}},
+										Paragraphs: []*Paragraph{
+											{Name: &Word{Value: "P1"}, Sentences: []*Sentence{{Statements: []Statement{&ContinueStatement{}}}}},
+										},
+									},
+									{
+										Name: &Word{Value: "S2"},
+										Use:  &UseStatement{Spec: &DebuggingUse{AllProcs: true}},
+									},
+									{
+										Name: &Word{Value: "S3"},
+										Use:  &UseStatement{Spec: &ReportingUse{Report: &Word{Value: "RG"}}},
+									},
+								},
+								Sections: []*Section{
+									{
+										Name:       &Word{Value: "MAIN"},
+										Paragraphs: []*Paragraph{{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}}},
+									},
+								},
+							},
+						},
+						End: &EndProgram{Name: &Word{Value: "D"}},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. D.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"DECLARATIVES.\n" +
+				"S1 SECTION.\n" +
+				"    USE GLOBAL AFTER STANDARD ERROR PROCEDURE ON F1 F2.\n" +
+				"P1.\n" +
+				"    CONTINUE.\n" +
+				"S2 SECTION.\n" +
+				"    USE DEBUGGING ON ALL PROCEDURES.\n" +
+				"S3 SECTION.\n" +
+				"    USE BEFORE REPORTING RG.\n" +
+				"END DECLARATIVES.\n" +
+				"MAIN SECTION.\n" +
+				"    STOP RUN.\n" +
+				"END PROGRAM D.\n",
+		},
+		{
+			name: "nested program between body and end program",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "OUTER"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{{Statements: []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"outer"`}}}}}}},
+								},
+							},
+						},
+						Nested: []*Program{
+							{
+								Divisions: []Division{
+									&IdentificationDivision{
+										ProgramID: &ProgramID{Name: &Word{Value: "INNER"}},
+									},
+									&ProcedureDivision{
+										Paragraphs: []*Paragraph{
+											{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}},
+										},
+									},
+								},
+								End: &EndProgram{Name: &Word{Value: "INNER"}},
+							},
+						},
+						End: &EndProgram{Name: &Word{Value: "OUTER"}},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. OUTER.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    DISPLAY \"outer\".\n" +
+				"IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. INNER.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STOP RUN.\n" +
+				"END PROGRAM INNER.\n" +
+				"END PROGRAM OUTER.\n",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -711,6 +841,62 @@ func TestPrinterRoundTrip(t *testing.T) {
 				"    CALL \"P\" USING BY REFERENCE WS-A BY CONTENT \"lit\" BY VALUE WS-C.\n" +
 				"    STOP RUN.\n",
 		},
+		{
+			name: "procedure header using and returning",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. LINK.\n" +
+				"PROCEDURE DIVISION USING BY REFERENCE WS-A WS-B BY VALUE WS-C RETURNING WS-RC.\n" +
+				"    STOP RUN.\n",
+		},
+		{
+			name: "declaratives all use forms",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. DECL.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"DECLARATIVES.\n" +
+				"IO-SECTION SECTION.\n" +
+				"    USE GLOBAL AFTER STANDARD ERROR PROCEDURE ON IN-FILE OUT-FILE.\n" +
+				"IO-PARA.\n" +
+				"    DISPLAY \"io\".\n" +
+				"MODE-SECTION SECTION.\n" +
+				"    USE AFTER STANDARD EXCEPTION PROCEDURE ON EXTEND.\n" +
+				"DBG-SECTION SECTION.\n" +
+				"    USE FOR DEBUGGING ON ALL PROCEDURES.\n" +
+				"DBG2-SECTION SECTION.\n" +
+				"    USE DEBUGGING ON MAIN-PARA OTHER-PARA.\n" +
+				"REP-SECTION SECTION.\n" +
+				"    USE GLOBAL BEFORE REPORTING WS-GROUP.\n" +
+				"END DECLARATIVES.\n" +
+				"MAIN-SECTION SECTION.\n" +
+				"MAIN-PARA.\n" +
+				"    STOP RUN.\n",
+		},
+		{
+			name: "concatenated sibling programs",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. A.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STOP RUN.\n" +
+				"END PROGRAM A.\n" +
+				"IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. B.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STOP RUN.\n" +
+				"END PROGRAM B.\n",
+		},
+		{
+			name: "nested program",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. OUTER.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    DISPLAY \"outer\".\n" +
+				"    IDENTIFICATION DIVISION.\n" +
+				"    PROGRAM-ID. INNER.\n" +
+				"    PROCEDURE DIVISION.\n" +
+				"        STOP RUN.\n" +
+				"    END PROGRAM INNER.\n" +
+				"END PROGRAM OUTER.\n",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -755,6 +941,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_evaluate_cob", fixture: "procedure_evaluate.cob"},
 		{name: "procedure_call_cob", fixture: "procedure_call.cob"},
 		{name: "procedure_sections_cob", fixture: "procedure_sections.cob"},
+		{name: "program_linkage_cob", fixture: "program_linkage.cob"},
 		{name: "full_program_cob", fixture: "full_program.cob"},
 	}
 
@@ -844,25 +1031,39 @@ MAIN-PARAGRAPH.
 // free to choose (SPEC.md "Reference format independence").
 func withoutPos(f *File) *File {
 	for _, prog := range f.Programs {
-		prog.Pos = Pos{}
-		for _, div := range prog.Divisions {
-			switch d := div.(type) {
-			case *IdentificationDivision:
-				d.Pos = Pos{}
-				if d.ProgramID != nil {
-					d.ProgramID.Pos = Pos{}
-					clearTypePos(d.ProgramID.Name)
-				}
-			case *EnvironmentDivision:
-				clearEnvironmentPos(d)
-			case *DataDivision:
-				clearDataDivisionPos(d)
-			case *ProcedureDivision:
-				clearProcedurePos(d)
-			}
-		}
+		clearProgramPos(prog)
 	}
 	return f
+}
+
+// clearProgramPos zeroes every Pos beneath a program — its divisions, its END
+// PROGRAM marker, and (recursively) its nested programs — so round-trip comparisons
+// ignore the positions the printer is free to choose.
+func clearProgramPos(prog *Program) {
+	prog.Pos = Pos{}
+	for _, div := range prog.Divisions {
+		switch d := div.(type) {
+		case *IdentificationDivision:
+			d.Pos = Pos{}
+			if d.ProgramID != nil {
+				d.ProgramID.Pos = Pos{}
+				clearTypePos(d.ProgramID.Name)
+			}
+		case *EnvironmentDivision:
+			clearEnvironmentPos(d)
+		case *DataDivision:
+			clearDataDivisionPos(d)
+		case *ProcedureDivision:
+			clearProcedurePos(d)
+		}
+	}
+	for _, nested := range prog.Nested {
+		clearProgramPos(nested)
+	}
+	if prog.End != nil {
+		prog.End.Pos = Pos{}
+		clearTypePos(prog.End.Name)
+	}
 }
 
 // clearTypePos zeroes the Pos of a value node.
@@ -898,6 +1099,19 @@ func clearNumericPos(n *NumericLiteral) {
 // comparisons ignore the positions the printer is free to choose.
 func clearProcedurePos(div *ProcedureDivision) {
 	div.Pos = Pos{}
+	for _, param := range div.Using {
+		param.Pos = Pos{}
+		clearWordPos(param.Name)
+	}
+	clearWordPos(div.Returning)
+	for _, sec := range div.Declaratives {
+		sec.Pos = Pos{}
+		clearWordPos(sec.Name)
+		clearUseStatementPos(sec.Use)
+		for _, para := range sec.Paragraphs {
+			clearParagraphPos(para)
+		}
+	}
 	for _, para := range div.Paragraphs {
 		clearParagraphPos(para)
 	}
@@ -908,6 +1122,29 @@ func clearProcedurePos(div *ProcedureDivision) {
 		for _, para := range sec.Paragraphs {
 			clearParagraphPos(para)
 		}
+	}
+}
+
+// clearUseStatementPos zeroes the Pos of a USE statement and its specification.
+func clearUseStatementPos(use *UseStatement) {
+	if use == nil {
+		return
+	}
+	use.Pos = Pos{}
+	switch s := use.Spec.(type) {
+	case *ExceptionUse:
+		s.Pos = Pos{}
+		for _, file := range s.Files {
+			clearWordPos(file)
+		}
+	case *DebuggingUse:
+		s.Pos = Pos{}
+		for _, target := range s.Targets {
+			clearWordPos(target)
+		}
+	case *ReportingUse:
+		s.Pos = Pos{}
+		clearWordPos(s.Report)
 	}
 }
 
@@ -1796,6 +2033,69 @@ func TestPrinterErrors(t *testing.T) {
 					}}}},
 				}},
 			}}}},
+		},
+		{
+			name: "procedure using parameter with unsupported by mode",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{
+					Using:      []*Parameter{{Mode: "CONTENT", Name: &Word{Value: "WS-A"}}},
+					Paragraphs: []*Paragraph{{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}}},
+				},
+			}}}},
+		},
+		{
+			name: "nil using parameter element",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{
+					Using:      []*Parameter{nil},
+					Paragraphs: []*Paragraph{{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}}},
+				},
+			}}}},
+		},
+		{
+			name: "declarative section missing use statement",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{
+					Declaratives: []*DeclarativeSection{{Name: &Word{Value: "S"}}},
+					Sections:     []*Section{{Name: &Word{Value: "MAIN"}, Paragraphs: []*Paragraph{{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}}}}},
+				},
+			}}}},
+		},
+		{
+			name: "use statement with nil specification",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{
+					Declaratives: []*DeclarativeSection{{Name: &Word{Value: "S"}, Use: &UseStatement{}}},
+					Sections:     []*Section{{Name: &Word{Value: "MAIN"}, Paragraphs: []*Paragraph{{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}}}}},
+				},
+			}}}},
+		},
+		{
+			name: "exception use with neither mode nor files",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{
+					Declaratives: []*DeclarativeSection{{Name: &Word{Value: "S"}, Use: &UseStatement{Spec: &ExceptionUse{}}}},
+					Sections:     []*Section{{Name: &Word{Value: "MAIN"}, Paragraphs: []*Paragraph{{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}}}}},
+				},
+			}}}},
+		},
+		{
+			name: "end program with unsupported name type",
+			input: &File{Programs: []*Program{{
+				Divisions: []Division{
+					&IdentificationDivision{ProgramID: &ProgramID{Name: &Word{Value: "P"}}},
+				},
+				End: &EndProgram{Name: fakeValue{}},
+			}}},
+		},
+		{
+			name: "nil nested program element",
+			input: &File{Programs: []*Program{{
+				Divisions: []Division{
+					&IdentificationDivision{ProgramID: &ProgramID{Name: &Word{Value: "P"}}},
+				},
+				Nested: []*Program{nil},
+			}}},
 		},
 	}
 

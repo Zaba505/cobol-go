@@ -1267,6 +1267,309 @@ func TestParser(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "procedure division using and returning phrases",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. LINK.\n" +
+				"PROCEDURE DIVISION USING BY REFERENCE WS-A BY VALUE WS-B RETURNING WS-RC.\n" +
+				"    STOP RUN.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "LINK"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Using: []*Parameter{
+									{Pos: Pos{Line: 3, Column: 26}, Mode: "REFERENCE", Name: &Word{Pos: Pos{Line: 3, Column: 39}, Value: "WS-A"}},
+									{Pos: Pos{Line: 3, Column: 44}, Mode: "VALUE", Name: &Word{Pos: Pos{Line: 3, Column: 53}, Value: "WS-B"}},
+								},
+								Returning: &Word{Pos: Pos{Line: 3, Column: 68}, Value: "WS-RC"},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos:        Pos{Line: 4, Column: 5},
+												Statements: []Statement{&StopStatement{Pos: Pos{Line: 4, Column: 5}, Run: true}},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "declaratives with every use form and end program",
+			src: "ID DIVISION.\n" +
+				"PROGRAM-ID. D.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"DECLARATIVES.\n" +
+				"S1 SECTION.\n" +
+				"    USE GLOBAL AFTER STANDARD ERROR PROCEDURE ON F1 F2.\n" +
+				"P1.\n" +
+				"    CONTINUE.\n" +
+				"S2 SECTION.\n" +
+				"    USE DEBUGGING ON P-A P-B.\n" +
+				"S3 SECTION.\n" +
+				"    USE GLOBAL BEFORE REPORTING RG.\n" +
+				"END DECLARATIVES.\n" +
+				"MAIN SECTION.\n" +
+				"    STOP RUN.\n" +
+				"END PROGRAM D.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "D"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Declaratives: []*DeclarativeSection{
+									{
+										Pos:  Pos{Line: 5, Column: 1},
+										Name: &Word{Pos: Pos{Line: 5, Column: 1}, Value: "S1"},
+										Use: &UseStatement{
+											Pos: Pos{Line: 6, Column: 5},
+											Spec: &ExceptionUse{
+												Pos:    Pos{Line: 6, Column: 9},
+												Global: true,
+												Error:  true,
+												Files: []*Word{
+													{Pos: Pos{Line: 6, Column: 50}, Value: "F1"},
+													{Pos: Pos{Line: 6, Column: 53}, Value: "F2"},
+												},
+											},
+										},
+										Paragraphs: []*Paragraph{
+											{
+												Pos:  Pos{Line: 7, Column: 1},
+												Name: &Word{Pos: Pos{Line: 7, Column: 1}, Value: "P1"},
+												Sentences: []*Sentence{
+													{
+														Pos:        Pos{Line: 8, Column: 5},
+														Statements: []Statement{&ContinueStatement{Pos: Pos{Line: 8, Column: 5}}},
+													},
+												},
+											},
+										},
+									},
+									{
+										Pos:  Pos{Line: 9, Column: 1},
+										Name: &Word{Pos: Pos{Line: 9, Column: 1}, Value: "S2"},
+										Use: &UseStatement{
+											Pos: Pos{Line: 10, Column: 5},
+											Spec: &DebuggingUse{
+												Pos: Pos{Line: 10, Column: 9},
+												Targets: []*Word{
+													{Pos: Pos{Line: 10, Column: 22}, Value: "P-A"},
+													{Pos: Pos{Line: 10, Column: 26}, Value: "P-B"},
+												},
+											},
+										},
+									},
+									{
+										Pos:  Pos{Line: 11, Column: 1},
+										Name: &Word{Pos: Pos{Line: 11, Column: 1}, Value: "S3"},
+										Use: &UseStatement{
+											Pos: Pos{Line: 12, Column: 5},
+											Spec: &ReportingUse{
+												Pos:    Pos{Line: 12, Column: 9},
+												Global: true,
+												Report: &Word{Pos: Pos{Line: 12, Column: 33}, Value: "RG"},
+											},
+										},
+									},
+								},
+								Sections: []*Section{
+									{
+										Pos:  Pos{Line: 14, Column: 1},
+										Name: &Word{Pos: Pos{Line: 14, Column: 1}, Value: "MAIN"},
+										Paragraphs: []*Paragraph{
+											{
+												Pos: Pos{Line: 15, Column: 5},
+												Sentences: []*Sentence{
+													{
+														Pos:        Pos{Line: 15, Column: 5},
+														Statements: []Statement{&StopStatement{Pos: Pos{Line: 15, Column: 5}, Run: true}},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+						End: &EndProgram{Pos: Pos{Line: 16, Column: 1}, Name: &Word{Pos: Pos{Line: 16, Column: 13}, Value: "D"}},
+					},
+				},
+			},
+		},
+		{
+			name: "nested program",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. OUTER.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    DISPLAY \"x\".\n" +
+				"    IDENTIFICATION DIVISION.\n" +
+				"    PROGRAM-ID. INNER.\n" +
+				"    PROCEDURE DIVISION.\n" +
+				"        STOP RUN.\n" +
+				"    END PROGRAM INNER.\n" +
+				"END PROGRAM OUTER.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "OUTER"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&DisplayStatement{
+														Pos:      Pos{Line: 4, Column: 5},
+														Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 13}, Value: "\"x\""}},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+						Nested: []*Program{
+							{
+								Pos: Pos{Line: 5, Column: 5},
+								Divisions: []Division{
+									&IdentificationDivision{
+										Pos: Pos{Line: 5, Column: 5},
+										ProgramID: &ProgramID{
+											Pos:  Pos{Line: 6, Column: 5},
+											Name: &Word{Pos: Pos{Line: 6, Column: 17}, Value: "INNER"},
+										},
+									},
+									&ProcedureDivision{
+										Pos: Pos{Line: 7, Column: 5},
+										Paragraphs: []*Paragraph{
+											{
+												Pos: Pos{Line: 8, Column: 9},
+												Sentences: []*Sentence{
+													{
+														Pos:        Pos{Line: 8, Column: 9},
+														Statements: []Statement{&StopStatement{Pos: Pos{Line: 8, Column: 9}, Run: true}},
+													},
+												},
+											},
+										},
+									},
+								},
+								End: &EndProgram{Pos: Pos{Line: 9, Column: 5}, Name: &Word{Pos: Pos{Line: 9, Column: 17}, Value: "INNER"}},
+							},
+						},
+						End: &EndProgram{Pos: Pos{Line: 10, Column: 1}, Name: &Word{Pos: Pos{Line: 10, Column: 13}, Value: "OUTER"}},
+					},
+				},
+			},
+		},
+		{
+			name: "concatenated sibling programs delimited by end program",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. A.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STOP RUN.\n" +
+				"END PROGRAM A.\n" +
+				"IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. B.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STOP RUN.\n" +
+				"END PROGRAM B.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "A"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos:        Pos{Line: 4, Column: 5},
+												Statements: []Statement{&StopStatement{Pos: Pos{Line: 4, Column: 5}, Run: true}},
+											},
+										},
+									},
+								},
+							},
+						},
+						End: &EndProgram{Pos: Pos{Line: 5, Column: 1}, Name: &Word{Pos: Pos{Line: 5, Column: 13}, Value: "A"}},
+					},
+					{
+						Pos: Pos{Line: 6, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 6, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 7, Column: 1},
+									Name: &Word{Pos: Pos{Line: 7, Column: 13}, Value: "B"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 8, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 9, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos:        Pos{Line: 9, Column: 5},
+												Statements: []Statement{&StopStatement{Pos: Pos{Line: 9, Column: 5}, Run: true}},
+											},
+										},
+									},
+								},
+							},
+						},
+						End: &EndProgram{Pos: Pos{Line: 10, Column: 1}, Name: &Word{Pos: Pos{Line: 10, Column: 13}, Value: "B"}},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1639,6 +1942,48 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedTokenError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 20}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "procedure using with no data-name",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION USING.\n" +
+				"    STOP RUN.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 3, Column: 25}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "end program without program keyword",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STOP RUN.\n" +
+				"END P.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 5, Column: 5}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "unknown use specification form",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"DECLARATIVES.\n" +
+				"S SECTION.\n" +
+				"    USE WHENEVER.\n" +
+				"END DECLARATIVES.\n" +
+				"MAIN SECTION.\n" +
+				"    STOP RUN.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 6, Column: 9}, target.Actual.Pos)
 			},
 		},
 	}
