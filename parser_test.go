@@ -261,8 +261,18 @@ func TestParser(t *testing.T) {
 							},
 							&ProcedureDivision{
 								Pos: Pos{Line: 28, Column: 1},
-								Statements: []Statement{
-									&StopStatement{Pos: Pos{Line: 29, Column: 5}, Run: true},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 29, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 29, Column: 5},
+												Statements: []Statement{
+													&StopStatement{Pos: Pos{Line: 29, Column: 5}, Run: true},
+												},
+											},
+										},
+									},
 								},
 							},
 						},
@@ -291,14 +301,474 @@ func TestParser(t *testing.T) {
 							},
 							&ProcedureDivision{
 								Pos: Pos{Line: 3, Column: 1},
-								Statements: []Statement{
-									&DisplayStatement{
+								Paragraphs: []*Paragraph{
+									{
 										Pos: Pos{Line: 4, Column: 5},
-										Operands: []Type{
-											&StringLiteral{Pos: Pos{Line: 4, Column: 13}, Value: `"Hello, world!"`},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&DisplayStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Operands: []Type{
+															&StringLiteral{Pos: Pos{Line: 4, Column: 13}, Value: `"Hello, world!"`},
+														},
+													},
+												},
+											},
+											{
+												Pos: Pos{Line: 5, Column: 5},
+												Statements: []Statement{
+													&StopStatement{Pos: Pos{Line: 5, Column: 5}, Run: true},
+												},
+											},
 										},
 									},
-									&StopStatement{Pos: Pos{Line: 5, Column: 5}, Run: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "procedure division simple statements",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE A TO B C.\n" +
+				"    DISPLAY \"x\" A.\n" +
+				"    STOP RUN.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&MoveStatement{
+														Pos:    Pos{Line: 4, Column: 5},
+														Source: &Identifier{Pos: Pos{Line: 4, Column: 10}, Name: &Word{Pos: Pos{Line: 4, Column: 10}, Value: "A"}},
+														Targets: []*Identifier{
+															{Pos: Pos{Line: 4, Column: 15}, Name: &Word{Pos: Pos{Line: 4, Column: 15}, Value: "B"}},
+															{Pos: Pos{Line: 4, Column: 17}, Name: &Word{Pos: Pos{Line: 4, Column: 17}, Value: "C"}},
+														},
+													},
+												},
+											},
+											{
+												Pos: Pos{Line: 5, Column: 5},
+												Statements: []Statement{
+													&DisplayStatement{
+														Pos: Pos{Line: 5, Column: 5},
+														Operands: []Type{
+															&StringLiteral{Pos: Pos{Line: 5, Column: 13}, Value: `"x"`},
+															&Identifier{Pos: Pos{Line: 5, Column: 17}, Name: &Word{Pos: Pos{Line: 5, Column: 17}, Value: "A"}},
+														},
+													},
+												},
+											},
+											{
+												Pos: Pos{Line: 6, Column: 5},
+												Statements: []Statement{
+													&StopStatement{Pos: Pos{Line: 6, Column: 5}, Run: true},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "compute with operator precedence",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    COMPUTE X = A + B * C.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ComputeStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Targets: []ComputeTarget{
+															{
+																Pos:  Pos{Line: 4, Column: 13},
+																Name: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "X"}},
+															},
+														},
+														// A + (B * C): "*" binds tighter than "+".
+														Expr: &BinaryExpr{
+															Pos:  Pos{Line: 4, Column: 17},
+															Op:   "+",
+															Left: &Identifier{Pos: Pos{Line: 4, Column: 17}, Name: &Word{Pos: Pos{Line: 4, Column: 17}, Value: "A"}},
+															Right: &BinaryExpr{
+																Pos:   Pos{Line: 4, Column: 21},
+																Op:    "*",
+																Left:  &Identifier{Pos: Pos{Line: 4, Column: 21}, Name: &Word{Pos: Pos{Line: 4, Column: 21}, Value: "B"}},
+																Right: &Identifier{Pos: Pos{Line: 4, Column: 25}, Name: &Word{Pos: Pos{Line: 4, Column: 25}, Value: "C"}},
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "if statement with end-if",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF A > B MOVE 1 TO C END-IF.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&IfStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Cond: &RelationCondition{
+															Pos:   Pos{Line: 4, Column: 8},
+															Left:  &Identifier{Pos: Pos{Line: 4, Column: 8}, Name: &Word{Pos: Pos{Line: 4, Column: 8}, Value: "A"}},
+															Op:    ">",
+															Right: &Identifier{Pos: Pos{Line: 4, Column: 12}, Name: &Word{Pos: Pos{Line: 4, Column: 12}, Value: "B"}},
+														},
+														Then: []Statement{
+															&MoveStatement{
+																Pos:     Pos{Line: 4, Column: 14},
+																Source:  &NumericLiteral{Pos: Pos{Line: 4, Column: 19}, Value: "1"},
+																Targets: []*Identifier{{Pos: Pos{Line: 4, Column: 24}, Name: &Word{Pos: Pos{Line: 4, Column: 24}, Value: "C"}}},
+															},
+														},
+														EndIf: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "exponentiation is left-associative",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    COMPUTE X = A ** B ** C.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ComputeStatement{
+														Pos:     Pos{Line: 4, Column: 5},
+														Targets: []ComputeTarget{{Pos: Pos{Line: 4, Column: 13}, Name: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "X"}}}},
+														// (A ** B) ** C — left-associative.
+														Expr: &BinaryExpr{
+															Pos: Pos{Line: 4, Column: 17},
+															Op:  "**",
+															Left: &BinaryExpr{
+																Pos:   Pos{Line: 4, Column: 17},
+																Op:    "**",
+																Left:  &Identifier{Pos: Pos{Line: 4, Column: 17}, Name: &Word{Pos: Pos{Line: 4, Column: 17}, Value: "A"}},
+																Right: &Identifier{Pos: Pos{Line: 4, Column: 22}, Name: &Word{Pos: Pos{Line: 4, Column: 22}, Value: "B"}},
+															},
+															Right: &Identifier{Pos: Pos{Line: 4, Column: 27}, Name: &Word{Pos: Pos{Line: 4, Column: 27}, Value: "C"}},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "unary sign binds to the first primary before exponentiation",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    COMPUTE X = -A ** B.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ComputeStatement{
+														Pos:     Pos{Line: 4, Column: 5},
+														Targets: []ComputeTarget{{Pos: Pos{Line: 4, Column: 13}, Name: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "X"}}}},
+														// (-A) ** B — the sign binds to A, then exponentiation.
+														Expr: &BinaryExpr{
+															Pos: Pos{Line: 4, Column: 17},
+															Op:  "**",
+															Left: &UnaryExpr{
+																Pos:     Pos{Line: 4, Column: 17},
+																Op:      "-",
+																Operand: &Identifier{Pos: Pos{Line: 4, Column: 18}, Name: &Word{Pos: Pos{Line: 4, Column: 18}, Value: "A"}},
+															},
+															Right: &Identifier{Pos: Pos{Line: 4, Column: 23}, Name: &Word{Pos: Pos{Line: 4, Column: 23}, Value: "B"}},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "AND binds tighter than OR",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF A OR B AND C CONTINUE END-IF.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&IfStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														// A OR (B AND C) — AND binds tighter than OR.
+														Cond: &LogicalCondition{
+															Pos:  Pos{Line: 4, Column: 8},
+															Op:   "OR",
+															Left: &ConditionNameCondition{Pos: Pos{Line: 4, Column: 8}, Name: &Identifier{Pos: Pos{Line: 4, Column: 8}, Name: &Word{Pos: Pos{Line: 4, Column: 8}, Value: "A"}}},
+															Right: &LogicalCondition{
+																Pos:   Pos{Line: 4, Column: 13},
+																Op:    "AND",
+																Left:  &ConditionNameCondition{Pos: Pos{Line: 4, Column: 13}, Name: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "B"}}},
+																Right: &ConditionNameCondition{Pos: Pos{Line: 4, Column: 19}, Name: &Identifier{Pos: Pos{Line: 4, Column: 19}, Name: &Word{Pos: Pos{Line: 4, Column: 19}, Value: "C"}}},
+															},
+														},
+														Then:  []Statement{&ContinueStatement{Pos: Pos{Line: 4, Column: 21}}},
+														EndIf: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "negated relation records the NOT position",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF A NOT = B CONTINUE END-IF.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&IfStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														// NotCondition.Pos is the NOT keyword (4,10), not the operand.
+														Cond: &NotCondition{
+															Pos: Pos{Line: 4, Column: 10},
+															Cond: &RelationCondition{
+																Pos:   Pos{Line: 4, Column: 8},
+																Left:  &Identifier{Pos: Pos{Line: 4, Column: 8}, Name: &Word{Pos: Pos{Line: 4, Column: 8}, Value: "A"}},
+																Op:    "=",
+																Right: &Identifier{Pos: Pos{Line: 4, Column: 16}, Name: &Word{Pos: Pos{Line: 4, Column: 16}, Value: "B"}},
+															},
+														},
+														Then:  []Statement{&ContinueStatement{Pos: Pos{Line: 4, Column: 18}}},
+														EndIf: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "anonymous and named paragraphs",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    DISPLAY \"a\".\n" +
+				"MAIN.\n" +
+				"    DISPLAY \"b\".\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&DisplayStatement{
+														Pos:      Pos{Line: 4, Column: 5},
+														Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 13}, Value: `"a"`}},
+													},
+												},
+											},
+										},
+									},
+									{
+										Pos:  Pos{Line: 5, Column: 1},
+										Name: &Word{Pos: Pos{Line: 5, Column: 1}, Value: "MAIN"},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 6, Column: 5},
+												Statements: []Statement{
+													&DisplayStatement{
+														Pos:      Pos{Line: 6, Column: 5},
+														Operands: []Type{&StringLiteral{Pos: Pos{Line: 6, Column: 13}, Value: `"b"`}},
+													},
+												},
+											},
+										},
+									},
 								},
 							},
 						},
@@ -390,8 +860,18 @@ func TestParser(t *testing.T) {
 							},
 							&ProcedureDivision{
 								Pos: Pos{Line: 17, Column: 1},
-								Statements: []Statement{
-									&StopStatement{Pos: Pos{Line: 18, Column: 5}, Run: true},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 18, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 18, Column: 5},
+												Statements: []Statement{
+													&StopStatement{Pos: Pos{Line: 18, Column: 5}, Run: true},
+												},
+											},
+										},
+									},
 								},
 							},
 						},
@@ -453,15 +933,17 @@ func TestParserErrors(t *testing.T) {
 			},
 		},
 		{
-			name: "misspelled verb in procedure body",
+			name: "misspelled verb in statement position",
+			// A bare "FOO." is a (valid, empty) paragraph named FOO; an unknown verb
+			// only errors where a statement is required, e.g. inside an IF branch.
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. HELLO.\n" +
 				"PROCEDURE DIVISION.\n" +
-				"    FOO.\n",
+				"    IF X = 0 FOO.\n",
 			assert: func(t *testing.T, err error) {
 				var target UnexpectedKeywordError
 				require.ErrorAs(t, err, &target)
-				require.Equal(t, Pos{Line: 4, Column: 5}, target.Actual.Pos)
+				require.Equal(t, Pos{Line: 4, Column: 14}, target.Actual.Pos)
 			},
 		},
 		{
@@ -474,6 +956,112 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedTokenError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 5}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "MOVE missing TO",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE A B.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 12}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "GO TO without a procedure-name",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    GO TO.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 10}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "unterminated subscript",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE A(1.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 13}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "two subscript groups (second must be a reference-modifier)",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE A(I)(J) TO B.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				// The second group lacks a ":", so the reference-modifier colon is required.
+				require.Equal(t, Pos{Line: 4, Column: 16}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "IF without a condition",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 7}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "PERFORM with a non-procedure-name operand",
+			// A string literal is neither a count nor a procedure-name; the error
+			// reports the real token (a String), not a synthesized identifier.
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    PERFORM \"X\".\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 13}, target.Actual.Pos)
+				require.Equal(t, TokenString, target.Actual.Type)
+			},
+		},
+		{
+			name: "stray token inside a section body",
+			// A token that is neither a paragraph header nor a verb must error rather
+			// than loop forever (parseSectionParagraphOpt pre-validation).
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"MY-SEC SECTION.\n" +
+				"    +.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 5, Column: 5}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "section after loose paragraphs",
+			// Once the body is paragraph-form, a SECTION cannot follow.
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    DISPLAY \"a\".\n" +
+				"MY-SEC SECTION.\n" +
+				"    STOP RUN.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 5, Column: 8}, target.Actual.Pos)
 			},
 		},
 		{

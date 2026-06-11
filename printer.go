@@ -610,23 +610,110 @@ func occursClauseText(c *OccursClause) (string, bool) {
 }
 
 // printProcedureDivision prints the PROCEDURE DIVISION header followed by its
-// statements, one sentence per line. A typed-nil division is rejected with an
-// [UnsupportedNodeError] rather than panicking.
+// body — either its paragraphs or its sections. A typed-nil division, or one with
+// both Paragraphs and Sections set (the two body forms are mutually exclusive), is
+// rejected with an [UnsupportedNodeError] rather than panicking.
 func printProcedureDivision(div *ProcedureDivision, next printerAction) printerAction {
-	if div == nil {
+	if div == nil || (len(div.Paragraphs) > 0 && len(div.Sections) > 0) {
 		return failPrint(UnsupportedNodeError{Node: div})
 	}
-	return writeThen("PROCEDURE DIVISION.\n", printStatementAt(div, 0, next))
+	return writeThen("PROCEDURE DIVISION.\n",
+		printParagraphAt(div.Paragraphs, 0,
+			printSectionAt(div.Sections, 0, next)))
 }
 
-// printStatementAt prints div's statement at index i, then continues with the
-// statement after it; once i is past the last statement it continues with next.
-func printStatementAt(div *ProcedureDivision, i int, next printerAction) printerAction {
+// printSectionAt prints the section at index i, then continues with the section
+// after it; once i is past the last section it continues with next.
+func printSectionAt(secs []*Section, i int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
-		if i >= len(div.Statements) {
+		if i >= len(secs) {
 			return next
 		}
-		return printStatement(div.Statements[i], printStatementAt(div, i+1, next))
+		return printSection(secs[i], printSectionAt(secs, i+1, next))
+	}
+}
+
+// printSection prints a section-name header (with its optional segment number)
+// followed by the section's paragraphs. A typed-nil section or one missing its
+// name is rejected with an [UnsupportedNodeError].
+func printSection(sec *Section, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if sec == nil || sec.Name == nil {
+			return failPrint(UnsupportedNodeError{Node: sec})
+		}
+		header := sec.Name.Value + " SECTION"
+		if sec.Segment != nil {
+			header += " " + sec.Segment.Value
+		}
+		return writeThen(header+".\n", printParagraphAt(sec.Paragraphs, 0, next))
+	}
+}
+
+// printParagraphAt prints the paragraph at index i, then continues with the
+// paragraph after it; once i is past the last paragraph it continues with next.
+func printParagraphAt(paras []*Paragraph, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(paras) {
+			return next
+		}
+		return printParagraph(paras[i], printParagraphAt(paras, i+1, next))
+	}
+}
+
+// printParagraph prints an optional paragraph-name header followed by the
+// paragraph's sentences. The anonymous leading paragraph (nil Name) prints no
+// header. A typed-nil paragraph is rejected with an [UnsupportedNodeError].
+func printParagraph(para *Paragraph, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if para == nil {
+			return failPrint(UnsupportedNodeError{Node: para})
+		}
+		body := printSentenceAt(para.Sentences, 0, next)
+		if para.Name == nil {
+			return body
+		}
+		return writeThen(para.Name.Value+".\n", body)
+	}
+}
+
+// printSentenceAt prints the sentence at index i, then continues with the
+// sentence after it; once i is past the last sentence it continues with next.
+func printSentenceAt(sents []*Sentence, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(sents) {
+			return next
+		}
+		return printSentence(sents[i], printSentenceAt(sents, i+1, next))
+	}
+}
+
+// printSentence prints a sentence's statements, the last terminated by the
+// separator period that ends the sentence. A typed-nil or empty sentence is
+// rejected rather than emitting a bare period.
+func printSentence(sent *Sentence, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if sent == nil || len(sent.Statements) == 0 {
+			return failPrint(UnsupportedNodeError{Node: sent})
+		}
+		return printSentenceStatementAt(sent, 0, next)
+	}
+}
+
+// printSentenceStatementAt prints sent's statement at index j on its own line.
+// The final statement is followed by the sentence-terminating period; all others
+// by a newline. The period belongs to the sentence, not the statement, so a
+// statement printer never emits it (it may emit its own scope terminator, e.g.
+// END-IF, which is separate from the sentence period).
+func printSentenceStatementAt(sent *Sentence, j int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if j >= len(sent.Statements) {
+			return next
+		}
+		sep := "\n"
+		if j == len(sent.Statements)-1 {
+			sep = ".\n"
+		}
+		return printStatement(sent.Statements[j], writeThen(sep, printSentenceStatementAt(sent, j+1, next)))
 	}
 }
 
@@ -638,6 +725,22 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 	switch s := stmt.(type) {
 	case *DisplayStatement:
 		return printDisplayStatement(s, next)
+	case *MoveStatement:
+		return printMoveStatement(s, next)
+	case *AcceptStatement:
+		return printAcceptStatement(s, next)
+	case *ArithmeticStatement:
+		return printArithmeticStatement(s, next)
+	case *ComputeStatement:
+		return printComputeStatement(s, next)
+	case *IfStatement:
+		return printIfStatement(s, next)
+	case *PerformStatement:
+		return printPerformStatement(s, next)
+	case *GoToStatement:
+		return printGoToStatement(s, next)
+	case *ContinueStatement:
+		return printContinueStatement(s, next)
 	case *StopStatement:
 		return printStopStatement(s, next)
 	default:
@@ -645,11 +748,11 @@ func printStatement(stmt Statement, next printerAction) printerAction {
 	}
 }
 
-// printDisplayStatement prints a DISPLAY statement: the verb followed by its
-// space-separated operands, indented and terminated with a separator period. The
-// operand slice is a leaf walked with a local loop, not the action machinery. A
-// typed-nil statement (a nil *DisplayStatement element) is rejected with an
-// [UnsupportedNodeError] rather than panicking.
+// printDisplayStatement prints a DISPLAY statement: the indented verb, its
+// space-separated operands, an optional UPON mnemonic, and an optional WITH NO
+// ADVANCING phrase. The sentence-terminating period is emitted by the enclosing
+// sentence, not here. A typed-nil statement is rejected with an
+// [UnsupportedNodeError].
 func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil {
@@ -664,33 +767,426 @@ func printDisplayStatement(stmt *DisplayStatement, next printerAction) printerAc
 			pr.write(" ")
 			pr.write(text)
 		}
-		pr.write(".\n")
+		if stmt.Upon != nil {
+			pr.write(" UPON " + stmt.Upon.Value)
+		}
+		if stmt.NoAdvancing {
+			pr.write(" WITH NO ADVANCING")
+		}
 		return next
 	}
 }
 
-// printStopStatement prints a STOP statement. Only the STOP RUN form is produced
-// by the parser today; the bare-STOP branch is forward-looking and harmless. A
-// typed-nil statement (a nil *StopStatement element) is rejected with an
-// [UnsupportedNodeError] rather than panicking.
-func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
+// printMoveStatement prints a MOVE statement: the optional CORRESPONDING, the
+// sending operand, "TO", and the receiving identifiers. A typed-nil statement, one
+// with no receiving identifier (MOVE requires at least one), or an unprintable
+// operand is rejected with an [UnsupportedNodeError].
+func printMoveStatement(stmt *MoveStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || len(stmt.Targets) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("    MOVE ")
+		if stmt.Corresponding {
+			pr.write("CORRESPONDING ")
+		}
+		src, ok := valueText(stmt.Source)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Source})
+		}
+		pr.write(src)
+		pr.write(" TO")
+		for _, t := range stmt.Targets {
+			text, ok := identifierText(t)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: t})
+			}
+			pr.write(" " + text)
+		}
+		return next
+	}
+}
+
+// printAcceptStatement prints an ACCEPT statement: the receiving identifier and an
+// optional FROM source. A typed-nil statement or an unprintable target is rejected
+// with an [UnsupportedNodeError].
+func printAcceptStatement(stmt *AcceptStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		if stmt.Run {
-			pr.write("    STOP RUN.\n")
-		} else {
-			pr.write("    STOP.\n")
+		target, ok := identifierText(stmt.Target)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Target})
+		}
+		pr.write("    ACCEPT " + target)
+		if stmt.From != nil {
+			pr.write(" FROM " + stmt.From.Value)
 		}
 		return next
 	}
 }
 
-// valueText returns the source text of a value node — a [Word]'s spelling or a
-// [StringLiteral]'s raw lexeme (including its delimiters) — and reports whether
-// the node was a printable value type. The ok flag lets callers surface an
-// explicit [UnsupportedNodeError] instead of emitting a blank operand or name.
+// printArithmeticStatement prints an ADD/SUBTRACT/MULTIPLY/DIVIDE statement: the
+// verb, source operands, optional connector and in-place targets, optional GIVING
+// result, optional ROUNDED, and optional END-<verb> terminator. A statement with
+// no verb, no operands, or no receiving field is rejected with an
+// [UnsupportedNodeError]. The connector and in-place targets are paired: a
+// connector without targets, or targets without a connector (which would silently
+// drop the targets), is also rejected.
+func printArithmeticStatement(stmt *ArithmeticStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.Verb == "" || len(stmt.Operands) == 0 ||
+			(len(stmt.Targets) == 0 && stmt.Giving == nil) ||
+			(stmt.Connector == "") != (len(stmt.Targets) == 0) {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("    " + stmt.Verb)
+		for _, op := range stmt.Operands {
+			text, ok := valueText(op)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: op})
+			}
+			pr.write(" " + text)
+		}
+		if stmt.Connector != "" {
+			pr.write(" " + stmt.Connector)
+			for _, t := range stmt.Targets {
+				text, ok := identifierText(t)
+				if !ok {
+					return failPrint(UnsupportedNodeError{Node: t})
+				}
+				pr.write(" " + text)
+			}
+		}
+		if stmt.Giving != nil {
+			text, ok := identifierText(stmt.Giving)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Giving})
+			}
+			pr.write(" GIVING " + text)
+		}
+		if stmt.Rounded {
+			pr.write(" ROUNDED")
+		}
+		if stmt.EndScope {
+			pr.write(" END-" + stmt.Verb)
+		}
+		return next
+	}
+}
+
+// printComputeStatement prints a COMPUTE statement: the receiving fields (each
+// optionally ROUNDED), "=", the arithmetic expression, and an optional
+// END-COMPUTE. A statement with no targets or an unprintable expression is
+// rejected with an [UnsupportedNodeError].
+func printComputeStatement(stmt *ComputeStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || len(stmt.Targets) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("    COMPUTE")
+		for _, tgt := range stmt.Targets {
+			text, ok := identifierText(tgt.Name)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: tgt.Name})
+			}
+			pr.write(" " + text)
+			if tgt.Rounded {
+				pr.write(" ROUNDED")
+			}
+		}
+		e, ok := exprText(stmt.Expr)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Expr})
+		}
+		pr.write(" = " + e)
+		if stmt.EndScope {
+			pr.write(" END-COMPUTE")
+		}
+		return next
+	}
+}
+
+// printIfStatement prints an IF statement: the condition, the then-branch
+// statements (each on its own line), an optional ELSE branch, and an optional
+// END-IF. The sentence-terminating period is emitted by the enclosing sentence, so
+// the final line carries no period here. A typed-nil statement or a missing
+// condition is rejected with an [UnsupportedNodeError].
+func printIfStatement(stmt *IfStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.Cond == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		cond, ok := conditionText(stmt.Cond)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Cond})
+		}
+		pr.write("    IF " + cond)
+
+		end := next
+		if stmt.EndIf {
+			end = writeThen("\n    END-IF", end)
+		}
+		tail := end
+		if stmt.HasElse {
+			tail = writeThen("\n    ELSE", printBranchStatementAt(stmt.Else, 0, end))
+		}
+		return printBranchStatementAt(stmt.Then, 0, tail)
+	}
+}
+
+// printPerformStatement prints a PERFORM statement. The out-of-line form prints the
+// procedure-name(s) and loop on one line; the inline form prints the loop, the body
+// statements (each on its own line), and END-PERFORM. The sentence-terminating
+// period is emitted by the enclosing sentence. A typed-nil statement, an
+// out-of-line PERFORM with no target, an inline PERFORM without END-PERFORM (which
+// would merge with following statements on re-parse), or an unprintable loop is
+// rejected with an [UnsupportedNodeError].
+func printPerformStatement(stmt *PerformStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		loop, ok := performLoopText(stmt)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+
+		if !stmt.Inline {
+			if stmt.Target == nil {
+				return failPrint(UnsupportedNodeError{Node: stmt})
+			}
+			pr.write("    PERFORM " + stmt.Target.Value)
+			if stmt.Through != nil {
+				pr.write(" THROUGH " + stmt.Through.Value)
+			}
+			pr.write(loop)
+			return next
+		}
+
+		// An inline PERFORM is delimited by END-PERFORM; without it the body would
+		// merge with the following statements on re-parse, so reject it.
+		if !stmt.EndPerform {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("    PERFORM" + loop)
+		return printBranchStatementAt(stmt.Body, 0, writeThen("\n    END-PERFORM", next))
+	}
+}
+
+// performLoopText returns the canonical text of a PERFORM loop specification, with
+// a leading space when non-empty, and whether it could be rendered. WITH TEST
+// BEFORE/AFTER only qualifies an UNTIL loop, so TestAfter without an Until is an
+// inconsistent state that would silently drop the phrase and is rejected.
+func performLoopText(stmt *PerformStatement) (string, bool) {
+	if stmt.TestAfter && stmt.Until == nil {
+		return "", false
+	}
+	switch {
+	case stmt.Times != nil:
+		t, ok := valueText(stmt.Times)
+		if !ok {
+			return "", false
+		}
+		return " " + t + " TIMES", true
+	case stmt.Varying != nil:
+		v := stmt.Varying
+		name, ok := identifierText(v.Name)
+		if !ok {
+			return "", false
+		}
+		from, ok := valueText(v.From)
+		if !ok {
+			return "", false
+		}
+		by, ok := valueText(v.By)
+		if !ok {
+			return "", false
+		}
+		cond, ok := conditionText(v.Until)
+		if !ok {
+			return "", false
+		}
+		return " VARYING " + name + " FROM " + from + " BY " + by + " UNTIL " + cond, true
+	case stmt.Until != nil:
+		cond, ok := conditionText(stmt.Until)
+		if !ok {
+			return "", false
+		}
+		s := " "
+		if stmt.TestAfter {
+			s += "WITH TEST AFTER "
+		}
+		return s + "UNTIL " + cond, true
+	default:
+		return "", true
+	}
+}
+
+// printBranchStatementAt prints the branch statement at index i on its own line
+// (preceded by a newline so it sits under the IF/PERFORM header), then continues
+// with the next; once i is past the last statement it continues with next.
+func printBranchStatementAt(stmts []Statement, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(stmts) {
+			return next
+		}
+		pr.write("\n")
+		return printStatement(stmts[i], printBranchStatementAt(stmts, i+1, next))
+	}
+}
+
+// conditionText returns the canonical source text of a condition and whether it
+// could be rendered: relational operators in symbol form, class/sign conditions as
+// "operand IS [NOT] keyword", AND/OR/NOT combinators, and preserved parentheses.
+func conditionText(c Condition) (string, bool) {
+	switch n := c.(type) {
+	case *RelationCondition:
+		if n == nil {
+			return "", false
+		}
+		l, ok := exprText(n.Left)
+		if !ok {
+			return "", false
+		}
+		r, ok := exprText(n.Right)
+		if !ok {
+			return "", false
+		}
+		return l + " " + n.Op + " " + r, true
+	case *ClassCondition:
+		if n == nil {
+			return "", false
+		}
+		o, ok := exprText(n.Operand)
+		if !ok {
+			return "", false
+		}
+		return o + " IS " + negate(n.Not) + n.Class, true
+	case *SignCondition:
+		if n == nil {
+			return "", false
+		}
+		o, ok := exprText(n.Operand)
+		if !ok {
+			return "", false
+		}
+		return o + " IS " + negate(n.Not) + n.Sign, true
+	case *ConditionNameCondition:
+		if n == nil {
+			return "", false
+		}
+		return identifierText(n.Name)
+	case *LogicalCondition:
+		if n == nil {
+			return "", false
+		}
+		l, ok := conditionText(n.Left)
+		if !ok {
+			return "", false
+		}
+		r, ok := conditionText(n.Right)
+		if !ok {
+			return "", false
+		}
+		return l + " " + n.Op + " " + r, true
+	case *NotCondition:
+		if n == nil {
+			return "", false
+		}
+		inner, ok := conditionText(n.Cond)
+		if !ok {
+			return "", false
+		}
+		return "NOT " + inner, true
+	case *ParenCondition:
+		if n == nil {
+			return "", false
+		}
+		inner, ok := conditionText(n.Cond)
+		if !ok {
+			return "", false
+		}
+		return "(" + inner + ")", true
+	default:
+		return "", false
+	}
+}
+
+// negate returns the "NOT " prefix when not is set, for class/sign conditions.
+func negate(not bool) string {
+	if not {
+		return "NOT "
+	}
+	return ""
+}
+
+// printGoToStatement prints a GO TO statement: the procedure-names and an optional
+// DEPENDING ON selector. A typed-nil statement, one with no targets, or an
+// unprintable selector is rejected with an [UnsupportedNodeError].
+func printGoToStatement(stmt *GoToStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || len(stmt.Targets) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("    GO TO")
+		for _, t := range stmt.Targets {
+			if t == nil {
+				return failPrint(UnsupportedNodeError{Node: stmt})
+			}
+			pr.write(" " + t.Value)
+		}
+		if stmt.DependingOn != nil {
+			dep, ok := identifierText(stmt.DependingOn)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.DependingOn})
+			}
+			pr.write(" DEPENDING ON " + dep)
+		}
+		return next
+	}
+}
+
+// printContinueStatement prints a CONTINUE statement. A typed-nil statement is
+// rejected with an [UnsupportedNodeError].
+func printContinueStatement(stmt *ContinueStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("    CONTINUE")
+		return next
+	}
+}
+
+// printStopStatement prints a STOP statement (the indented verb; the sentence
+// emits the terminating period): STOP RUN or STOP <literal>. Exactly one of Run or
+// Literal must be present; a typed-nil statement, neither set, or both set
+// (RUN would silently drop the literal) is rejected with an [UnsupportedNodeError].
+func printStopStatement(stmt *StopStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.Run == (stmt.Literal != nil) {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		if stmt.Run {
+			pr.write("    STOP RUN")
+			return next
+		}
+		text, ok := valueText(stmt.Literal)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Literal})
+		}
+		pr.write("    STOP " + text)
+		return next
+	}
+}
+
+// valueText returns the source text of a value node — a [Word]'s spelling, a
+// literal's raw lexeme (including its delimiters), or an [Identifier]'s rendered
+// reference — and reports whether the node was a printable value type. The ok flag
+// lets callers surface an explicit [UnsupportedNodeError] instead of emitting a
+// blank operand or name.
 func valueText(v Type) (string, bool) {
 	switch n := v.(type) {
 	case *Word:
@@ -708,9 +1204,112 @@ func valueText(v Type) (string, bool) {
 			return "", false
 		}
 		return n.Value, true
+	case *Identifier:
+		return identifierText(n)
 	default:
 		return "", false
 	}
+}
+
+// exprText returns the canonical source text of an arithmetic expression and
+// whether it could be rendered. Binary operators are surrounded by single spaces,
+// a unary sign is attached to its operand, and parenthesized groups are preserved
+// so the printed expression re-parses to the same tree.
+func exprText(e Expr) (string, bool) {
+	switch n := e.(type) {
+	case *Identifier:
+		return identifierText(n)
+	case *NumericLiteral:
+		if n == nil {
+			return "", false
+		}
+		return n.Value, true
+	case *StringLiteral:
+		if n == nil {
+			return "", false
+		}
+		return n.Value, true
+	case *BinaryExpr:
+		if n == nil {
+			return "", false
+		}
+		l, ok := exprText(n.Left)
+		if !ok {
+			return "", false
+		}
+		r, ok := exprText(n.Right)
+		if !ok {
+			return "", false
+		}
+		return l + " " + n.Op + " " + r, true
+	case *UnaryExpr:
+		if n == nil {
+			return "", false
+		}
+		o, ok := exprText(n.Operand)
+		if !ok {
+			return "", false
+		}
+		return n.Op + o, true
+	case *ParenExpr:
+		if n == nil {
+			return "", false
+		}
+		inner, ok := exprText(n.Expr)
+		if !ok {
+			return "", false
+		}
+		return "(" + inner + ")", true
+	default:
+		return "", false
+	}
+}
+
+// identifierText returns the canonical source text of a data reference: its name,
+// any IN/OF qualifiers, an optional subscript list, and an optional
+// reference-modifier. Subscripts are space-separated; the reference-modifier uses
+// the "(start:length)" form with the length omitted when nil.
+func identifierText(id *Identifier) (string, bool) {
+	if id == nil || id.Name == nil {
+		return "", false
+	}
+	s := id.Name.Value
+	for _, q := range id.Qualifiers {
+		if q == nil {
+			return "", false
+		}
+		s += " OF " + q.Value
+	}
+	if len(id.Subscripts) > 0 {
+		s += "("
+		for i, sub := range id.Subscripts {
+			t, ok := exprText(sub)
+			if !ok {
+				return "", false
+			}
+			if i > 0 {
+				s += " "
+			}
+			s += t
+		}
+		s += ")"
+	}
+	if id.RefMod != nil {
+		start, ok := exprText(id.RefMod.Start)
+		if !ok {
+			return "", false
+		}
+		s += "(" + start + ":"
+		if id.RefMod.Length != nil {
+			l, ok := exprText(id.RefMod.Length)
+			if !ok {
+				return "", false
+			}
+			s += l
+		}
+		s += ")"
+	}
+	return s, true
 }
 
 // UnsupportedNodeError is returned by [Print] when it encounters an AST node it
