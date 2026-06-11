@@ -471,7 +471,11 @@ func dataEntryDepths(entries []*DataDescriptionEntry) []int {
 		case 88:
 			depths[i] = parentDepth + 1
 		case 66, 77:
-			stack = stack[:0]
+			// RENAMES (66) and independent items (77) sit at the record level
+			// (depth 0). They don't disturb the 01–49 nesting stack — the
+			// hierarchy is defined by 01–49 level numbers alone, and a later 01
+			// pops the stack on its own — but they do become the parent of any
+			// subordinate 88 (a 77 may carry condition-names).
 			depths[i] = 0
 			parentDepth = 0
 		default: // 01–49
