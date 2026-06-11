@@ -512,6 +512,109 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "exponentiation is left-associative",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    COMPUTE X = A ** B ** C.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ComputeStatement{
+														Pos:     Pos{Line: 4, Column: 5},
+														Targets: []ComputeTarget{{Pos: Pos{Line: 4, Column: 13}, Name: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "X"}}}},
+														// (A ** B) ** C — left-associative.
+														Expr: &BinaryExpr{
+															Pos: Pos{Line: 4, Column: 17},
+															Op:  "**",
+															Left: &BinaryExpr{
+																Pos:   Pos{Line: 4, Column: 17},
+																Op:    "**",
+																Left:  &Identifier{Pos: Pos{Line: 4, Column: 17}, Name: &Word{Pos: Pos{Line: 4, Column: 17}, Value: "A"}},
+																Right: &Identifier{Pos: Pos{Line: 4, Column: 22}, Name: &Word{Pos: Pos{Line: 4, Column: 22}, Value: "B"}},
+															},
+															Right: &Identifier{Pos: Pos{Line: 4, Column: 27}, Name: &Word{Pos: Pos{Line: 4, Column: 27}, Value: "C"}},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "AND binds tighter than OR",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF A OR B AND C CONTINUE END-IF.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&IfStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														// A OR (B AND C) — AND binds tighter than OR.
+														Cond: &LogicalCondition{
+															Pos:  Pos{Line: 4, Column: 8},
+															Op:   "OR",
+															Left: &ConditionNameCondition{Pos: Pos{Line: 4, Column: 8}, Name: &Identifier{Pos: Pos{Line: 4, Column: 8}, Name: &Word{Pos: Pos{Line: 4, Column: 8}, Value: "A"}}},
+															Right: &LogicalCondition{
+																Pos:   Pos{Line: 4, Column: 13},
+																Op:    "AND",
+																Left:  &ConditionNameCondition{Pos: Pos{Line: 4, Column: 13}, Name: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "B"}}},
+																Right: &ConditionNameCondition{Pos: Pos{Line: 4, Column: 19}, Name: &Identifier{Pos: Pos{Line: 4, Column: 19}, Name: &Word{Pos: Pos{Line: 4, Column: 19}, Value: "C"}}},
+															},
+														},
+														Then:  []Statement{&ContinueStatement{Pos: Pos{Line: 4, Column: 21}}},
+														EndIf: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "negated relation records the NOT position",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +

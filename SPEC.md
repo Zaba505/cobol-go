@@ -703,8 +703,10 @@ subscript        = "(" operand { operand } ")"
           consumed by the tokenizer as a separator »
 reference-modifier = "(" arithmetic-expression ":" [ arithmetic-expression ] ")"
 
-condition =
-        combinable-condition { ( "AND" | "OR" ) combinable-condition }
+condition =                                 « precedence: NOT > AND > OR »
+        and-condition { "OR" and-condition }
+and-condition =
+        combinable-condition { "AND" combinable-condition }
 combinable-condition =
         [ "NOT" ] simple-condition | "(" condition ")"
 simple-condition =

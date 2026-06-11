@@ -321,8 +321,8 @@ type ReferenceModifier struct {
 }
 
 // BinaryExpr is a binary arithmetic expression. Pos is the position of its left
-// operand; Op is one of "+", "-", "*", "/", "**". The "+"/"-"/"*"/"/" operators
-// are left-associative and "**" is right-associative.
+// operand; Op is one of "+", "-", "*", "/", "**". All binary operators are
+// left-associative (COBOL evaluates equal-precedence operators left to right).
 type BinaryExpr struct {
 	Pos   Pos
 	Op    string
@@ -3524,7 +3524,9 @@ func parseTerm(p *parser) (Expr, error) {
 }
 
 // parseFactor parses a factor: an optional leading sign, a primary, and a
-// right-associative chain of "**" exponentiations.
+// left-associative chain of "**" exponentiations. COBOL evaluates equal-precedence
+// operators left to right, matching SPEC.md's `factor = [sign] primary { "**"
+// primary }`.
 func parseFactor(p *parser) (Expr, error) {
 	signed, err := p.peekSymbol("+", "-")
 	if err != nil {
@@ -3543,19 +3545,21 @@ func parseFactor(p *parser) (Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-	is, err := p.peekSymbol("**")
-	if err != nil {
-		return nil, err
+	for {
+		is, err := p.peekSymbol("**")
+		if err != nil {
+			return nil, err
+		}
+		if !is {
+			return left, nil
+		}
+		op, _ := p.expectSymbol("**")
+		right, err := parsePrimary(p)
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryExpr{Pos: exprPos(left), Op: string(op.Value), Left: left, Right: right}
 	}
-	if !is {
-		return left, nil
-	}
-	op, _ := p.expectSymbol("**")
-	right, err := parseFactor(p) // right-associative
-	if err != nil {
-		return nil, err
-	}
-	return &BinaryExpr{Pos: exprPos(left), Op: string(op.Value), Left: left, Right: right}, nil
 }
 
 // parsePrimary parses a primary: a parenthesized expression or an operand.
