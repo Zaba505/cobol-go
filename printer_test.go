@@ -1273,6 +1273,45 @@ func TestPrinterErrors(t *testing.T) {
 			}}}},
 		},
 		{
+			name: "inline perform without end-perform",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&PerformStatement{Inline: true, Body: []Statement{&ContinueStatement{}}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "arithmetic with targets but no connector",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&ArithmeticStatement{
+							Verb:     "ADD",
+							Operands: []Type{&Identifier{Name: &Word{Value: "A"}}},
+							Targets:  []*Identifier{{Name: &Word{Value: "B"}}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "arithmetic with connector but no targets",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&ArithmeticStatement{
+							Verb:      "ADD",
+							Operands:  []Type{&Identifier{Name: &Word{Value: "A"}}},
+							Connector: "TO",
+							Giving:    &Identifier{Name: &Word{Value: "C"}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
+		{
 			name: "nil section element",
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				&ProcedureDivision{Sections: []*Section{nil}},

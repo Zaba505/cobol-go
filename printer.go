@@ -831,11 +831,14 @@ func printAcceptStatement(stmt *AcceptStatement, next printerAction) printerActi
 // verb, source operands, optional connector and in-place targets, optional GIVING
 // result, optional ROUNDED, and optional END-<verb> terminator. A statement with
 // no verb, no operands, or no receiving field is rejected with an
-// [UnsupportedNodeError].
+// [UnsupportedNodeError]. The connector and in-place targets are paired: a
+// connector without targets, or targets without a connector (which would silently
+// drop the targets), is also rejected.
 func printArithmeticStatement(stmt *ArithmeticStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil || stmt.Verb == "" || len(stmt.Operands) == 0 ||
-			(len(stmt.Targets) == 0 && stmt.Giving == nil) {
+			(len(stmt.Targets) == 0 && stmt.Giving == nil) ||
+			(stmt.Connector == "") != (len(stmt.Targets) == 0) {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
 		pr.write("    " + stmt.Verb)
@@ -937,8 +940,9 @@ func printIfStatement(stmt *IfStatement, next printerAction) printerAction {
 // procedure-name(s) and loop on one line; the inline form prints the loop, the body
 // statements (each on its own line), and END-PERFORM. The sentence-terminating
 // period is emitted by the enclosing sentence. A typed-nil statement, an
-// out-of-line PERFORM with no target, or an unprintable loop is rejected with an
-// [UnsupportedNodeError].
+// out-of-line PERFORM with no target, an inline PERFORM without END-PERFORM (which
+// would merge with following statements on re-parse), or an unprintable loop is
+// rejected with an [UnsupportedNodeError].
 func printPerformStatement(stmt *PerformStatement, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil {
@@ -961,12 +965,13 @@ func printPerformStatement(stmt *PerformStatement, next printerAction) printerAc
 			return next
 		}
 
-		pr.write("    PERFORM" + loop)
-		end := next
-		if stmt.EndPerform {
-			end = writeThen("\n    END-PERFORM", next)
+		// An inline PERFORM is delimited by END-PERFORM; without it the body would
+		// merge with the following statements on re-parse, so reject it.
+		if !stmt.EndPerform {
+			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
-		return printBranchStatementAt(stmt.Body, 0, end)
+		pr.write("    PERFORM" + loop)
+		return printBranchStatementAt(stmt.Body, 0, writeThen("\n    END-PERFORM", next))
 	}
 }
 
