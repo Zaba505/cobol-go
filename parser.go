@@ -2512,9 +2512,11 @@ func parseSection(p *parser) (*Section, error) {
 // parseSectionParagraphOpt parses one paragraph of a section and appends it, then
 // returns itself; it ends the section at the next section header or end of input.
 func parseSectionParagraphOpt(p *parser, sec *Section) (parserAction[*Section], error) {
-	if _, err, ok := p.peek(); err != nil {
+	tok, err, ok := p.peek()
+	if err != nil {
 		return nil, err
-	} else if !ok {
+	}
+	if !ok {
 		return nil, nil
 	}
 	section, err := p.atSectionHeader()
@@ -2523,6 +2525,16 @@ func parseSectionParagraphOpt(p *parser, sec *Section) (parserAction[*Section], 
 	}
 	if section {
 		return nil, nil
+	}
+
+	// Require a paragraph start (a name header or a verb); otherwise parseParagraph
+	// would consume nothing and loop forever on a stray token (mirrors parseParagraphOpt).
+	header, err := p.atParagraphHeader()
+	if err != nil {
+		return nil, err
+	}
+	if !header && !isStatementVerb(tok) {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
 	}
 
 	para, err := parseParagraph(p)
@@ -2844,7 +2856,8 @@ func parsePerformWithOperand(p *parser, stmt *PerformStatement) (Statement, erro
 	}
 	if through {
 		p.consume()
-		t, err := p.expect(TokenIdentifier)
+		// A procedure-name may be an identifier or an all-digit word.
+		t, err := p.expect(TokenIdentifier, TokenNumber)
 		if err != nil {
 			return nil, err
 		}

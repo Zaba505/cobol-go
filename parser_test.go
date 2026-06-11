@@ -1035,6 +1035,21 @@ func TestParserErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "stray token inside a section body",
+			// A token that is neither a paragraph header nor a verb must error rather
+			// than loop forever (parseSectionParagraphOpt pre-validation).
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"MY-SEC SECTION.\n" +
+				"    +.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 5, Column: 5}, target.Actual.Pos)
+			},
+		},
+		{
 			name: "section after loose paragraphs",
 			// Once the body is paragraph-form, a SECTION cannot follow.
 			src: "IDENTIFICATION DIVISION.\n" +
