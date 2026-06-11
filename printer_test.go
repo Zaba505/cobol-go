@@ -1637,6 +1637,44 @@ func TestPrinterErrors(t *testing.T) {
 				}}},
 			}}}},
 		},
+		{
+			name: "evaluate with no subjects",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&EvaluateStatement{
+							Whens: []*EvaluateWhen{{Objects: []*EvaluateObject{{Any: true}}, Body: []Statement{&ContinueStatement{}}}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "evaluate when with no objects",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&EvaluateStatement{
+							Subjects: []*EvaluateSubject{{Operand: &Identifier{Name: &Word{Value: "X"}}}},
+							Whens:    []*EvaluateWhen{{Body: []Statement{&ContinueStatement{}}}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "evaluate with nil when element",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&EvaluateStatement{
+							Subjects: []*EvaluateSubject{{Operand: &Identifier{Name: &Word{Value: "X"}}}},
+							Whens:    []*EvaluateWhen{nil},
+						},
+					}}}},
+				}},
+			}}}},
+		},
 	}
 
 	for _, tc := range testCases {

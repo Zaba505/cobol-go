@@ -3065,7 +3065,13 @@ func operandFromExpr(p *parser, e Expr) (Type, error) {
 	if op, ok := e.(Type); ok {
 		return op, nil
 	}
-	tok, _, _ := p.peek()
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenIdentifier, TokenString, TokenNumber}}
+	}
 	return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier, TokenString, TokenNumber}, Actual: tok}
 }
 

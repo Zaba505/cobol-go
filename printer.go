@@ -1060,6 +1060,9 @@ func printEvaluateWhenAt(stmt *EvaluateStatement, i int, depth int, next printer
 			return printEvaluateOther(stmt, depth, next)
 		}
 		when := stmt.Whens[i]
+		if when == nil || len(when.Objects) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
 		objects, ok := evaluateObjectsText(when.Objects)
 		if !ok {
 			return failPrint(UnsupportedNodeError{Node: stmt})

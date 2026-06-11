@@ -1234,6 +1234,19 @@ func TestParserErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "EVALUATE subject is an arithmetic expression ended by EOF",
+			// "A + B" is not a valid bare subject operand; running out of tokens
+			// must surface UnexpectedEndOfTokensError, not a zero-position token.
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    EVALUATE A + B\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedEndOfTokensError
+				require.ErrorAs(t, err, &target)
+			},
+		},
+		{
 			name: "GO TO without a procedure-name",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. HELLO.\n" +
