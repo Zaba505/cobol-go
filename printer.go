@@ -790,6 +790,8 @@ func printStatement(stmt Statement, depth int, next printerAction) printerAction
 		return printIfStatement(s, depth, next)
 	case *PerformStatement:
 		return printPerformStatement(s, depth, next)
+	case *EvaluateStatement:
+		return printEvaluateStatement(s, depth, next)
 	case *GoToStatement:
 		return printGoToStatement(s, depth, next)
 	case *ContinueStatement:
@@ -1026,6 +1028,180 @@ func printPerformStatement(stmt *PerformStatement, depth int, next printerAction
 		pr.write(indent(depth) + "PERFORM" + loop)
 		return printBranchStatementAt(stmt.Body, 0, depth+1, writeThen("\n"+indent(depth)+"END-PERFORM", next))
 	}
+}
+
+// printEvaluateStatement prints an EVALUATE statement: the ALSO-joined subjects on
+// the header line, each WHEN (and the optional WHEN OTHER) clause with its branch
+// statements on their own lines, and the closing END-EVALUATE. Following the IF
+// printer, the WHEN clauses sit at the statement's own depth and their bodies one
+// level deeper; the sentence-terminating period is emitted by the enclosing
+// sentence. A typed-nil statement, one with no subjects, or an unprintable
+// subject/object is rejected with an [UnsupportedNodeError].
+func printEvaluateStatement(stmt *EvaluateStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || len(stmt.Subjects) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		subjects, ok := evaluateSubjectsText(stmt.Subjects)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "EVALUATE " + subjects)
+		end := writeThen("\n"+indent(depth)+"END-EVALUATE", next)
+		return printEvaluateWhenAt(stmt, 0, depth, end)
+	}
+}
+
+// printEvaluateWhenAt prints the WHEN branch at index i and chains to the next, then
+// to the WHEN OTHER branch once the indexed branches are exhausted.
+func printEvaluateWhenAt(stmt *EvaluateStatement, i int, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(stmt.Whens) {
+			return printEvaluateOther(stmt, depth, next)
+		}
+		when := stmt.Whens[i]
+		if when == nil || len(when.Objects) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		objects, ok := evaluateObjectsText(when.Objects)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("\n" + indent(depth) + "WHEN " + objects)
+		return printBranchStatementAt(when.Body, 0, depth+1, printEvaluateWhenAt(stmt, i+1, depth, next))
+	}
+}
+
+// printEvaluateOther prints the WHEN OTHER branch when present, then continues.
+func printEvaluateOther(stmt *EvaluateStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if !stmt.HasOther {
+			return next
+		}
+		pr.write("\n" + indent(depth) + "WHEN OTHER")
+		return printBranchStatementAt(stmt.Other, 0, depth+1, next)
+	}
+}
+
+// evaluateSubjectsText renders the ALSO-joined subjects of an EVALUATE header.
+func evaluateSubjectsText(subjects []*EvaluateSubject) (string, bool) {
+	parts := make([]string, len(subjects))
+	for i, s := range subjects {
+		t, ok := evaluateSubjectText(s)
+		if !ok {
+			return "", false
+		}
+		parts[i] = t
+	}
+	return strings.Join(parts, " ALSO "), true
+}
+
+// evaluateSubjectText renders one EVALUATE subject: a boolean keyword, a condition,
+// or an operand. Exactly one of Bool/Cond/Operand must be set; an inconsistent node
+// is rejected (false) rather than silently dropping a field, so the print stays
+// round-trippable.
+func evaluateSubjectText(s *EvaluateSubject) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	set := 0
+	if s.Bool != "" {
+		set++
+	}
+	if s.Cond != nil {
+		set++
+	}
+	if s.Operand != nil {
+		set++
+	}
+	if set != 1 {
+		return "", false
+	}
+	switch {
+	case s.Bool != "":
+		return s.Bool, true
+	case s.Cond != nil:
+		return conditionText(s.Cond)
+	default:
+		return valueText(s.Operand)
+	}
+}
+
+// evaluateObjectsText renders the ALSO-joined objects of a WHEN branch.
+func evaluateObjectsText(objects []*EvaluateObject) (string, bool) {
+	parts := make([]string, len(objects))
+	for i, o := range objects {
+		t, ok := evaluateObjectText(o)
+		if !ok {
+			return "", false
+		}
+		parts[i] = t
+	}
+	return strings.Join(parts, " ALSO "), true
+}
+
+// evaluateObjectText renders one WHEN object: ANY, a boolean keyword, or an optional
+// leading NOT applied to an operand (with an optional THROUGH range) or a condition.
+// The union invariants are validated up front and an inconsistent node is rejected
+// (false) so a malformed AST cannot print a lossy, non-round-trippable object:
+// exactly one of Any/Bool/Cond/Operand must be set, a THROUGH range requires the
+// operand form, and a leading NOT cannot combine with ANY or a boolean.
+func evaluateObjectText(o *EvaluateObject) (string, bool) {
+	if o == nil {
+		return "", false
+	}
+	set := 0
+	if o.Any {
+		set++
+	}
+	if o.Bool != "" {
+		set++
+	}
+	if o.Cond != nil {
+		set++
+	}
+	if o.Operand != nil {
+		set++
+	}
+	if set != 1 {
+		return "", false
+	}
+	if o.Through != nil && o.Operand == nil {
+		return "", false
+	}
+	if o.Not && (o.Any || o.Bool != "") {
+		return "", false
+	}
+
+	switch {
+	case o.Any:
+		return "ANY", true
+	case o.Bool != "":
+		return o.Bool, true
+	}
+	var inner string
+	switch {
+	case o.Cond != nil:
+		c, ok := conditionText(o.Cond)
+		if !ok {
+			return "", false
+		}
+		inner = c
+	default:
+		v, ok := valueText(o.Operand)
+		if !ok {
+			return "", false
+		}
+		inner = v
+		if o.Through != nil {
+			t, ok := valueText(o.Through)
+			if !ok {
+				return "", false
+			}
+			inner += " THROUGH " + t
+		}
+	}
+	return negate(o.Not) + inner, true
 }
 
 // performLoopText returns the canonical text of a PERFORM loop specification, with
