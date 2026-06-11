@@ -512,6 +512,257 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "evaluate statement with operand subject and when other",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    EVALUATE WS-X WHEN 1 DISPLAY \"a\" WHEN OTHER DISPLAY \"b\" END-EVALUATE.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&EvaluateStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Subjects: []*EvaluateSubject{
+															{Pos: Pos{Line: 4, Column: 14}, Operand: &Identifier{Pos: Pos{Line: 4, Column: 14}, Name: &Word{Pos: Pos{Line: 4, Column: 14}, Value: "WS-X"}}},
+														},
+														Whens: []*EvaluateWhen{
+															{
+																Pos: Pos{Line: 4, Column: 19},
+																Objects: []*EvaluateObject{
+																	{Pos: Pos{Line: 4, Column: 24}, Operand: &NumericLiteral{Pos: Pos{Line: 4, Column: 24}, Value: "1"}},
+																},
+																Body: []Statement{
+																	&DisplayStatement{Pos: Pos{Line: 4, Column: 26}, Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 34}, Value: "\"a\""}}},
+																},
+															},
+														},
+														Other: []Statement{
+															&DisplayStatement{Pos: Pos{Line: 4, Column: 49}, Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 57}, Value: "\"b\""}}},
+														},
+														HasOther: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "evaluate true subject with relation-condition object",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    EVALUATE TRUE WHEN A > B CONTINUE END-EVALUATE.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&EvaluateStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Subjects: []*EvaluateSubject{
+															{Pos: Pos{Line: 4, Column: 14}, Bool: "TRUE"},
+														},
+														Whens: []*EvaluateWhen{
+															{
+																Pos: Pos{Line: 4, Column: 19},
+																Objects: []*EvaluateObject{
+																	{
+																		Pos: Pos{Line: 4, Column: 24},
+																		Cond: &RelationCondition{
+																			Pos:   Pos{Line: 4, Column: 24},
+																			Left:  &Identifier{Pos: Pos{Line: 4, Column: 24}, Name: &Word{Pos: Pos{Line: 4, Column: 24}, Value: "A"}},
+																			Op:    ">",
+																			Right: &Identifier{Pos: Pos{Line: 4, Column: 28}, Name: &Word{Pos: Pos{Line: 4, Column: 28}, Value: "B"}},
+																		},
+																	},
+																},
+																Body: []Statement{
+																	&ContinueStatement{Pos: Pos{Line: 4, Column: 30}},
+																},
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "evaluate with also subjects range and any objects",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    EVALUATE X ALSO Y WHEN 1 THRU 9 ALSO ANY CONTINUE WHEN OTHER CONTINUE END-EVALUATE.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&EvaluateStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Subjects: []*EvaluateSubject{
+															{Pos: Pos{Line: 4, Column: 14}, Operand: &Identifier{Pos: Pos{Line: 4, Column: 14}, Name: &Word{Pos: Pos{Line: 4, Column: 14}, Value: "X"}}},
+															{Pos: Pos{Line: 4, Column: 21}, Operand: &Identifier{Pos: Pos{Line: 4, Column: 21}, Name: &Word{Pos: Pos{Line: 4, Column: 21}, Value: "Y"}}},
+														},
+														Whens: []*EvaluateWhen{
+															{
+																Pos: Pos{Line: 4, Column: 23},
+																Objects: []*EvaluateObject{
+																	{
+																		Pos:     Pos{Line: 4, Column: 28},
+																		Operand: &NumericLiteral{Pos: Pos{Line: 4, Column: 28}, Value: "1"},
+																		Through: &NumericLiteral{Pos: Pos{Line: 4, Column: 35}, Value: "9"},
+																	},
+																	{Pos: Pos{Line: 4, Column: 42}, Any: true},
+																},
+																Body: []Statement{
+																	&ContinueStatement{Pos: Pos{Line: 4, Column: 46}},
+																},
+															},
+														},
+														Other: []Statement{
+															&ContinueStatement{Pos: Pos{Line: 4, Column: 66}},
+														},
+														HasOther: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "evaluate with negated condition object",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    EVALUATE TRUE WHEN NOT A = B CONTINUE END-EVALUATE.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&EvaluateStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Subjects: []*EvaluateSubject{
+															{Pos: Pos{Line: 4, Column: 14}, Bool: "TRUE"},
+														},
+														Whens: []*EvaluateWhen{
+															{
+																Pos: Pos{Line: 4, Column: 19},
+																Objects: []*EvaluateObject{
+																	{
+																		Pos: Pos{Line: 4, Column: 24},
+																		Not: true,
+																		Cond: &RelationCondition{
+																			Pos:   Pos{Line: 4, Column: 28},
+																			Left:  &Identifier{Pos: Pos{Line: 4, Column: 28}, Name: &Word{Pos: Pos{Line: 4, Column: 28}, Value: "A"}},
+																			Op:    "=",
+																			Right: &Identifier{Pos: Pos{Line: 4, Column: 32}, Name: &Word{Pos: Pos{Line: 4, Column: 32}, Value: "B"}},
+																		},
+																	},
+																},
+																Body: []Statement{
+																	&ContinueStatement{Pos: Pos{Line: 4, Column: 34}},
+																},
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "exponentiation is left-associative",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +
@@ -968,6 +1219,18 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedKeywordError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 12}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "EVALUATE without END-EVALUATE",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    EVALUATE X WHEN 1 CONTINUE.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 31}, target.Actual.Pos)
 			},
 		},
 		{

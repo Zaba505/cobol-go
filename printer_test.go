@@ -380,6 +380,79 @@ func TestPrinter(t *testing.T) {
 				"    END-PERFORM.\n",
 		},
 		{
+			name: "procedure division evaluate",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "P"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										{Statements: []Statement{&EvaluateStatement{
+											Subjects: []*EvaluateSubject{
+												{Operand: &Identifier{Name: &Word{Value: "WS-CODE"}}},
+											},
+											Whens: []*EvaluateWhen{
+												{
+													Objects: []*EvaluateObject{{Operand: &NumericLiteral{Value: "1"}}},
+													Body:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"one"`}}}},
+												},
+												{
+													Objects: []*EvaluateObject{{Operand: &NumericLiteral{Value: "2"}, Through: &NumericLiteral{Value: "5"}}},
+													Body:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"few"`}}}},
+												},
+											},
+											Other:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"many"`}}}},
+											HasOther: true,
+										}}},
+										{Statements: []Statement{&EvaluateStatement{
+											Subjects: []*EvaluateSubject{
+												{Bool: "TRUE"},
+												{Operand: &Identifier{Name: &Word{Value: "X"}}},
+											},
+											Whens: []*EvaluateWhen{
+												{
+													Objects: []*EvaluateObject{
+														{Cond: &RelationCondition{Left: &Identifier{Name: &Word{Value: "A"}}, Op: ">", Right: &Identifier{Name: &Word{Value: "B"}}}},
+														{Any: true},
+													},
+													Body: []Statement{&ContinueStatement{}},
+												},
+												{
+													Objects: []*EvaluateObject{{Not: true, Operand: &NumericLiteral{Value: "9"}}},
+													Body:    []Statement{&ContinueStatement{}},
+												},
+											},
+										}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    EVALUATE WS-CODE\n" +
+				"    WHEN 1\n" +
+				"        DISPLAY \"one\"\n" +
+				"    WHEN 2 THROUGH 5\n" +
+				"        DISPLAY \"few\"\n" +
+				"    WHEN OTHER\n" +
+				"        DISPLAY \"many\"\n" +
+				"    END-EVALUATE.\n" +
+				"    EVALUATE TRUE ALSO X\n" +
+				"    WHEN A > B ALSO ANY\n" +
+				"        CONTINUE\n" +
+				"    WHEN NOT 9\n" +
+				"        CONTINUE\n" +
+				"    END-EVALUATE.\n",
+		},
+		{
 			name: "procedure division sections",
 			input: &File{
 				Programs: []*Program{
@@ -631,6 +704,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_arithmetic_cob", fixture: "procedure_arithmetic.cob"},
 		{name: "procedure_conditional_cob", fixture: "procedure_conditional.cob"},
 		{name: "procedure_perform_cob", fixture: "procedure_perform.cob"},
+		{name: "procedure_evaluate_cob", fixture: "procedure_evaluate.cob"},
 		{name: "procedure_sections_cob", fixture: "procedure_sections.cob"},
 		{name: "full_program_cob", fixture: "full_program.cob"},
 	}
@@ -860,6 +934,28 @@ func clearStatementPos(stmt Statement) {
 			clearConditionPos(s.Varying.Until)
 		}
 		for _, st := range s.Body {
+			clearStatementPos(st)
+		}
+	case *EvaluateStatement:
+		s.Pos = Pos{}
+		for _, subj := range s.Subjects {
+			subj.Pos = Pos{}
+			clearConditionPos(subj.Cond)
+			clearTypePos(subj.Operand)
+		}
+		for _, when := range s.Whens {
+			when.Pos = Pos{}
+			for _, obj := range when.Objects {
+				obj.Pos = Pos{}
+				clearTypePos(obj.Operand)
+				clearTypePos(obj.Through)
+				clearConditionPos(obj.Cond)
+			}
+			for _, st := range when.Body {
+				clearStatementPos(st)
+			}
+		}
+		for _, st := range s.Other {
 			clearStatementPos(st)
 		}
 	case *GoToStatement:

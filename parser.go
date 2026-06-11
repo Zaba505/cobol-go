@@ -256,6 +256,55 @@ type StopStatement struct {
 
 func (*StopStatement) statement() {}
 
+// EvaluateStatement is an EVALUATE statement (SPEC.md "evaluate-statement"): a
+// multi-branch case construct. Pos is the position of the EVALUATE keyword;
+// Subjects are the selection subjects joined by ALSO; Whens are the WHEN branches
+// in source order; Other is the WHEN OTHER branch body and HasOther reports its
+// presence (distinguishing an empty WHEN OTHER from none). The construct is always
+// closed by END-EVALUATE.
+type EvaluateStatement struct {
+	Pos      Pos
+	Subjects []*EvaluateSubject
+	Whens    []*EvaluateWhen
+	Other    []Statement
+	HasOther bool
+}
+
+func (*EvaluateStatement) statement() {}
+
+// EvaluateSubject is one selection subject of an EVALUATE (SPEC.md "subject"):
+// exactly one of a boolean (Bool is "TRUE"/"FALSE"), a Cond, or an Operand. Pos is
+// the position of its first token.
+type EvaluateSubject struct {
+	Pos     Pos
+	Bool    string    // "TRUE" or "FALSE"; "" when not a boolean subject
+	Cond    Condition // condition subject; nil otherwise
+	Operand Type      // operand subject; nil otherwise
+}
+
+// EvaluateWhen is one WHEN branch of an EVALUATE: one or more match objects joined
+// by ALSO and the statement list run when they match. Pos is the position of the
+// WHEN keyword.
+type EvaluateWhen struct {
+	Pos     Pos
+	Objects []*EvaluateObject
+	Body    []Statement
+}
+
+// EvaluateObject is one match object of a WHEN branch (SPEC.md "object"): ANY, a
+// boolean (Bool is "TRUE"/"FALSE"), a possibly NOT-negated Operand with an optional
+// THROUGH/THRU range (Through), or a possibly NOT-negated Cond. Pos is the position
+// of its first token.
+type EvaluateObject struct {
+	Pos     Pos
+	Any     bool      // ANY
+	Bool    string    // "TRUE" or "FALSE"; "" otherwise
+	Not     bool      // leading NOT on the operand-range or condition form
+	Operand Type      // operand form; the lower bound when Through is set
+	Through Type      // upper bound of a THROUGH/THRU range; nil otherwise
+	Cond    Condition // condition form
+}
+
 // Word is a COBOL word used as a value, e.g. a user-defined name. Pos is the
 // position of the word; Value is its text.
 type Word struct {
@@ -2653,14 +2702,14 @@ func parseStatementOpt(stop stopFunc) parserAction[*[]Statement] {
 // reserved word cannot be a data-name, so an operand list cannot contain one).
 var procedureVerbs = []string{
 	"DISPLAY", "MOVE", "ACCEPT", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
-	"COMPUTE", "IF", "PERFORM", "GO", "CONTINUE", "STOP",
+	"COMPUTE", "IF", "PERFORM", "EVALUATE", "GO", "CONTINUE", "STOP",
 }
 
 // procedureScopeTerminators are the explicit scope terminators that close one
 // statement without ending the sentence.
 var procedureScopeTerminators = []string{
 	"END-IF", "END-PERFORM", "END-COMPUTE", "END-ADD", "END-SUBTRACT",
-	"END-MULTIPLY", "END-DIVIDE",
+	"END-MULTIPLY", "END-DIVIDE", "END-EVALUATE",
 }
 
 // procedurePhraseKeywords are the clause/phrase keywords that introduce a part of
@@ -2669,7 +2718,7 @@ var procedurePhraseKeywords = []string{
 	"TO", "FROM", "BY", "INTO", "GIVING", "REMAINDER", "UPON", "ROUNDED",
 	"CORRESPONDING", "CORR", "THEN", "ELSE", "THROUGH", "THRU", "TIMES",
 	"UNTIL", "VARYING", "WITH", "TEST", "BEFORE", "AFTER", "NO", "ADVANCING",
-	"DEPENDING", "ON", "RUN", "WHEN",
+	"DEPENDING", "ON", "RUN", "WHEN", "ALSO", "ANY", "OTHER",
 }
 
 // isStatementVerb reports whether tok is a recognized statement-leading verb.
@@ -2718,6 +2767,8 @@ func parseStatement(p *parser) (Statement, error) {
 		return parseIfStatement(p, tok)
 	case keywordIs(tok, "PERFORM"):
 		return parsePerformStatement(p, tok)
+	case keywordIs(tok, "EVALUATE"):
+		return parseEvaluateStatement(p, tok)
 	case keywordIs(tok, "GO"):
 		return parseGoToStatement(p, tok)
 	case keywordIs(tok, "CONTINUE"):
@@ -2726,7 +2777,7 @@ func parseStatement(p *parser) (Statement, error) {
 		return parseStopStatement(p, tok)
 	default:
 		return nil, unexpectedKeyword(tok, "DISPLAY", "MOVE", "ACCEPT",
-			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "PERFORM", "GO", "CONTINUE", "STOP")
+			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "PERFORM", "EVALUATE", "GO", "CONTINUE", "STOP")
 	}
 }
 
@@ -2788,6 +2839,234 @@ func parseIfStatement(p *parser, kw Token) (Statement, error) {
 		stmt.EndIf = true
 	}
 	return stmt, nil
+}
+
+// stopAtEvaluateBranch stops a WHEN-branch statement list at the next WHEN, any
+// explicit scope terminator (END-EVALUATE, a nested END-IF …), a separator period,
+// or end of input — each consumed by an enclosing construct, not the branch list.
+func stopAtEvaluateBranch(p *parser) (bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return true, nil
+	}
+	return isPeriod(tok) || keywordIs(tok, "WHEN") || isScopeTerminator(tok), nil
+}
+
+// parseEvaluateStatement parses an EVALUATE statement whose verb kw has already been
+// read: one or more ALSO-joined subjects, a run of WHEN branches, an optional WHEN
+// OTHER branch, and the required END-EVALUATE terminator.
+func parseEvaluateStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &EvaluateStatement{Pos: kw.Pos}
+
+	subj, err := parseEvaluateSubject(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Subjects = append(stmt.Subjects, subj)
+	for {
+		_, also, err := p.acceptKeyword("ALSO")
+		if err != nil {
+			return nil, err
+		}
+		if !also {
+			break
+		}
+		subj, err := parseEvaluateSubject(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Subjects = append(stmt.Subjects, subj)
+	}
+
+	for {
+		whenTok, ok, err := p.acceptKeyword("WHEN")
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		_, other, err := p.acceptKeyword("OTHER")
+		if err != nil {
+			return nil, err
+		}
+		if other {
+			body, err := parseStatementList(p, stopAtEvaluateBranch)
+			if err != nil {
+				return nil, err
+			}
+			stmt.Other = body
+			stmt.HasOther = true
+			break // WHEN OTHER is the final branch; only END-EVALUATE may follow.
+		}
+		when, err := parseEvaluateWhen(p, whenTok)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Whens = append(stmt.Whens, when)
+	}
+
+	if _, err := p.expectKeyword("END-EVALUATE"); err != nil {
+		return nil, err
+	}
+	return stmt, nil
+}
+
+// parseEvaluateWhen parses one WHEN branch whose WHEN keyword whenTok has already
+// been read: one or more ALSO-joined objects followed by the branch statement list.
+func parseEvaluateWhen(p *parser, whenTok Token) (*EvaluateWhen, error) {
+	when := &EvaluateWhen{Pos: whenTok.Pos}
+
+	obj, err := parseEvaluateObject(p)
+	if err != nil {
+		return nil, err
+	}
+	when.Objects = append(when.Objects, obj)
+	for {
+		_, also, err := p.acceptKeyword("ALSO")
+		if err != nil {
+			return nil, err
+		}
+		if !also {
+			break
+		}
+		obj, err := parseEvaluateObject(p)
+		if err != nil {
+			return nil, err
+		}
+		when.Objects = append(when.Objects, obj)
+	}
+
+	body, err := parseStatementList(p, stopAtEvaluateBranch)
+	if err != nil {
+		return nil, err
+	}
+	when.Body = body
+	return when, nil
+}
+
+// parseEvaluateSubject parses one EVALUATE subject (SPEC.md "subject"): the boolean
+// TRUE/FALSE, a condition, or an operand. An operand and a condition both begin with
+// an operand, so the operand is parsed first and a trailing condition continuation
+// (a relational operator, IS, a class keyword, …) decides between them.
+func parseEvaluateSubject(p *parser) (*EvaluateSubject, error) {
+	if tok, ok, err := p.acceptKeyword("TRUE", "FALSE"); err != nil {
+		return nil, err
+	} else if ok {
+		return &EvaluateSubject{Pos: tok.Pos, Bool: strings.ToUpper(string(tok.Value))}, nil
+	}
+
+	// A leading "(" or NOT can only begin a condition.
+	cond, ok, err := parseLeadingCondition(p)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return &EvaluateSubject{Pos: conditionPos(cond), Cond: cond}, nil
+	}
+
+	left, err := parseExpr(p)
+	if err != nil {
+		return nil, err
+	}
+	cond, isCond, err := parseConditionFromExpr(p, left)
+	if err != nil {
+		return nil, err
+	}
+	if isCond {
+		return &EvaluateSubject{Pos: exprPos(left), Cond: cond}, nil
+	}
+	op, err := operandFromExpr(p, left)
+	if err != nil {
+		return nil, err
+	}
+	return &EvaluateSubject{Pos: exprPos(left), Operand: op}, nil
+}
+
+// parseEvaluateObject parses one EVALUATE WHEN object (SPEC.md "object"): ANY, the
+// boolean TRUE/FALSE, or an optional leading NOT applied to either an operand (with
+// an optional THROUGH/THRU range) or a condition. As with subjects, the operand and
+// condition forms both begin with an operand, disambiguated by what follows it.
+func parseEvaluateObject(p *parser) (*EvaluateObject, error) {
+	if tok, ok, err := p.acceptKeyword("ANY"); err != nil {
+		return nil, err
+	} else if ok {
+		return &EvaluateObject{Pos: tok.Pos, Any: true}, nil
+	}
+	if tok, ok, err := p.acceptKeyword("TRUE", "FALSE"); err != nil {
+		return nil, err
+	} else if ok {
+		return &EvaluateObject{Pos: tok.Pos, Bool: strings.ToUpper(string(tok.Value))}, nil
+	}
+
+	obj := &EvaluateObject{}
+	if notTok, ok, err := p.acceptKeyword("NOT"); err != nil {
+		return nil, err
+	} else if ok {
+		obj.Not = true
+		obj.Pos = notTok.Pos
+	}
+
+	// A leading "(" can only begin a (parenthesized) condition.
+	cond, ok, err := parseLeadingCondition(p)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		obj.Cond = cond
+		if obj.Pos == (Pos{}) {
+			obj.Pos = conditionPos(cond)
+		}
+		return obj, nil
+	}
+
+	left, err := parseExpr(p)
+	if err != nil {
+		return nil, err
+	}
+	if obj.Pos == (Pos{}) {
+		obj.Pos = exprPos(left)
+	}
+
+	cond, isCond, err := parseConditionFromExpr(p, left)
+	if err != nil {
+		return nil, err
+	}
+	if isCond {
+		obj.Cond = cond
+		return obj, nil
+	}
+
+	op, err := operandFromExpr(p, left)
+	if err != nil {
+		return nil, err
+	}
+	obj.Operand = op
+
+	if _, ok, err := p.acceptKeyword("THROUGH", "THRU"); err != nil {
+		return nil, err
+	} else if ok {
+		upper, err := parseOperand(p)
+		if err != nil {
+			return nil, err
+		}
+		obj.Through = upper
+	}
+	return obj, nil
+}
+
+// operandFromExpr narrows a parsed expression to a bare operand. An EVALUATE operand
+// is an identifier or literal (SPEC.md "operand"), both of which are also [Type]; an
+// arithmetic expression is not a valid bare operand and is rejected.
+func operandFromExpr(p *parser, e Expr) (Type, error) {
+	if op, ok := e.(Type); ok {
+		return op, nil
+	}
+	tok, _, _ := p.peek()
+	return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier, TokenString, TokenNumber}, Actual: tok}
 }
 
 // parsePerformStatement parses a PERFORM statement whose verb kw has already been
@@ -3801,6 +4080,14 @@ func parseSimpleCondition(p *parser) (Condition, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseSimpleConditionFrom(p, left)
+}
+
+// parseSimpleConditionFrom finishes a relation, class, sign, or condition-name
+// condition whose left operand expression left has already been parsed. It is the
+// shared tail of parseSimpleCondition and the EVALUATE subject/object parser, which
+// must pre-parse the operand to disambiguate the operand-vs-condition alternative.
+func parseSimpleConditionFrom(p *parser, left Expr) (Condition, error) {
 	pos := exprPos(left)
 
 	if err := p.skipOptionalKeyword("IS"); err != nil {
@@ -3887,6 +4174,106 @@ func parseRelationalOperator(p *parser) (string, bool, error) {
 		return "=", true, nil
 	}
 	return "", false, nil
+}
+
+// conditionFollowKeywords are the keywords that, after an operand, continue it into
+// a condition: the relation words, IS/NOT, and the class and sign keywords.
+var conditionFollowKeywords = slices.Concat(
+	[]string{"IS", "NOT", "GREATER", "LESS", "EQUAL"}, classKeywords, signKeywords)
+
+// isEvaluateConditionFollow reports whether the next token continues a preceding
+// operand into a condition (a relational symbol or a condition-follow keyword). It
+// is the lookahead that disambiguates the operand-vs-condition alternative in an
+// EVALUATE subject or object.
+func isEvaluateConditionFollow(p *parser) (bool, error) {
+	if sym, err := p.peekSymbol("=", "<", ">", "<=", ">=", "<>"); err != nil {
+		return false, err
+	} else if sym {
+		return true, nil
+	}
+	return p.peekKeyword(conditionFollowKeywords...)
+}
+
+// parseLeadingCondition parses a condition that begins unambiguously with "(" or a
+// NOT keyword — the two starts that cannot be a bare operand — for the EVALUATE
+// subject/object parsers. It reports false, consuming nothing, when the next token
+// is neither.
+func parseLeadingCondition(p *parser) (Condition, bool, error) {
+	open, err := p.peekSymbol("(")
+	if err != nil {
+		return nil, false, err
+	}
+	not, err := p.peekKeyword("NOT")
+	if err != nil {
+		return nil, false, err
+	}
+	if !open && !not {
+		return nil, false, nil
+	}
+	cond, err := parseCondition(p)
+	if err != nil {
+		return nil, false, err
+	}
+	return cond, true, nil
+}
+
+// parseConditionFromExpr finishes a condition whose left operand expression left has
+// already been parsed, when a condition continuation follows it. It reports whether
+// a condition was found; on false the caller keeps left as a bare operand.
+func parseConditionFromExpr(p *parser, left Expr) (Condition, bool, error) {
+	follow, err := isEvaluateConditionFollow(p)
+	if err != nil {
+		return nil, false, err
+	}
+	if !follow {
+		return nil, false, nil
+	}
+	simple, err := parseSimpleConditionFrom(p, left)
+	if err != nil {
+		return nil, false, err
+	}
+	cond, err := parseConditionTail(p, simple)
+	if err != nil {
+		return nil, false, err
+	}
+	return cond, true, nil
+}
+
+// parseConditionTail climbs the AND/OR combinators from a pre-parsed combinable
+// condition left, mirroring parseAndCondition and parseCondition so a condition
+// begun from an already-parsed operand keeps the same precedence (AND before OR).
+func parseConditionTail(p *parser, left Condition) (Condition, error) {
+	for {
+		is, err := p.peekKeyword("AND")
+		if err != nil {
+			return nil, err
+		}
+		if !is {
+			break
+		}
+		p.consume()
+		right, err := parseCombinable(p)
+		if err != nil {
+			return nil, err
+		}
+		left = &LogicalCondition{Pos: conditionPos(left), Op: "AND", Left: left, Right: right}
+	}
+	for {
+		is, err := p.peekKeyword("OR")
+		if err != nil {
+			return nil, err
+		}
+		if !is {
+			break
+		}
+		p.consume()
+		right, err := parseAndCondition(p)
+		if err != nil {
+			return nil, err
+		}
+		left = &LogicalCondition{Pos: conditionPos(left), Op: "OR", Left: left, Right: right}
+	}
+	return left, nil
 }
 
 // conditionPos returns the source position of a condition node.
