@@ -824,7 +824,17 @@ func useSpecText(spec UseSpec) (string, bool) {
 		}
 		text += " PROCEDURE ON "
 		if s.Mode != "" {
-			return text + s.Mode, true
+			// Mode and Files are mutually exclusive targets, and Mode must be one of
+			// the four open modes; anything else would print invalid COBOL.
+			if len(s.Files) > 0 {
+				return "", false
+			}
+			switch s.Mode {
+			case "INPUT", "OUTPUT", "I-O", "EXTEND":
+				return text + s.Mode, true
+			default:
+				return "", false
+			}
 		}
 		if len(s.Files) == 0 {
 			return "", false

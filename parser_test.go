@@ -1957,6 +1957,18 @@ func TestParserErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "procedure using rejects returning as a data-name",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION USING RETURNING WS-RC.\n" +
+				"    STOP RUN.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 3, Column: 26}, target.Actual.Pos)
+			},
+		},
+		{
 			name: "end program without program keyword",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +

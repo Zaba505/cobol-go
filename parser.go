@@ -101,9 +101,14 @@ func (*ProcedureDivision) division() {}
 
 // Parameter is one data-name of a PROCEDURE DIVISION USING phrase (SPEC.md
 // "using-phrase"). Pos is the position of the parameter (the BY keyword when
-// present, otherwise the data-name). Mode is the passing mechanism in canonical
-// upper case — "REFERENCE" or "VALUE" — or "" when no BY phrase preceded it. Name
-// is the parameter data-name.
+// present, otherwise the data-name). Mode is the passing mechanism written
+// immediately before this data-name — "REFERENCE" or "VALUE" in canonical upper
+// case — or "" when no BY phrase precedes it, in which case the parameter inherits
+// the mechanism set by an earlier BY phrase (COBOL defaults to BY REFERENCE at the
+// start of the phrase). The printer emits a BY phrase only where Mode is set, so
+// the source grouping is preserved; consumers that need the effective mechanism of
+// an unmarked parameter must carry the most recent non-empty Mode forward. Name is
+// the parameter data-name.
 type Parameter struct {
 	Pos  Pos
 	Mode string
@@ -2712,6 +2717,14 @@ func parseProcedureUsing(p *parser) ([]*Parameter, error) {
 			mode = strings.ToUpper(string(m.Value))
 		}
 
+		// A data-name is required here. RETURNING is a valid identifier token, so
+		// reject it explicitly; otherwise it would be swallowed as a parameter name
+		// and the RETURNING phrase silently dropped.
+		if lead, err, ok := p.peek(); err != nil {
+			return nil, err
+		} else if ok && keywordIs(lead, "RETURNING") {
+			return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: lead}
+		}
 		name, err := p.expect(TokenIdentifier)
 		if err != nil {
 			return nil, err

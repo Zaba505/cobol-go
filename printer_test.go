@@ -2080,6 +2080,24 @@ func TestPrinterErrors(t *testing.T) {
 			}}}},
 		},
 		{
+			name: "exception use with unsupported open mode",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{
+					Declaratives: []*DeclarativeSection{{Name: &Word{Value: "S"}, Use: &UseStatement{Spec: &ExceptionUse{Mode: "SIDEWAYS"}}}},
+					Sections:     []*Section{{Name: &Word{Value: "MAIN"}, Paragraphs: []*Paragraph{{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}}}}},
+				},
+			}}}},
+		},
+		{
+			name: "exception use with both mode and files",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{
+					Declaratives: []*DeclarativeSection{{Name: &Word{Value: "S"}, Use: &UseStatement{Spec: &ExceptionUse{Mode: "INPUT", Files: []*Word{{Value: "F1"}}}}}},
+					Sections:     []*Section{{Name: &Word{Value: "MAIN"}, Paragraphs: []*Paragraph{{Sentences: []*Sentence{{Statements: []Statement{&StopStatement{Run: true}}}}}}}},
+				},
+			}}}},
+		},
+		{
 			name: "end program with unsupported name type",
 			input: &File{Programs: []*Program{{
 				Divisions: []Division{
