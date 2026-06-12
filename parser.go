@@ -285,6 +285,14 @@ type ContinueStatement struct {
 
 func (*ContinueStatement) statement() {}
 
+// GobackStatement is a GOBACK statement (returns control to the caller, or ends
+// the run unit for a main program). Pos is the position of the GOBACK keyword.
+type GobackStatement struct {
+	Pos Pos
+}
+
+func (*GobackStatement) statement() {}
+
 // IfStatement is an IF statement. Pos is the position of the IF keyword; Cond is
 // the condition; Then and Else are the branch statement lists; HasElse reports an
 // ELSE clause (distinguishing an empty ELSE from no ELSE); EndIf reports an
@@ -300,6 +308,16 @@ type IfStatement struct {
 }
 
 func (*IfStatement) statement() {}
+
+// NextSentenceStatement is a NEXT SENTENCE branch alternative within an IF
+// statement (SPEC.md "if-statement"): instead of a statement list, a branch may
+// transfer control to the statement following the next period. Pos is the
+// position of the NEXT keyword.
+type NextSentenceStatement struct {
+	Pos Pos
+}
+
+func (*NextSentenceStatement) statement() {}
 
 // PerformStatement is a PERFORM statement. Pos is the position of the PERFORM
 // keyword. Out-of-line form: Target (and optional Through) name the procedure(s)
@@ -381,6 +399,16 @@ type StopStatement struct {
 }
 
 func (*StopStatement) statement() {}
+
+// ExitStatement is an EXIT statement (SPEC.md "exit-statement"). Pos is the
+// position of the EXIT keyword; Option is the optional object keyword
+// ("PROGRAM", "PARAGRAPH", "SECTION", or "PERFORM"), empty for a bare EXIT.
+type ExitStatement struct {
+	Pos    Pos
+	Option string
+}
+
+func (*ExitStatement) statement() {}
 
 // EvaluateStatement is an EVALUATE statement (SPEC.md "evaluate-statement"): a
 // multi-branch case construct. Pos is the position of the EVALUATE keyword;
@@ -3328,6 +3356,7 @@ func parseStatementOpt(stop stopFunc) parserAction[*[]Statement] {
 var procedureVerbs = []string{
 	"DISPLAY", "MOVE", "ACCEPT", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
 	"COMPUTE", "IF", "PERFORM", "EVALUATE", "CALL", "GO", "CONTINUE", "STOP",
+	"GOBACK", "EXIT",
 }
 
 // procedureScopeTerminators are the explicit scope terminators that close one
@@ -3403,9 +3432,14 @@ func parseStatement(p *parser) (Statement, error) {
 		return &ContinueStatement{Pos: tok.Pos}, nil
 	case keywordIs(tok, "STOP"):
 		return parseStopStatement(p, tok)
+	case keywordIs(tok, "GOBACK"):
+		return &GobackStatement{Pos: tok.Pos}, nil
+	case keywordIs(tok, "EXIT"):
+		return parseExitStatement(p, tok)
 	default:
 		return nil, unexpectedKeyword(tok, "DISPLAY", "MOVE", "ACCEPT",
-			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "PERFORM", "EVALUATE", "CALL", "GO", "CONTINUE", "STOP")
+			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "PERFORM", "EVALUATE", "CALL", "GO", "CONTINUE", "STOP",
+			"GOBACK", "EXIT")
 	}
 }
 
@@ -3426,7 +3460,8 @@ func stopAtNested(p *parser) (bool, error) {
 
 // parseIfStatement parses an IF statement whose verb kw has already been read: a
 // condition, an optional THEN, a then-branch, an optional ELSE branch, and an
-// optional END-IF. NEXT SENTENCE is deferred.
+// optional END-IF. Each branch is either a nested statement list or the NEXT
+// SENTENCE alternative (see parseIfBranch).
 func parseIfStatement(p *parser, kw Token) (Statement, error) {
 	cond, err := parseCondition(p)
 	if err != nil {
@@ -3438,7 +3473,7 @@ func parseIfStatement(p *parser, kw Token) (Statement, error) {
 		return nil, err
 	}
 
-	then, err := parseStatementList(p, stopAtNested)
+	then, err := parseIfBranch(p)
 	if err != nil {
 		return nil, err
 	}
@@ -3451,7 +3486,7 @@ func parseIfStatement(p *parser, kw Token) (Statement, error) {
 	if hasElse {
 		p.consume()
 		stmt.HasElse = true
-		els, err := parseStatementList(p, stopAtNested)
+		els, err := parseIfBranch(p)
 		if err != nil {
 			return nil, err
 		}
@@ -3467,6 +3502,25 @@ func parseIfStatement(p *parser, kw Token) (Statement, error) {
 		stmt.EndIf = true
 	}
 	return stmt, nil
+}
+
+// parseIfBranch parses one branch of an IF statement: either the NEXT SENTENCE
+// alternative — yielding a single [NextSentenceStatement] — or a nested statement
+// list (stopping at the branch's enclosing delimiters via stopAtNested).
+func parseIfBranch(p *parser) ([]Statement, error) {
+	isNext, err := p.peekKeyword("NEXT")
+	if err != nil {
+		return nil, err
+	}
+	if isNext {
+		next, _, _ := p.peek()
+		p.consume() // NEXT
+		if _, err := p.expectKeyword("SENTENCE"); err != nil {
+			return nil, err
+		}
+		return []Statement{&NextSentenceStatement{Pos: next.Pos}}, nil
+	}
+	return parseStatementList(p, stopAtNested)
 }
 
 // stopAtEvaluateBranch stops a WHEN-branch statement list at the next WHEN, any
@@ -4132,6 +4186,23 @@ func parseStopStatement(p *parser, kw Token) (Statement, error) {
 		return nil, err
 	}
 	return &StopStatement{Pos: kw.Pos, Literal: valueNode(lit)}, nil
+}
+
+// parseExitStatement parses an EXIT statement whose verb kw has already been read:
+// a bare EXIT or EXIT followed by one of PROGRAM/PARAGRAPH/SECTION/PERFORM. The
+// optional object keyword is matched explicitly, so a bare EXIT (followed by a
+// period or the next statement's verb) leaves Option empty.
+func parseExitStatement(p *parser, kw Token) (Statement, error) {
+	hasOption, err := p.peekKeyword("PROGRAM", "PARAGRAPH", "SECTION", "PERFORM")
+	if err != nil {
+		return nil, err
+	}
+	stmt := &ExitStatement{Pos: kw.Pos}
+	if hasOption {
+		opt, _ := p.expectKeyword("PROGRAM", "PARAGRAPH", "SECTION", "PERFORM")
+		stmt.Option = strings.ToUpper(string(opt.Value))
+	}
+	return stmt, nil
 }
 
 // parseArithmeticStatement parses an ADD/SUBTRACT/MULTIPLY/DIVIDE statement whose

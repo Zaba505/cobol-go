@@ -969,6 +969,122 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "goback statement",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    GOBACK.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos:        Pos{Line: 4, Column: 5},
+												Statements: []Statement{&GobackStatement{Pos: Pos{Line: 4, Column: 5}}},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "exit statement in every form",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    EXIT.\n" +
+				"    EXIT PROGRAM.\n" +
+				"    EXIT PARAGRAPH.\n" +
+				"    EXIT SECTION.\n" +
+				"    EXIT PERFORM.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{Pos: Pos{Line: 4, Column: 5}, Statements: []Statement{&ExitStatement{Pos: Pos{Line: 4, Column: 5}}}},
+											{Pos: Pos{Line: 5, Column: 5}, Statements: []Statement{&ExitStatement{Pos: Pos{Line: 5, Column: 5}, Option: "PROGRAM"}}},
+											{Pos: Pos{Line: 6, Column: 5}, Statements: []Statement{&ExitStatement{Pos: Pos{Line: 6, Column: 5}, Option: "PARAGRAPH"}}},
+											{Pos: Pos{Line: 7, Column: 5}, Statements: []Statement{&ExitStatement{Pos: Pos{Line: 7, Column: 5}, Option: "SECTION"}}},
+											{Pos: Pos{Line: 8, Column: 5}, Statements: []Statement{&ExitStatement{Pos: Pos{Line: 8, Column: 5}, Option: "PERFORM"}}},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "next sentence in both if branches",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF A NEXT SENTENCE ELSE NEXT SENTENCE END-IF.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&IfStatement{
+														Pos:     Pos{Line: 4, Column: 5},
+														Cond:    &ConditionNameCondition{Pos: Pos{Line: 4, Column: 8}, Name: &Identifier{Pos: Pos{Line: 4, Column: 8}, Name: &Word{Pos: Pos{Line: 4, Column: 8}, Value: "A"}}},
+														Then:    []Statement{&NextSentenceStatement{Pos: Pos{Line: 4, Column: 10}}},
+														HasElse: true,
+														Else:    []Statement{&NextSentenceStatement{Pos: Pos{Line: 4, Column: 29}}},
+														EndIf:   true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "anonymous and named paragraphs",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +
@@ -1635,6 +1751,18 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedKeywordError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 14}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "NEXT without SENTENCE in if branch",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF A NEXT FOO END-IF.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 15}, target.Actual.Pos)
 			},
 		},
 		{

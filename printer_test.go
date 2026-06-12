@@ -225,6 +225,53 @@ func TestPrinter(t *testing.T) {
 				"    STOP \"DONE\".\n",
 		},
 		{
+			name: "procedure division control flow",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "P"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										{Statements: []Statement{&GobackStatement{}}},
+										{Statements: []Statement{&ExitStatement{}}},
+										{Statements: []Statement{&ExitStatement{Option: "PROGRAM"}}},
+										{Statements: []Statement{&ExitStatement{Option: "PARAGRAPH"}}},
+										{Statements: []Statement{&ExitStatement{Option: "SECTION"}}},
+										{Statements: []Statement{&ExitStatement{Option: "PERFORM"}}},
+										{Statements: []Statement{&IfStatement{
+											Cond:    &ConditionNameCondition{Name: &Identifier{Name: &Word{Value: "A"}}},
+											Then:    []Statement{&NextSentenceStatement{}},
+											HasElse: true,
+											Else:    []Statement{&NextSentenceStatement{}},
+											EndIf:   true,
+										}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    GOBACK.\n" +
+				"    EXIT.\n" +
+				"    EXIT PROGRAM.\n" +
+				"    EXIT PARAGRAPH.\n" +
+				"    EXIT SECTION.\n" +
+				"    EXIT PERFORM.\n" +
+				"    IF A\n" +
+				"        NEXT SENTENCE\n" +
+				"    ELSE\n" +
+				"        NEXT SENTENCE\n" +
+				"    END-IF.\n",
+		},
+		{
 			name: "procedure division arithmetic",
 			input: &File{
 				Programs: []*Program{
@@ -842,6 +889,20 @@ func TestPrinterRoundTrip(t *testing.T) {
 				"    STOP RUN.\n",
 		},
 		{
+			name: "control flow statements",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    IF WS-A > WS-B NEXT SENTENCE ELSE NEXT SENTENCE END-IF.\n" +
+				"    IF WS-A = 0 GOBACK END-IF.\n" +
+				"    EXIT PROGRAM.\n" +
+				"    EXIT PARAGRAPH.\n" +
+				"    EXIT SECTION.\n" +
+				"    EXIT PERFORM.\n" +
+				"    EXIT.\n" +
+				"    GOBACK.\n",
+		},
+		{
 			name: "procedure header using and returning",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. LINK.\n" +
@@ -939,6 +1000,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_conditional_cob", fixture: "procedure_conditional.cob"},
 		{name: "procedure_perform_cob", fixture: "procedure_perform.cob"},
 		{name: "procedure_evaluate_cob", fixture: "procedure_evaluate.cob"},
+		{name: "procedure_control_flow_cob", fixture: "procedure_control_flow.cob"},
 		{name: "procedure_call_cob", fixture: "procedure_call.cob"},
 		{name: "procedure_sections_cob", fixture: "procedure_sections.cob"},
 		{name: "program_linkage_cob", fixture: "program_linkage.cob"},
@@ -1263,6 +1325,12 @@ func clearStatementPos(stmt Statement) {
 	case *StopStatement:
 		s.Pos = Pos{}
 		clearTypePos(s.Literal)
+	case *GobackStatement:
+		s.Pos = Pos{}
+	case *ExitStatement:
+		s.Pos = Pos{}
+	case *NextSentenceStatement:
+		s.Pos = Pos{}
 	}
 }
 
@@ -1666,6 +1734,30 @@ func TestPrinterErrors(t *testing.T) {
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				&ProcedureDivision{Paragraphs: []*Paragraph{
 					{Sentences: []*Sentence{{Statements: []Statement{(*ContinueStatement)(nil)}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "typed-nil goback statement",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{(*GobackStatement)(nil)}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "typed-nil exit statement",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{(*ExitStatement)(nil)}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "typed-nil next sentence statement",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{(*NextSentenceStatement)(nil)}}}},
 				}},
 			}}}},
 		},
