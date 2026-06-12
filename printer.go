@@ -106,7 +106,52 @@ func printProgramAt(i int) printerAction {
 		if prog == nil {
 			return failPrint(UnsupportedNodeError{Node: prog})
 		}
-		return printDivisionAt(prog, 0, printProgramAt(i+1))
+		return printProgram(prog, printProgramAt(i+1))
+	}
+}
+
+// printProgram prints one program — its divisions, then its nested (contained)
+// programs, then its END PROGRAM marker — and continues with next. It is shared by
+// the top-level loop and nested-program printing, so nesting recurses to any depth.
+// A nil program is rejected rather than panicking.
+func printProgram(prog *Program, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if prog == nil {
+			return failPrint(UnsupportedNodeError{Node: prog})
+		}
+		tail := next
+		if prog.End != nil {
+			tail = printEndProgram(prog.End, tail)
+		}
+		tail = printNestedProgramAt(prog.Nested, 0, tail)
+		return printDivisionAt(prog, 0, tail)
+	}
+}
+
+// printNestedProgramAt prints the nested program at index i, then continues with the
+// one after it; once i is past the last nested program it continues with next.
+func printNestedProgramAt(nested []*Program, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(nested) {
+			return next
+		}
+		return printProgram(nested[i], printNestedProgramAt(nested, i+1, next))
+	}
+}
+
+// printEndProgram prints an "END PROGRAM program-name." marker. A nil marker or a
+// name that is not an alphanumeric literal or user-defined word is rejected with an
+// [UnsupportedNodeError].
+func printEndProgram(end *EndProgram, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if end == nil {
+			return failPrint(UnsupportedNodeError{Node: end})
+		}
+		name, ok := valueText(end.Name)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: end.Name})
+		}
+		return writeThen("END PROGRAM "+name+".\n", next)
 	}
 }
 
@@ -662,17 +707,181 @@ func occursClauseText(c *OccursClause) (string, bool) {
 	return s, true
 }
 
-// printProcedureDivision prints the PROCEDURE DIVISION header followed by its
-// body — either its paragraphs or its sections. A typed-nil division, or one with
-// both Paragraphs and Sections set (the two body forms are mutually exclusive), is
-// rejected with an [UnsupportedNodeError] rather than panicking.
+// printProcedureDivision prints the PROCEDURE DIVISION header — with its optional
+// USING and RETURNING phrases — followed by an optional DECLARATIVES block and the
+// body (either its paragraphs or its sections). A typed-nil division, one with both
+// Paragraphs and Sections set (the two body forms are mutually exclusive), or a
+// USING parameter with an unsupported BY mode is rejected with an
+// [UnsupportedNodeError] rather than panicking.
 func printProcedureDivision(div *ProcedureDivision, next printerAction) printerAction {
-	if div == nil || (len(div.Paragraphs) > 0 && len(div.Sections) > 0) {
-		return failPrint(UnsupportedNodeError{Node: div})
+	return func(pr *printer, f *File) printerAction {
+		if div == nil || (len(div.Paragraphs) > 0 && len(div.Sections) > 0) {
+			return failPrint(UnsupportedNodeError{Node: div})
+		}
+
+		header := "PROCEDURE DIVISION"
+		if len(div.Using) > 0 {
+			header += " USING"
+			for _, param := range div.Using {
+				if param == nil || param.Name == nil {
+					return failPrint(UnsupportedNodeError{Node: param})
+				}
+				if param.Mode != "" {
+					// Mode is a free-form string on the node; only the two procedure
+					// passing mechanisms print as valid BY phrases.
+					switch param.Mode {
+					case "REFERENCE", "VALUE":
+						header += " BY " + param.Mode
+					default:
+						return failPrint(UnsupportedNodeError{Node: param})
+					}
+				}
+				header += " " + param.Name.Value
+			}
+		}
+		if div.Returning != nil {
+			header += " RETURNING " + div.Returning.Value
+		}
+
+		body := printParagraphAt(div.Paragraphs, 0,
+			printSectionAt(div.Sections, 0, next))
+		return writeThen(header+".\n", printDeclarativesOpt(div.Declaratives, body))
 	}
-	return writeThen("PROCEDURE DIVISION.\n",
-		printParagraphAt(div.Paragraphs, 0,
-			printSectionAt(div.Sections, 0, next)))
+}
+
+// printDeclarativesOpt prints an optional DECLARATIVES block before the procedure
+// body: "DECLARATIVES." its sections, then "END DECLARATIVES.". With no declarative
+// sections it continues straight with next.
+func printDeclarativesOpt(decls []*DeclarativeSection, next printerAction) printerAction {
+	if len(decls) == 0 {
+		return next
+	}
+	after := writeThen("END DECLARATIVES.\n", next)
+	return writeThen("DECLARATIVES.\n", printDeclarativeSectionAt(decls, 0, after))
+}
+
+// printDeclarativeSectionAt prints the declarative section at index i, then
+// continues with the one after it; once i is past the last section it continues
+// with next.
+func printDeclarativeSectionAt(decls []*DeclarativeSection, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(decls) {
+			return next
+		}
+		return printDeclarativeSection(decls[i], printDeclarativeSectionAt(decls, i+1, next))
+	}
+}
+
+// printDeclarativeSection prints one DECLARATIVES section: its section-name header,
+// its USE statement, then its paragraphs. A typed-nil section, or one missing its
+// name or USE statement, is rejected with an [UnsupportedNodeError].
+func printDeclarativeSection(sec *DeclarativeSection, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if sec == nil || sec.Name == nil || sec.Use == nil {
+			return failPrint(UnsupportedNodeError{Node: sec})
+		}
+		return writeThen(sec.Name.Value+" SECTION.\n",
+			printUseStatement(sec.Use,
+				printParagraphAt(sec.Paragraphs, 0, next)))
+	}
+}
+
+// printUseStatement prints a USE statement and its terminating period. A typed-nil
+// statement or an unrenderable specification is rejected with an
+// [UnsupportedNodeError].
+func printUseStatement(use *UseStatement, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if use == nil {
+			return failPrint(UnsupportedNodeError{Node: use})
+		}
+		text, ok := useSpecText(use.Spec)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: use.Spec})
+		}
+		return writeThen(indent(1)+"USE "+text+".\n", next)
+	}
+}
+
+// useSpecText returns the canonical text of a USE specification (without the
+// leading "USE" or the trailing period), reporting false for a nil or unknown
+// form. The optional FOR of the debugging form is canonicalized away; STANDARD is
+// always printed for the exception form.
+func useSpecText(spec UseSpec) (string, bool) {
+	switch s := spec.(type) {
+	case *ExceptionUse:
+		if s == nil {
+			return "", false
+		}
+		text := ""
+		if s.Global {
+			text += "GLOBAL "
+		}
+		text += "AFTER STANDARD "
+		if s.Error {
+			text += "ERROR"
+		} else {
+			text += "EXCEPTION"
+		}
+		text += " PROCEDURE ON "
+		if s.Mode != "" {
+			// Mode and Files are mutually exclusive targets, and Mode must be one of
+			// the four open modes; anything else would print invalid COBOL.
+			if len(s.Files) > 0 {
+				return "", false
+			}
+			switch s.Mode {
+			case "INPUT", "OUTPUT", "I-O", "EXTEND":
+				return text + s.Mode, true
+			default:
+				return "", false
+			}
+		}
+		if len(s.Files) == 0 {
+			return "", false
+		}
+		for i, file := range s.Files {
+			if file == nil {
+				return "", false
+			}
+			if i > 0 {
+				text += " "
+			}
+			text += file.Value
+		}
+		return text, true
+	case *DebuggingUse:
+		if s == nil {
+			return "", false
+		}
+		text := "DEBUGGING ON "
+		if s.AllProcs {
+			return text + "ALL PROCEDURES", true
+		}
+		if len(s.Targets) == 0 {
+			return "", false
+		}
+		for i, target := range s.Targets {
+			if target == nil {
+				return "", false
+			}
+			if i > 0 {
+				text += " "
+			}
+			text += target.Value
+		}
+		return text, true
+	case *ReportingUse:
+		if s == nil || s.Report == nil {
+			return "", false
+		}
+		text := ""
+		if s.Global {
+			text += "GLOBAL "
+		}
+		return text + "BEFORE REPORTING " + s.Report.Value, true
+	default:
+		return "", false
+	}
 }
 
 // printSectionAt prints the section at index i, then continues with the section
