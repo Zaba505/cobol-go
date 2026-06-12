@@ -2911,9 +2911,14 @@ func parseUseSpec(p *parser) (UseSpec, error) {
 		return parseExceptionUse(p, pos, global)
 	case keywordIs(tok, "BEFORE"):
 		return parseReportingUse(p, pos, global)
-	case keywordIs(tok, "FOR", "DEBUGGING"):
+	case !global && keywordIs(tok, "FOR", "DEBUGGING"):
 		return parseDebuggingUse(p, pos)
 	default:
+		// GLOBAL is valid only for the AFTER (exception/error) and BEFORE
+		// (reporting) forms, so once it is seen the debugging form is rejected.
+		if global {
+			return nil, unexpectedKeyword(tok, "AFTER", "BEFORE")
+		}
 		return nil, unexpectedKeyword(tok, "AFTER", "BEFORE", "FOR", "DEBUGGING")
 	}
 }

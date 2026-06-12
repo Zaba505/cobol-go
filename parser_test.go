@@ -1986,6 +1986,23 @@ func TestParserErrors(t *testing.T) {
 				require.Equal(t, Pos{Line: 6, Column: 9}, target.Actual.Pos)
 			},
 		},
+		{
+			name: "global is not valid for the debugging use form",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"DECLARATIVES.\n" +
+				"S SECTION.\n" +
+				"    USE GLOBAL DEBUGGING ON ALL PROCEDURES.\n" +
+				"END DECLARATIVES.\n" +
+				"MAIN SECTION.\n" +
+				"    STOP RUN.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 6, Column: 16}, target.Actual.Pos)
+			},
+		},
 	}
 
 	for _, tc := range testCases {
