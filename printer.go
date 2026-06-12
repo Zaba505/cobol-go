@@ -1009,6 +1009,12 @@ func printStatement(stmt Statement, depth int, next printerAction) printerAction
 		return printContinueStatement(s, depth, next)
 	case *StopStatement:
 		return printStopStatement(s, depth, next)
+	case *GobackStatement:
+		return printGobackStatement(s, depth, next)
+	case *ExitStatement:
+		return printExitStatement(s, depth, next)
+	case *NextSentenceStatement:
+		return printNextSentenceStatement(s, depth, next)
 	default:
 		return failPrint(UnsupportedNodeError{Node: stmt})
 	}
@@ -1665,6 +1671,48 @@ func printContinueStatement(stmt *ContinueStatement, depth int, next printerActi
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
 		pr.write(indent(depth) + "CONTINUE")
+		return next
+	}
+}
+
+// printGobackStatement prints a GOBACK statement (the indented verb; the sentence
+// emits the terminating period). A typed-nil statement is rejected with an
+// [UnsupportedNodeError].
+func printGobackStatement(stmt *GobackStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "GOBACK")
+		return next
+	}
+}
+
+// printExitStatement prints an EXIT statement (the indented verb; the sentence
+// emits the terminating period): a bare EXIT or EXIT followed by its object
+// keyword. A typed-nil statement is rejected with an [UnsupportedNodeError].
+func printExitStatement(stmt *ExitStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "EXIT")
+		if stmt.Option != "" {
+			pr.write(" " + stmt.Option)
+		}
+		return next
+	}
+}
+
+// printNextSentenceStatement prints a NEXT SENTENCE branch alternative (the
+// indented keywords; the sentence emits the terminating period). A typed-nil
+// statement is rejected with an [UnsupportedNodeError].
+func printNextSentenceStatement(stmt *NextSentenceStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "NEXT SENTENCE")
 		return next
 	}
 }
