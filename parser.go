@@ -355,29 +355,54 @@ type PerformVarying struct {
 // the position of the verb; Verb is the canonical verb keyword. Operands are the
 // source operands; Connector is the keyword joining them to the targets ("TO",
 // "FROM", "BY", or "INTO", empty for the GIVING-only form); Targets are the
-// in-place receiving identifiers; Giving is the optional GIVING result; Rounded
-// reports a ROUNDED phrase; EndScope reports an explicit END-<verb> terminator.
+// in-place receiving fields (each optionally ROUNDED); Giving are the GIVING
+// result fields (each optionally ROUNDED); Remainder is the DIVIDE … REMAINDER
+// result (nil otherwise); SizeError carries the optional [NOT] ON SIZE ERROR
+// phrases; EndScope reports an explicit END-<verb> terminator.
 type ArithmeticStatement struct {
 	Pos       Pos
 	Verb      string
 	Operands  []Type
 	Connector string
-	Targets   []*Identifier
-	Giving    *Identifier
-	Rounded   bool
+	Targets   []*ArithmeticTarget
+	Giving    []*ArithmeticTarget
+	Remainder *Identifier
+	SizeError SizeErrorPhrases
 	EndScope  bool
 }
 
 func (*ArithmeticStatement) statement() {}
 
+// ArithmeticTarget is one receiving field of an arithmetic statement: an in-place
+// TO/FROM/BY/INTO target or a GIVING result. Pos is the position of the
+// identifier; Rounded reports a trailing ROUNDED phrase. It mirrors ComputeTarget.
+type ArithmeticTarget struct {
+	Pos     Pos
+	Name    *Identifier
+	Rounded bool
+}
+
+// SizeErrorPhrases holds the optional [ON] SIZE ERROR and NOT [ON] SIZE ERROR
+// imperative phrases shared by the arithmetic statements and COMPUTE. OnSizeError
+// and NotOnSizeError are the phrase bodies (nested statement lists); the Has flags
+// distinguish a present-but-empty phrase from an absent one (a nil body).
+type SizeErrorPhrases struct {
+	OnSizeError       []Statement
+	HasOnSizeError    bool
+	NotOnSizeError    []Statement
+	HasNotOnSizeError bool
+}
+
 // ComputeStatement is a COMPUTE statement. Pos is the position of the COMPUTE
 // keyword; Targets are the receiving fields (each optionally ROUNDED); Expr is the
-// assigned arithmetic expression; EndScope reports an explicit END-COMPUTE.
+// assigned arithmetic expression; SizeError carries the optional [NOT] ON SIZE
+// ERROR phrases; EndScope reports an explicit END-COMPUTE.
 type ComputeStatement struct {
-	Pos      Pos
-	Targets  []ComputeTarget
-	Expr     Expr
-	EndScope bool
+	Pos       Pos
+	Targets   []ComputeTarget
+	Expr      Expr
+	SizeError SizeErrorPhrases
+	EndScope  bool
 }
 
 func (*ComputeStatement) statement() {}
@@ -3373,7 +3398,7 @@ var procedurePhraseKeywords = []string{
 	"CORRESPONDING", "CORR", "THEN", "ELSE", "THROUGH", "THRU", "TIMES",
 	"UNTIL", "VARYING", "WITH", "TEST", "BEFORE", "AFTER", "NO", "ADVANCING",
 	"DEPENDING", "ON", "RUN", "WHEN", "ALSO", "ANY", "OTHER",
-	"USING", "RETURNING",
+	"USING", "RETURNING", "NOT", "SIZE", "ERROR",
 }
 
 // isStatementVerb reports whether tok is a recognized statement-leading verb.
@@ -3456,6 +3481,21 @@ func stopAtNested(p *parser) (bool, error) {
 		return true, nil
 	}
 	return isPeriod(tok) || keywordIs(tok, "ELSE") || isScopeTerminator(tok), nil
+}
+
+// stopAtSizeError stops a SIZE ERROR phrase body at a separator period, the NOT
+// keyword introducing the NOT ON SIZE ERROR phrase, any explicit scope terminator
+// (END-ADD, a nested END-IF …), or end of input — each consumed by an enclosing
+// construct, not the phrase body.
+func stopAtSizeError(p *parser) (bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return true, nil
+	}
+	return isPeriod(tok) || keywordIs(tok, "NOT") || isScopeTerminator(tok), nil
 }
 
 // parseIfStatement parses an IF statement whose verb kw has already been read: a
@@ -4207,9 +4247,9 @@ func parseExitStatement(p *parser, kw Token) (Statement, error) {
 
 // parseArithmeticStatement parses an ADD/SUBTRACT/MULTIPLY/DIVIDE statement whose
 // verb kw has already been read: source operands, an optional connector
-// (TO/FROM/BY/INTO) with in-place targets, an optional GIVING result, an optional
-// ROUNDED, and an optional END-<verb> scope terminator. REMAINDER, multiple GIVING
-// targets, and ON SIZE ERROR are deferred.
+// (TO/FROM/BY/INTO) with in-place receivers, an optional GIVING result list, an
+// optional DIVIDE REMAINDER, optional [NOT] ON SIZE ERROR phrases, and an optional
+// END-<verb> scope terminator. Each receiver carries its own optional ROUNDED.
 func parseArithmeticStatement(p *parser, kw Token) (Statement, error) {
 	verb := strings.ToUpper(string(kw.Value))
 	stmt := &ArithmeticStatement{Pos: kw.Pos, Verb: verb}
@@ -4231,19 +4271,11 @@ func parseArithmeticStatement(p *parser, kw Token) (Statement, error) {
 	if connector {
 		conn, _ := p.expectKeyword("TO", "FROM", "BY", "INTO")
 		stmt.Connector = strings.ToUpper(string(conn.Value))
-		targets, err := parseIdentifierList(p)
+		targets, err := parseArithmeticReceivers(p)
 		if err != nil {
 			return nil, err
 		}
 		stmt.Targets = targets
-		rounded, err := p.peekKeyword("ROUNDED")
-		if err != nil {
-			return nil, err
-		}
-		if rounded {
-			p.consume()
-			stmt.Rounded = true
-		}
 	}
 
 	giving, err := p.peekKeyword("GIVING")
@@ -4252,25 +4284,36 @@ func parseArithmeticStatement(p *parser, kw Token) (Statement, error) {
 	}
 	if giving {
 		p.consume()
-		id, err := parseIdentifierToken(p)
+		receivers, err := parseArithmeticReceivers(p)
 		if err != nil {
 			return nil, err
 		}
-		stmt.Giving = id
-		rounded, err := p.peekKeyword("ROUNDED")
+		stmt.Giving = receivers
+
+		remainder, err := p.peekKeyword("REMAINDER")
 		if err != nil {
 			return nil, err
 		}
-		if rounded {
+		if remainder {
 			p.consume()
-			stmt.Rounded = true
+			id, err := parseIdentifierToken(p)
+			if err != nil {
+				return nil, err
+			}
+			stmt.Remainder = id
 		}
 	}
 
-	if len(stmt.Targets) == 0 && stmt.Giving == nil {
+	if len(stmt.Targets) == 0 && len(stmt.Giving) == 0 {
 		tok, _, _ := p.peek()
 		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
 	}
+
+	sizeErr, err := parseSizeErrorPhrases(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.SizeError = sizeErr
 
 	endScope, err := p.peekKeyword("END-" + verb)
 	if err != nil {
@@ -4283,9 +4326,116 @@ func parseArithmeticStatement(p *parser, kw Token) (Statement, error) {
 	return stmt, nil
 }
 
+// parseArithmeticReceivers parses one or more receiving fields, each an identifier
+// with an optional trailing ROUNDED, as used after a TO/FROM/BY/INTO connector and
+// after GIVING. It reads the first receiver, then continues while the next token
+// can begin an operand (a further receiver).
+func parseArithmeticReceivers(p *parser) ([]*ArithmeticTarget, error) {
+	var targets []*ArithmeticTarget
+	for {
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		t := &ArithmeticTarget{Pos: id.Pos, Name: id}
+		rounded, err := p.peekKeyword("ROUNDED")
+		if err != nil {
+			return nil, err
+		}
+		if rounded {
+			p.consume()
+			t.Rounded = true
+		}
+		targets = append(targets, t)
+
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !isOperandStart(tok) {
+			return targets, nil
+		}
+	}
+}
+
+// parseSizeErrorPhrases parses the optional [ON] SIZE ERROR and NOT [ON] SIZE ERROR
+// imperative phrases that may follow an arithmetic statement's receivers or a
+// COMPUTE expression. Each phrase body is a nested statement list (stopAtSizeError).
+// ON, SIZE, ERROR, and NOT are reserved words, so one-token lookahead disambiguates
+// the phrase from a following statement or scope terminator.
+func parseSizeErrorPhrases(p *parser) (SizeErrorPhrases, error) {
+	var ph SizeErrorPhrases
+
+	onSize, err := p.consumeSizeErrorLead()
+	if err != nil {
+		return ph, err
+	}
+	if onSize {
+		ph.HasOnSizeError = true
+		body, err := parseStatementList(p, stopAtSizeError)
+		if err != nil {
+			return ph, err
+		}
+		ph.OnSizeError = body
+	}
+
+	hasNot, err := p.peekKeyword("NOT")
+	if err != nil {
+		return ph, err
+	}
+	if hasNot {
+		p.consume() // NOT
+		if err := p.skipOptionalKeyword("ON"); err != nil {
+			return ph, err
+		}
+		if _, err := p.expectKeyword("SIZE"); err != nil {
+			return ph, err
+		}
+		if _, err := p.expectKeyword("ERROR"); err != nil {
+			return ph, err
+		}
+		ph.HasNotOnSizeError = true
+		body, err := parseStatementList(p, stopAtSizeError)
+		if err != nil {
+			return ph, err
+		}
+		ph.NotOnSizeError = body
+	}
+
+	return ph, nil
+}
+
+// consumeSizeErrorLead consumes an optional [ "ON" ] "SIZE" "ERROR" lead-in,
+// reporting whether it was present. ON, SIZE, and ERROR are reserved words, so the
+// next token unambiguously signals the phrase.
+func (p *parser) consumeSizeErrorLead() (bool, error) {
+	on, err := p.peekKeyword("ON")
+	if err != nil {
+		return false, err
+	}
+	size, err := p.peekKeyword("SIZE")
+	if err != nil {
+		return false, err
+	}
+	if !on && !size {
+		return false, nil
+	}
+	if on {
+		p.consume() // ON
+	}
+	if _, err := p.expectKeyword("SIZE"); err != nil {
+		return false, err
+	}
+	if _, err := p.expectKeyword("ERROR"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // parseComputeStatement parses a COMPUTE statement whose verb kw has already been
 // read: one or more receiving fields (each optionally ROUNDED), "=" (or EQUAL), an
-// arithmetic expression, and an optional END-COMPUTE. ON SIZE ERROR is deferred.
+// arithmetic expression, optional [NOT] ON SIZE ERROR phrases, and an optional
+// END-COMPUTE.
 func parseComputeStatement(p *parser, kw Token) (Statement, error) {
 	stmt := &ComputeStatement{Pos: kw.Pos}
 
@@ -4331,6 +4481,12 @@ func parseComputeStatement(p *parser, kw Token) (Statement, error) {
 		return nil, err
 	}
 	stmt.Expr = expr
+
+	sizeErr, err := parseSizeErrorPhrases(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.SizeError = sizeErr
 
 	endScope, err := p.peekKeyword("END-COMPUTE")
 	if err != nil {

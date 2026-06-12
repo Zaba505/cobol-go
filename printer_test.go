@@ -287,15 +287,14 @@ func TestPrinter(t *testing.T) {
 											Verb:      "ADD",
 											Operands:  []Type{&Identifier{Name: &Word{Value: "A"}}, &Identifier{Name: &Word{Value: "B"}}},
 											Connector: "TO",
-											Targets:   []*Identifier{{Name: &Word{Value: "C"}}},
+											Targets:   []*ArithmeticTarget{{Name: &Identifier{Name: &Word{Value: "C"}}}},
 										}}},
 										{Statements: []Statement{&ArithmeticStatement{
 											Verb:      "SUBTRACT",
 											Operands:  []Type{&Identifier{Name: &Word{Value: "A"}}},
 											Connector: "FROM",
-											Targets:   []*Identifier{{Name: &Word{Value: "B"}}},
-											Giving:    &Identifier{Name: &Word{Value: "C"}},
-											Rounded:   true,
+											Targets:   []*ArithmeticTarget{{Name: &Identifier{Name: &Word{Value: "B"}}}},
+											Giving:    []*ArithmeticTarget{{Name: &Identifier{Name: &Word{Value: "C"}}, Rounded: true}},
 										}}},
 										{Statements: []Statement{&ComputeStatement{
 											Targets: []ComputeTarget{{Name: &Identifier{Name: &Word{Value: "Z"}}, Rounded: true}},
@@ -323,6 +322,60 @@ func TestPrinter(t *testing.T) {
 				"    ADD A B TO C.\n" +
 				"    SUBTRACT A FROM B GIVING C ROUNDED.\n" +
 				"    COMPUTE Z ROUNDED = (A + B) * C END-COMPUTE.\n",
+		},
+		{
+			name: "arithmetic size error remainder and rounded receivers",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "A"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										{Statements: []Statement{&ArithmeticStatement{
+											Verb:      "ADD",
+											Operands:  []Type{&Identifier{Name: &Word{Value: "A"}}},
+											Connector: "TO",
+											Targets:   []*ArithmeticTarget{{Name: &Identifier{Name: &Word{Value: "B"}}, Rounded: true}},
+											SizeError: SizeErrorPhrases{
+												HasOnSizeError:    true,
+												OnSizeError:       []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"overflow"`}}}},
+												HasNotOnSizeError: true,
+												NotOnSizeError:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"ok"`}}}},
+											},
+											EndScope: true,
+										}}},
+										{Statements: []Statement{&ArithmeticStatement{
+											Verb:      "DIVIDE",
+											Operands:  []Type{&Identifier{Name: &Word{Value: "A"}}},
+											Connector: "INTO",
+											Targets:   []*ArithmeticTarget{{Name: &Identifier{Name: &Word{Value: "B"}}}},
+											Giving: []*ArithmeticTarget{
+												{Name: &Identifier{Name: &Word{Value: "C"}}, Rounded: true},
+												{Name: &Identifier{Name: &Word{Value: "D"}}},
+											},
+											Remainder: &Identifier{Name: &Word{Value: "E"}},
+										}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. A.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    ADD A TO B ROUNDED\n" +
+				"    ON SIZE ERROR\n" +
+				"        DISPLAY \"overflow\"\n" +
+				"    NOT ON SIZE ERROR\n" +
+				"        DISPLAY \"ok\"\n" +
+				"    END-ADD.\n" +
+				"    DIVIDE A INTO B GIVING C ROUNDED D REMAINDER E.\n",
 		},
 		{
 			name: "procedure division if",
@@ -394,7 +447,7 @@ func TestPrinter(t *testing.T) {
 												Op:    ">",
 												Right: &NumericLiteral{Value: "10"},
 											},
-											Body:       []Statement{&ArithmeticStatement{Verb: "ADD", Operands: []Type{&NumericLiteral{Value: "1"}}, Connector: "TO", Targets: []*Identifier{{Name: &Word{Value: "A"}}}}},
+											Body:       []Statement{&ArithmeticStatement{Verb: "ADD", Operands: []Type{&NumericLiteral{Value: "1"}}, Connector: "TO", Targets: []*ArithmeticTarget{{Name: &Identifier{Name: &Word{Value: "A"}}}}}},
 											EndPerform: true,
 										}}},
 										{Statements: []Statement{&PerformStatement{
@@ -889,6 +942,18 @@ func TestPrinterRoundTrip(t *testing.T) {
 				"    STOP RUN.\n",
 		},
 		{
+			name: "arithmetic size error remainder and rounded receivers",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    ADD A B TO C ROUNDED D ON SIZE ERROR DISPLAY \"overflow\" " +
+				"NOT ON SIZE ERROR DISPLAY \"ok\" END-ADD.\n" +
+				"    DIVIDE A INTO B GIVING C ROUNDED D REMAINDER E.\n" +
+				"    COMPUTE X ROUNDED Y = A + B ON SIZE ERROR CONTINUE END-COMPUTE.\n" +
+				"    SUBTRACT A FROM B ON SIZE ERROR DISPLAY \"e\".\n" +
+				"    STOP RUN.\n",
+		},
+		{
 			name: "control flow statements",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +
@@ -997,6 +1062,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "data_cob", fixture: "data.cob"},
 		{name: "procedure_paragraphs_cob", fixture: "procedure_paragraphs.cob"},
 		{name: "procedure_arithmetic_cob", fixture: "procedure_arithmetic.cob"},
+		{name: "procedure_size_error_cob", fixture: "procedure_size_error.cob"},
 		{name: "procedure_conditional_cob", fixture: "procedure_conditional.cob"},
 		{name: "procedure_perform_cob", fixture: "procedure_perform.cob"},
 		{name: "procedure_evaluate_cob", fixture: "procedure_evaluate.cob"},
@@ -1249,9 +1315,15 @@ func clearStatementPos(stmt Statement) {
 			clearTypePos(op)
 		}
 		for _, t := range s.Targets {
-			clearIdentifierPos(t)
+			t.Pos = Pos{}
+			clearIdentifierPos(t.Name)
 		}
-		clearIdentifierPos(s.Giving)
+		for _, t := range s.Giving {
+			t.Pos = Pos{}
+			clearIdentifierPos(t.Name)
+		}
+		clearIdentifierPos(s.Remainder)
+		clearSizeErrorPos(s.SizeError)
 	case *ComputeStatement:
 		s.Pos = Pos{}
 		for i := range s.Targets {
@@ -1259,6 +1331,7 @@ func clearStatementPos(stmt Statement) {
 			clearIdentifierPos(s.Targets[i].Name)
 		}
 		clearExprPos(s.Expr)
+		clearSizeErrorPos(s.SizeError)
 	case *IfStatement:
 		s.Pos = Pos{}
 		clearConditionPos(s.Cond)
@@ -1331,6 +1404,17 @@ func clearStatementPos(stmt Statement) {
 		s.Pos = Pos{}
 	case *NextSentenceStatement:
 		s.Pos = Pos{}
+	}
+}
+
+// clearSizeErrorPos zeroes every Pos within a statement's [NOT] ON SIZE ERROR
+// phrase bodies, so round-trip comparisons ignore the positions the printer chooses.
+func clearSizeErrorPos(ph SizeErrorPhrases) {
+	for _, st := range ph.OnSizeError {
+		clearStatementPos(st)
+	}
+	for _, st := range ph.NotOnSizeError {
+		clearStatementPos(st)
 	}
 }
 
@@ -1850,7 +1934,7 @@ func TestPrinterErrors(t *testing.T) {
 						&ArithmeticStatement{
 							Verb:     "ADD",
 							Operands: []Type{&Identifier{Name: &Word{Value: "A"}}},
-							Targets:  []*Identifier{{Name: &Word{Value: "B"}}},
+							Targets:  []*ArithmeticTarget{{Name: &Identifier{Name: &Word{Value: "B"}}}},
 						},
 					}}}},
 				}},
@@ -1865,7 +1949,7 @@ func TestPrinterErrors(t *testing.T) {
 							Verb:      "ADD",
 							Operands:  []Type{&Identifier{Name: &Word{Value: "A"}}},
 							Connector: "TO",
-							Giving:    &Identifier{Name: &Word{Value: "C"}},
+							Giving:    []*ArithmeticTarget{{Name: &Identifier{Name: &Word{Value: "C"}}}},
 						},
 					}}}},
 				}},

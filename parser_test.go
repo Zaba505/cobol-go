@@ -864,6 +864,159 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "add with rounded target and on size error",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    ADD A B TO C ROUNDED ON SIZE ERROR CONTINUE END-ADD.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ArithmeticStatement{
+														Pos:  Pos{Line: 4, Column: 5},
+														Verb: "ADD",
+														Operands: []Type{
+															&Identifier{Pos: Pos{Line: 4, Column: 9}, Name: &Word{Pos: Pos{Line: 4, Column: 9}, Value: "A"}},
+															&Identifier{Pos: Pos{Line: 4, Column: 11}, Name: &Word{Pos: Pos{Line: 4, Column: 11}, Value: "B"}},
+														},
+														Connector: "TO",
+														Targets: []*ArithmeticTarget{
+															{Pos: Pos{Line: 4, Column: 16}, Name: &Identifier{Pos: Pos{Line: 4, Column: 16}, Name: &Word{Pos: Pos{Line: 4, Column: 16}, Value: "C"}}, Rounded: true},
+														},
+														SizeError: SizeErrorPhrases{
+															HasOnSizeError: true,
+															OnSizeError:    []Statement{&ContinueStatement{Pos: Pos{Line: 4, Column: 40}}},
+														},
+														EndScope: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "divide giving multiple rounded receivers and remainder",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    DIVIDE A INTO B GIVING C ROUNDED D REMAINDER E.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ArithmeticStatement{
+														Pos:       Pos{Line: 4, Column: 5},
+														Verb:      "DIVIDE",
+														Operands:  []Type{&Identifier{Pos: Pos{Line: 4, Column: 12}, Name: &Word{Pos: Pos{Line: 4, Column: 12}, Value: "A"}}},
+														Connector: "INTO",
+														Targets: []*ArithmeticTarget{
+															{Pos: Pos{Line: 4, Column: 19}, Name: &Identifier{Pos: Pos{Line: 4, Column: 19}, Name: &Word{Pos: Pos{Line: 4, Column: 19}, Value: "B"}}},
+														},
+														Giving: []*ArithmeticTarget{
+															{Pos: Pos{Line: 4, Column: 28}, Name: &Identifier{Pos: Pos{Line: 4, Column: 28}, Name: &Word{Pos: Pos{Line: 4, Column: 28}, Value: "C"}}, Rounded: true},
+															{Pos: Pos{Line: 4, Column: 38}, Name: &Identifier{Pos: Pos{Line: 4, Column: 38}, Name: &Word{Pos: Pos{Line: 4, Column: 38}, Value: "D"}}},
+														},
+														Remainder: &Identifier{Pos: Pos{Line: 4, Column: 50}, Name: &Word{Pos: Pos{Line: 4, Column: 50}, Value: "E"}},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "compute with on and not on size error",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    COMPUTE X = A + B ON SIZE ERROR CONTINUE NOT ON SIZE ERROR CONTINUE END-COMPUTE.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos:       Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{Pos: Pos{Line: 2, Column: 1}, Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"}},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ComputeStatement{
+														Pos:     Pos{Line: 4, Column: 5},
+														Targets: []ComputeTarget{{Pos: Pos{Line: 4, Column: 13}, Name: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "X"}}}},
+														Expr: &BinaryExpr{
+															Pos:   Pos{Line: 4, Column: 17},
+															Op:    "+",
+															Left:  &Identifier{Pos: Pos{Line: 4, Column: 17}, Name: &Word{Pos: Pos{Line: 4, Column: 17}, Value: "A"}},
+															Right: &Identifier{Pos: Pos{Line: 4, Column: 21}, Name: &Word{Pos: Pos{Line: 4, Column: 21}, Value: "B"}},
+														},
+														SizeError: SizeErrorPhrases{
+															HasOnSizeError:    true,
+															OnSizeError:       []Statement{&ContinueStatement{Pos: Pos{Line: 4, Column: 37}}},
+															HasNotOnSizeError: true,
+															NotOnSizeError:    []Statement{&ContinueStatement{Pos: Pos{Line: 4, Column: 64}}},
+														},
+														EndScope: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "AND binds tighter than OR",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +
@@ -1763,6 +1916,18 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedKeywordError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 15}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "NOT not followed by SIZE ERROR after on size error",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    ADD A TO B ON SIZE ERROR CONTINUE NOT CONTINUE.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 43}, target.Actual.Pos)
 			},
 		},
 		{

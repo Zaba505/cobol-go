@@ -642,14 +642,19 @@ accept-statement =
       "ACCEPT" identifier [ "FROM" ( mnemonic-name | "DATE" | "TIME" | … ) ]
 
 compute-statement =
-      "COMPUTE" identifier [ "ROUNDED" ] { identifier [ "ROUNDED" ] }
+      "COMPUTE" receiver { receiver }
       ( "=" | "EQUAL" ) arithmetic-expression
       [ on-size-error ] [ "END-COMPUTE" ]
 
 arithmetic-statement =                  « ADD / SUBTRACT / MULTIPLY / DIVIDE »
-      ( "ADD" | "SUBTRACT" | "MULTIPLY" | "DIVIDE" ) « operands »
-      [ "GIVING" identifier ] [ "ROUNDED" ] [ on-size-error ]
+      ( "ADD" | "SUBTRACT" | "MULTIPLY" | "DIVIDE" ) operand { operand }
+      [ ( "TO" | "FROM" | "BY" | "INTO" ) receiver { receiver } ]
+      [ "GIVING" receiver { receiver } ]
+      [ "REMAINDER" identifier ]            « DIVIDE only »
+      [ on-size-error ]
       [ "END-ADD" | "END-SUBTRACT" | "END-MULTIPLY" | "END-DIVIDE" ]
+
+receiver = identifier [ "ROUNDED" ]
 
 if-statement =
       "IF" condition [ "THEN" ]
