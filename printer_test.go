@@ -1020,6 +1020,160 @@ func TestPrinter(t *testing.T) {
 				"END PROGRAM INNER.\n" +
 				"END PROGRAM OUTER.\n",
 		},
+		{
+			name: "initialize statement",
+			input: dataManipFile([]*Sentence{
+				{Statements: []Statement{&InitializeStatement{Targets: []*Identifier{
+					{Name: &Word{Value: "A"}},
+					{Name: &Word{Value: "B"}},
+				}}}},
+			}),
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INITIALIZE A B.\n",
+		},
+		{
+			name: "set statement forms",
+			input: dataManipFile([]*Sentence{
+				{Statements: []Statement{&SetStatement{Targets: []*Identifier{{Name: &Word{Value: "I"}}}, Mode: "TO", Value: &NumericLiteral{Value: "1"}}}},
+				{Statements: []Statement{&SetStatement{Targets: []*Identifier{{Name: &Word{Value: "I"}}}, Mode: "UP BY", Value: &NumericLiteral{Value: "2"}}}},
+				{Statements: []Statement{&SetStatement{Targets: []*Identifier{{Name: &Word{Value: "D"}}}, Mode: "TO", Value: &Word{Value: "TRUE"}}}},
+			}),
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SET I TO 1.\n" +
+				"    SET I UP BY 2.\n" +
+				"    SET D TO TRUE.\n",
+		},
+		{
+			name: "string statement with overflow and end-string",
+			input: dataManipFile([]*Sentence{
+				{Statements: []Statement{&StringStatement{
+					Sources: []*StringSource{
+						{
+							Operands:  []Type{&Identifier{Name: &Word{Value: "WS-A"}}, &Identifier{Name: &Word{Value: "WS-B"}}},
+							Delimiter: &Word{Value: "SIZE"},
+						},
+						{
+							Operands:  []Type{&Identifier{Name: &Word{Value: "WS-C"}}},
+							Delimiter: &StringLiteral{Value: "\", \""},
+						},
+					},
+					Into:    &Identifier{Name: &Word{Value: "WS-R"}},
+					Pointer: &Identifier{Name: &Word{Value: "WS-P"}},
+					Overflow: OverflowPhrases{
+						HasOnOverflow: true,
+						OnOverflow:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: "\"x\""}}}},
+					},
+					EndString: true,
+				}}},
+			}),
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STRING WS-A WS-B DELIMITED BY SIZE WS-C DELIMITED BY \", \" INTO WS-R WITH POINTER WS-P\n" +
+				"    ON OVERFLOW\n" +
+				"        DISPLAY \"x\"\n" +
+				"    END-STRING.\n",
+		},
+		{
+			name: "unstring statement with delimiters and sub-receivers",
+			input: dataManipFile([]*Sentence{
+				{Statements: []Statement{&UnstringStatement{
+					Source: &Identifier{Name: &Word{Value: "WS-S"}},
+					Delimiters: []*UnstringDelimiter{
+						{All: true, Value: &StringLiteral{Value: "\" \""}},
+						{Value: &StringLiteral{Value: "\",\""}},
+					},
+					Into: []*UnstringTarget{
+						{Into: &Identifier{Name: &Word{Value: "WS-A"}}, Delimiter: &Identifier{Name: &Word{Value: "WS-D"}}, Count: &Identifier{Name: &Word{Value: "WS-C"}}},
+						{Into: &Identifier{Name: &Word{Value: "WS-B"}}},
+					},
+					Pointer:     &Identifier{Name: &Word{Value: "WS-P"}},
+					Tallying:    &Identifier{Name: &Word{Value: "WS-T"}},
+					EndUnstring: true,
+				}}},
+			}),
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    UNSTRING WS-S DELIMITED BY ALL \" \" OR \",\" INTO WS-A DELIMITER IN WS-D COUNT IN WS-C WS-B WITH POINTER WS-P TALLYING IN WS-T END-UNSTRING.\n",
+		},
+		{
+			name: "inspect statement with tallying and replacing regions",
+			input: dataManipFile([]*Sentence{
+				{Statements: []Statement{&InspectStatement{
+					Target: &Identifier{Name: &Word{Value: "WS-T"}},
+					Tallying: []*InspectTally{
+						{
+							Count: &Identifier{Name: &Word{Value: "WS-C"}},
+							Specs: []*InspectMatch{
+								{Kind: "ALL", Item: &StringLiteral{Value: "\"A\""}, Region: &InspectRegion{Kind: "BEFORE", Initial: true, Operand: &StringLiteral{Value: "\"Z\""}}},
+							},
+						},
+					},
+					Replacing: []*InspectReplace{
+						{Kind: "CHARACTERS", By: &StringLiteral{Value: "\"*\""}, Region: &InspectRegion{Kind: "AFTER", Operand: &StringLiteral{Value: "\"(\""}}},
+					},
+				}}},
+			}),
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INSPECT WS-T TALLYING WS-C FOR ALL \"A\" BEFORE INITIAL \"Z\" REPLACING CHARACTERS BY \"*\" AFTER \"(\".\n",
+		},
+		{
+			name: "search all statement with at end and when",
+			input: dataManipFile([]*Sentence{
+				{Statements: []Statement{&SearchStatement{
+					All:      true,
+					Target:   &Identifier{Name: &Word{Value: "WS-T"}},
+					HasAtEnd: true,
+					AtEnd:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: "\"n\""}}}},
+					Whens: []*SearchWhen{
+						{
+							Cond: &RelationCondition{Left: &Identifier{Name: &Word{Value: "WS-X"}}, Op: "=", Right: &NumericLiteral{Value: "1"}},
+							Body: []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: "\"f\""}}}},
+						},
+					},
+					EndSearch: true,
+				}}},
+			}),
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SEARCH ALL WS-T\n" +
+				"    AT END\n" +
+				"        DISPLAY \"n\"\n" +
+				"    WHEN WS-X = 1\n" +
+				"        DISPLAY \"f\"\n" +
+				"    END-SEARCH.\n",
+		},
+		{
+			name: "search statement with varying and next sentence",
+			input: dataManipFile([]*Sentence{
+				{Statements: []Statement{&SearchStatement{
+					Target:  &Identifier{Name: &Word{Value: "WS-T"}},
+					Varying: &Identifier{Name: &Word{Value: "WS-I"}},
+					Whens: []*SearchWhen{
+						{
+							Cond: &RelationCondition{Left: &Identifier{Name: &Word{Value: "WS-X"}}, Op: "=", Right: &NumericLiteral{Value: "1"}},
+							Body: []Statement{&NextSentenceStatement{}},
+						},
+					},
+					EndSearch: true,
+				}}},
+			}),
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SEARCH WS-T VARYING WS-I\n" +
+				"    WHEN WS-X = 1\n" +
+				"        NEXT SENTENCE\n" +
+				"    END-SEARCH.\n",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1245,6 +1399,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_control_flow_cob", fixture: "procedure_control_flow.cob"},
 		{name: "procedure_call_cob", fixture: "procedure_call.cob"},
 		{name: "procedure_file_io_cob", fixture: "procedure_file_io.cob"},
+		{name: "procedure_data_manipulation_cob", fixture: "procedure_data_manipulation.cob"},
 		{name: "procedure_sections_cob", fixture: "procedure_sections.cob"},
 		{name: "program_linkage_cob", fixture: "program_linkage.cob"},
 		{name: "full_program_cob", fixture: "full_program.cob"},
@@ -1628,7 +1783,108 @@ func clearStatementPos(stmt Statement) {
 			clearIdentifierPos(s.Key.Name)
 		}
 		clearExceptionPos(s.Handler)
+	case *InitializeStatement:
+		s.Pos = Pos{}
+		for _, t := range s.Targets {
+			clearIdentifierPos(t)
+		}
+	case *SetStatement:
+		s.Pos = Pos{}
+		for _, t := range s.Targets {
+			clearIdentifierPos(t)
+		}
+		clearTypePos(s.Value)
+	case *StringStatement:
+		s.Pos = Pos{}
+		for _, src := range s.Sources {
+			src.Pos = Pos{}
+			for _, op := range src.Operands {
+				clearTypePos(op)
+			}
+			clearTypePos(src.Delimiter)
+		}
+		clearIdentifierPos(s.Into)
+		clearIdentifierPos(s.Pointer)
+		clearOverflowPos(s.Overflow)
+	case *UnstringStatement:
+		s.Pos = Pos{}
+		clearIdentifierPos(s.Source)
+		for _, d := range s.Delimiters {
+			d.Pos = Pos{}
+			clearTypePos(d.Value)
+		}
+		for _, t := range s.Into {
+			t.Pos = Pos{}
+			clearIdentifierPos(t.Into)
+			clearIdentifierPos(t.Delimiter)
+			clearIdentifierPos(t.Count)
+		}
+		clearIdentifierPos(s.Pointer)
+		clearIdentifierPos(s.Tallying)
+		clearOverflowPos(s.Overflow)
+	case *InspectStatement:
+		s.Pos = Pos{}
+		clearIdentifierPos(s.Target)
+		for _, tally := range s.Tallying {
+			tally.Pos = Pos{}
+			clearIdentifierPos(tally.Count)
+			for _, m := range tally.Specs {
+				clearInspectMatchPos(m)
+			}
+		}
+		for _, r := range s.Replacing {
+			r.Pos = Pos{}
+			clearTypePos(r.Item)
+			clearTypePos(r.By)
+			clearInspectRegionPos(r.Region)
+		}
+	case *SearchStatement:
+		s.Pos = Pos{}
+		clearIdentifierPos(s.Target)
+		clearIdentifierPos(s.Varying)
+		for _, st := range s.AtEnd {
+			clearStatementPos(st)
+		}
+		for _, when := range s.Whens {
+			when.Pos = Pos{}
+			clearConditionPos(when.Cond)
+			for _, st := range when.Body {
+				clearStatementPos(st)
+			}
+		}
 	}
+}
+
+// clearOverflowPos zeroes every Pos within a STRING/UNSTRING statement's [NOT] ON
+// OVERFLOW phrase bodies, so round-trip comparisons ignore printer-chosen positions.
+func clearOverflowPos(ph OverflowPhrases) {
+	for _, st := range ph.OnOverflow {
+		clearStatementPos(st)
+	}
+	for _, st := range ph.NotOnOverflow {
+		clearStatementPos(st)
+	}
+}
+
+// clearInspectMatchPos zeroes the Pos of an INSPECT TALLYING … FOR specification,
+// its matched operand, and its optional region (a no-op when nil).
+func clearInspectMatchPos(m *InspectMatch) {
+	if m == nil {
+		return
+	}
+	m.Pos = Pos{}
+	clearTypePos(m.Item)
+	clearInspectRegionPos(m.Region)
+}
+
+// clearInspectRegionPos zeroes the Pos of an INSPECT BEFORE/AFTER region and its
+// boundary operand (a no-op when nil).
+func clearInspectRegionPos(r *InspectRegion) {
+	if r == nil {
+		return
+	}
+	r.Pos = Pos{}
+	clearTypePos(r.Operand)
 }
 
 // clearSizeErrorPos zeroes every Pos within a statement's [NOT] ON SIZE ERROR
