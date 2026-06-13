@@ -6054,7 +6054,10 @@ func parsePointerPhrase(p *parser) (*Identifier, error) {
 	}
 	if !ptr {
 		if hasWith {
-			tok, _, _ := p.peek()
+			tok, _, ok := p.peek()
+			if !ok {
+				return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenIdentifier}}
+			}
 			return nil, UnexpectedKeywordError{Expected: []string{"POINTER"}, Actual: tok}
 		}
 		return nil, nil

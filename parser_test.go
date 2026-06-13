@@ -2954,6 +2954,17 @@ func TestParserErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "string with dangling with at end of input",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STRING WS-A DELIMITED BY SIZE INTO WS-R WITH\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedEndOfTokensError
+				require.ErrorAs(t, err, &target)
+			},
+		},
+		{
 			name: "inspect without tallying or replacing",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +

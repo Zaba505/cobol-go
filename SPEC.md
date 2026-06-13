@@ -689,6 +689,7 @@ goback-statement = "GOBACK"
 exit-statement   = "EXIT" [ "PROGRAM" | "PARAGRAPH" | "SECTION" | "PERFORM" ]
 go-to-statement  = "GO" [ "TO" ] procedure-name
                        [ "DEPENDING" [ "ON" ] identifier ]
+continue-statement = "CONTINUE"
 
 on-size-error = [ "ON" ] "SIZE" "ERROR" { statement }
               [ "NOT" [ "ON" ] "SIZE" "ERROR" { statement } ]
