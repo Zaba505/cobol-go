@@ -1106,15 +1106,16 @@ func printAcceptStatement(stmt *AcceptStatement, depth int, next printerAction) 
 // statement with no verb, no operands, or no receiving field is rejected with an
 // [UnsupportedNodeError]. The connector and in-place receivers are paired: a
 // connector without receivers, or receivers without a connector (which would
-// silently drop them), is also rejected, as is a REMAINDER without a GIVING result.
-// When a SIZE ERROR phrase is present the END-<verb> moves onto its own line below
-// the phrases; otherwise it stays on the statement line, as before.
+// silently drop them), is also rejected, as is a REMAINDER without a GIVING result
+// or on a non-DIVIDE verb, and a nil receiver. When a SIZE ERROR phrase is present
+// the END-<verb> moves onto its own line below the phrases; otherwise it stays on
+// the statement line, as before.
 func printArithmeticStatement(stmt *ArithmeticStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil || stmt.Verb == "" || len(stmt.Operands) == 0 ||
 			(len(stmt.Targets) == 0 && len(stmt.Giving) == 0) ||
 			(stmt.Connector == "") != (len(stmt.Targets) == 0) ||
-			(stmt.Remainder != nil && len(stmt.Giving) == 0) {
+			(stmt.Remainder != nil && (len(stmt.Giving) == 0 || stmt.Verb != "DIVIDE")) {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
 		pr.write(indent(depth) + stmt.Verb)
@@ -1128,6 +1129,9 @@ func printArithmeticStatement(stmt *ArithmeticStatement, depth int, next printer
 		if stmt.Connector != "" {
 			pr.write(" " + stmt.Connector)
 			for _, t := range stmt.Targets {
+				if t == nil {
+					return failPrint(UnsupportedNodeError{Node: stmt})
+				}
 				if !writeArithmeticReceiver(pr, t) {
 					return failPrint(UnsupportedNodeError{Node: t.Name})
 				}
@@ -1136,6 +1140,9 @@ func printArithmeticStatement(stmt *ArithmeticStatement, depth int, next printer
 		if len(stmt.Giving) > 0 {
 			pr.write(" GIVING")
 			for _, t := range stmt.Giving {
+				if t == nil {
+					return failPrint(UnsupportedNodeError{Node: stmt})
+				}
 				if !writeArithmeticReceiver(pr, t) {
 					return failPrint(UnsupportedNodeError{Node: t.Name})
 				}

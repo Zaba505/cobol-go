@@ -4290,17 +4290,21 @@ func parseArithmeticStatement(p *parser, kw Token) (Statement, error) {
 		}
 		stmt.Giving = receivers
 
-		remainder, err := p.peekKeyword("REMAINDER")
-		if err != nil {
-			return nil, err
-		}
-		if remainder {
-			p.consume()
-			id, err := parseIdentifierToken(p)
+		// REMAINDER is a DIVIDE-only phrase; for the other verbs the keyword is
+		// left for the enclosing sentence to reject.
+		if verb == "DIVIDE" {
+			remainder, err := p.peekKeyword("REMAINDER")
 			if err != nil {
 				return nil, err
 			}
-			stmt.Remainder = id
+			if remainder {
+				p.consume()
+				id, err := parseIdentifierToken(p)
+				if err != nil {
+					return nil, err
+				}
+				stmt.Remainder = id
+			}
 		}
 	}
 

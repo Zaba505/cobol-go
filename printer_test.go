@@ -1956,6 +1956,36 @@ func TestPrinterErrors(t *testing.T) {
 			}}}},
 		},
 		{
+			name: "remainder on non-divide verb",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&ArithmeticStatement{
+							Verb:      "ADD",
+							Operands:  []Type{&Identifier{Name: &Word{Value: "A"}}},
+							Giving:    []*ArithmeticTarget{{Name: &Identifier{Name: &Word{Value: "C"}}}},
+							Remainder: &Identifier{Name: &Word{Value: "D"}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "nil arithmetic receiver",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&ArithmeticStatement{
+							Verb:      "ADD",
+							Operands:  []Type{&Identifier{Name: &Word{Value: "A"}}},
+							Connector: "TO",
+							Targets:   []*ArithmeticTarget{nil},
+						},
+					}}}},
+				}},
+			}}}},
+		},
+		{
 			name: "nil section element",
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				&ProcedureDivision{Sections: []*Section{nil}},

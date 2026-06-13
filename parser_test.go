@@ -1931,6 +1931,20 @@ func TestParserErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "remainder rejected on non-divide verb",
+			// REMAINDER is DIVIDE-only; on ADD the keyword is left for the sentence,
+			// which has no statement verb to dispatch and so rejects it.
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    ADD A TO B GIVING C REMAINDER D.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 25}, target.Actual.Pos)
+			},
+		},
+		{
 			name: "non-identifier where a statement is expected",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. HELLO.\n" +
