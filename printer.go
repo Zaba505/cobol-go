@@ -1221,9 +1221,21 @@ func printComputeStatement(stmt *ComputeStatement, depth int, next printerAction
 	}
 }
 
+// onSizeErrorPresent reports whether the ON SIZE ERROR phrase should be printed —
+// the flag is set or its body is non-empty. Treating a non-empty body as present
+// (rather than trusting the flag alone) keeps a directly-built AST from silently
+// dropping its statements. notSizeErrorPresent does the same for NOT ON SIZE ERROR.
+func (ph SizeErrorPhrases) onSizeErrorPresent() bool {
+	return ph.HasOnSizeError || len(ph.OnSizeError) > 0
+}
+
+func (ph SizeErrorPhrases) notSizeErrorPresent() bool {
+	return ph.HasNotOnSizeError || len(ph.NotOnSizeError) > 0
+}
+
 // hasSizeError reports whether ph carries any [NOT] ON SIZE ERROR phrase.
 func hasSizeError(ph SizeErrorPhrases) bool {
-	return ph.HasOnSizeError || ph.HasNotOnSizeError
+	return ph.onSizeErrorPresent() || ph.notSizeErrorPresent()
 }
 
 // printSizeErrorPhrases prints the optional ON SIZE ERROR and NOT ON SIZE ERROR
@@ -1233,11 +1245,11 @@ func hasSizeError(ph SizeErrorPhrases) bool {
 func printSizeErrorPhrases(ph SizeErrorPhrases, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		tail := next
-		if ph.HasNotOnSizeError {
+		if ph.notSizeErrorPresent() {
 			tail = writeThen("\n"+indent(depth)+"NOT ON SIZE ERROR",
 				printBranchStatementAt(ph.NotOnSizeError, 0, depth+1, tail))
 		}
-		if ph.HasOnSizeError {
+		if ph.onSizeErrorPresent() {
 			tail = writeThen("\n"+indent(depth)+"ON SIZE ERROR",
 				printBranchStatementAt(ph.OnSizeError, 0, depth+1, tail))
 		}

@@ -649,8 +649,8 @@ compute-statement =
 arithmetic-statement =                  « ADD / SUBTRACT / MULTIPLY / DIVIDE »
       ( "ADD" | "SUBTRACT" | "MULTIPLY" | "DIVIDE" ) operand { operand }
       [ ( "TO" | "FROM" | "BY" | "INTO" ) receiver { receiver } ]
-      [ "GIVING" receiver { receiver } ]
-      [ "REMAINDER" identifier ]            « DIVIDE only »
+      [ "GIVING" receiver { receiver } [ "REMAINDER" identifier ] ]
+                                          « REMAINDER: DIVIDE … GIVING only »
       [ on-size-error ]
       [ "END-ADD" | "END-SUBTRACT" | "END-MULTIPLY" | "END-DIVIDE" ]
 

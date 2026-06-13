@@ -378,6 +378,43 @@ func TestPrinter(t *testing.T) {
 				"    DIVIDE A INTO B GIVING C ROUNDED D REMAINDER E.\n",
 		},
 		{
+			// A non-empty phrase body must print even when the caller forgot to set
+			// the corresponding Has* flag — the printer never silently drops it.
+			name: "size error body without flag still prints",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "A"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										{Statements: []Statement{&ComputeStatement{
+											Targets: []ComputeTarget{{Name: &Identifier{Name: &Word{Value: "X"}}}},
+											Expr:    &Identifier{Name: &Word{Value: "A"}},
+											SizeError: SizeErrorPhrases{
+												OnSizeError: []Statement{&ContinueStatement{}},
+											},
+											EndScope: true,
+										}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. A.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    COMPUTE X = A\n" +
+				"    ON SIZE ERROR\n" +
+				"        CONTINUE\n" +
+				"    END-COMPUTE.\n",
+		},
+		{
 			name: "procedure division if",
 			input: &File{
 				Programs: []*Program{
