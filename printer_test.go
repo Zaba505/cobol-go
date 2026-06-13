@@ -2567,6 +2567,29 @@ func TestPrinterErrors(t *testing.T) {
 			}}}},
 		},
 		{
+			name: "open group with unsupported mode",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&OpenStatement{Groups: []*OpenGroup{{Mode: "SIDEWAYS", Files: []*OpenFile{{Name: &Word{Value: "F-A"}}}}}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "exception handler with unsupported kind",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&ReadStatement{
+							File:    &Word{Value: "F-A"},
+							Handler: ExceptionPhrases{Kind: "AT MIDDLE", HasOn: true, On: []Statement{&ContinueStatement{}}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
+		{
 			name: "open file with unsupported option",
 			input: &File{Programs: []*Program{{Divisions: []Division{
 				&ProcedureDivision{Paragraphs: []*Paragraph{

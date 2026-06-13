@@ -1291,8 +1291,14 @@ func hasException(ph ExceptionPhrases) bool {
 // present it continues with next unchanged. It mirrors [printSizeErrorPhrases].
 func printExceptionPhrases(ph ExceptionPhrases, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
-		if ph.Kind == "" {
+		// Kind is an enum; "" means no handler, an unsupported value would print
+		// invalid COBOL.
+		switch ph.Kind {
+		case "":
 			return next
+		case "AT END", "INVALID KEY", "AT END-OF-PAGE":
+		default:
+			return failPrint(UnsupportedNodeError{Node: ph})
 		}
 		tail := next
 		if ph.notPresent() {
@@ -1333,8 +1339,14 @@ func printOpenStatement(stmt *OpenStatement, depth int, next printerAction) prin
 		}
 		pr.write(indent(depth) + "OPEN")
 		for _, g := range stmt.Groups {
-			if g == nil || g.Mode == "" || len(g.Files) == 0 {
+			if g == nil || len(g.Files) == 0 {
 				return failPrint(UnsupportedNodeError{Node: stmt})
+			}
+			// Mode is an enum; an unsupported value would print invalid COBOL.
+			switch g.Mode {
+			case "INPUT", "OUTPUT", "I-O", "EXTEND":
+			default:
+				return failPrint(UnsupportedNodeError{Node: g})
 			}
 			pr.write(" " + g.Mode)
 			for _, fl := range g.Files {
