@@ -648,6 +648,197 @@ type EvaluateObject struct {
 	Cond    Condition // condition form
 }
 
+// InitializeStatement is an INITIALIZE statement (SPEC.md "initialize-statement"):
+// it sets one or more data items to the standard initial value for their category.
+// Pos is the position of the INITIALIZE keyword; Targets are the receiving items in
+// source order. (The REPLACING/DEFAULT/category phrases are deferred to a later
+// story.)
+type InitializeStatement struct {
+	Pos     Pos
+	Targets []*Identifier
+}
+
+func (*InitializeStatement) statement() {}
+
+// SetStatement is a SET statement (SPEC.md "set-statement") in its index/assignment
+// forms. Pos is the position of the SET keyword; Targets are the receiving items.
+// Mode is the canonical operation — "TO", "UP BY", or "DOWN BY". Value is the
+// assigned/increment value: an operand, or a *Word holding the keyword "TRUE" or
+// "FALSE" for the SET … TO TRUE/FALSE form. (Pointer/ADDRESS and ON/OFF switch
+// forms are deferred to a later story.)
+type SetStatement struct {
+	Pos     Pos
+	Targets []*Identifier
+	Mode    string
+	Value   Type
+}
+
+func (*SetStatement) statement() {}
+
+// StringStatement is a STRING statement (SPEC.md "string-statement"): it
+// concatenates sending fields into a receiver. Pos is the position of the STRING
+// keyword; Sources are the sending fragments, each with its own DELIMITED BY
+// delimiter; Into is the receiving identifier; Pointer is the optional WITH POINTER
+// item, nil when absent; Overflow carries the optional [NOT] ON OVERFLOW phrases;
+// EndString reports an explicit END-STRING scope terminator.
+type StringStatement struct {
+	Pos       Pos
+	Sources   []*StringSource
+	Into      *Identifier
+	Pointer   *Identifier
+	Overflow  OverflowPhrases
+	EndString bool
+}
+
+func (*StringStatement) statement() {}
+
+// StringSource is one sending fragment of a STRING statement: one or more operands
+// sharing a DELIMITED BY delimiter. Pos is the position of the first operand;
+// Operands are the sending values; Delimiter is the delimiter — an operand, or a
+// *Word holding the keyword "SIZE" for DELIMITED BY SIZE.
+type StringSource struct {
+	Pos       Pos
+	Operands  []Type
+	Delimiter Type
+}
+
+// UnstringStatement is an UNSTRING statement (SPEC.md "unstring-statement"): it
+// splits a sending field into multiple receivers. Pos is the position of the
+// UNSTRING keyword; Source is the sending identifier; Delimiters are the optional
+// DELIMITED BY delimiters (OR-joined), nil when absent; Into are the receiving
+// targets in source order; Pointer is the optional WITH POINTER item; Tallying is
+// the optional TALLYING IN counter; Overflow carries the optional [NOT] ON OVERFLOW
+// phrases; EndUnstring reports an explicit END-UNSTRING scope terminator.
+type UnstringStatement struct {
+	Pos         Pos
+	Source      *Identifier
+	Delimiters  []*UnstringDelimiter
+	Into        []*UnstringTarget
+	Pointer     *Identifier
+	Tallying    *Identifier
+	Overflow    OverflowPhrases
+	EndUnstring bool
+}
+
+func (*UnstringStatement) statement() {}
+
+// UnstringDelimiter is one delimiter of an UNSTRING DELIMITED BY phrase. Pos is the
+// position of the delimiter (the ALL keyword when present, otherwise the operand);
+// All reports a leading ALL; Value is the delimiter operand.
+type UnstringDelimiter struct {
+	Pos   Pos
+	All   bool
+	Value Type
+}
+
+// UnstringTarget is one receiving field of an UNSTRING INTO phrase. Pos is the
+// position of the receiving identifier; Into is that identifier; Delimiter is the
+// optional DELIMITER IN item; Count is the optional COUNT IN item.
+type UnstringTarget struct {
+	Pos       Pos
+	Into      *Identifier
+	Delimiter *Identifier
+	Count     *Identifier
+}
+
+// InspectStatement is an INSPECT statement (SPEC.md "inspect-statement") in its
+// TALLYING and/or REPLACING forms. Pos is the position of the INSPECT keyword;
+// Target is the inspected identifier; Tallying are the TALLYING clauses; Replacing
+// are the REPLACING clauses. (The CONVERTING form is deferred to a later story.)
+type InspectStatement struct {
+	Pos       Pos
+	Target    *Identifier
+	Tallying  []*InspectTally
+	Replacing []*InspectReplace
+}
+
+func (*InspectStatement) statement() {}
+
+// InspectTally is one TALLYING clause of an INSPECT statement: a counter and the
+// FOR specifications counted into it. Pos is the position of the counter; Count is
+// the tally counter; Specs are its FOR match specifications.
+type InspectTally struct {
+	Pos   Pos
+	Count *Identifier
+	Specs []*InspectMatch
+}
+
+// InspectMatch is one TALLYING … FOR specification. Pos is the position of its first
+// keyword; Kind is the canonical match kind — "CHARACTERS", "ALL", or "LEADING";
+// Item is the matched operand (nil for CHARACTERS); Region is the optional
+// BEFORE/AFTER INITIAL restriction.
+type InspectMatch struct {
+	Pos    Pos
+	Kind   string
+	Item   Type
+	Region *InspectRegion
+}
+
+// InspectReplace is one REPLACING specification of an INSPECT statement. Pos is the
+// position of its first keyword; Kind is the canonical match kind — "CHARACTERS",
+// "ALL", "LEADING", or "FIRST"; Item is the searched-for operand (nil for
+// CHARACTERS); By is the replacement operand; Region is the optional BEFORE/AFTER
+// INITIAL restriction.
+type InspectReplace struct {
+	Pos    Pos
+	Kind   string
+	Item   Type
+	By     Type
+	Region *InspectRegion
+}
+
+// InspectRegion is the optional BEFORE/AFTER [INITIAL] restriction on an INSPECT
+// TALLYING or REPLACING specification. Pos is the position of the BEFORE/AFTER
+// keyword; Kind is "BEFORE" or "AFTER"; Initial reports an explicit INITIAL noise
+// word; Operand is the boundary value.
+type InspectRegion struct {
+	Pos     Pos
+	Kind    string
+	Initial bool
+	Operand Type
+}
+
+// SearchStatement is a SEARCH statement (SPEC.md "search-statement"): a serial
+// (SEARCH) or binary (SEARCH ALL) table search. Pos is the position of the SEARCH
+// keyword; All reports the SEARCH ALL form; Target is the searched table item;
+// Varying is the optional VARYING index, nil when absent; AtEnd is the optional
+// AT END body and HasAtEnd reports its presence; Whens are the WHEN branches;
+// EndSearch reports an explicit END-SEARCH scope terminator.
+type SearchStatement struct {
+	Pos       Pos
+	All       bool
+	Target    *Identifier
+	Varying   *Identifier
+	AtEnd     []Statement
+	HasAtEnd  bool
+	Whens     []*SearchWhen
+	EndSearch bool
+}
+
+func (*SearchStatement) statement() {}
+
+// SearchWhen is one WHEN branch of a SEARCH statement: a condition and the body run
+// when it holds. Pos is the position of the WHEN keyword; Cond is the branch
+// condition; Body is the branch statement list (a lone NEXT SENTENCE is represented
+// by a single NextSentenceStatement, as in an IF branch).
+type SearchWhen struct {
+	Pos  Pos
+	Cond Condition
+	Body []Statement
+}
+
+// OverflowPhrases holds the optional [ON] OVERFLOW and NOT [ON] OVERFLOW imperative
+// phrases shared by the STRING and UNSTRING statements. OnOverflow and NotOnOverflow
+// are the phrase bodies (nested statement lists); the Has flags distinguish a
+// present-but-empty phrase from an absent one (a nil body). It mirrors
+// [SizeErrorPhrases].
+type OverflowPhrases struct {
+	OnOverflow       []Statement
+	HasOnOverflow    bool
+	NotOnOverflow    []Statement
+	HasNotOnOverflow bool
+}
+
 // Word is a COBOL word used as a value, e.g. a user-defined name. Pos is the
 // position of the word; Value is its text.
 type Word struct {
@@ -3547,6 +3738,7 @@ var procedureVerbs = []string{
 	"COMPUTE", "IF", "PERFORM", "EVALUATE", "CALL", "GO", "CONTINUE", "STOP",
 	"GOBACK", "EXIT",
 	"OPEN", "CLOSE", "READ", "WRITE", "REWRITE", "DELETE", "START",
+	"INITIALIZE", "SET", "STRING", "UNSTRING", "INSPECT", "SEARCH",
 }
 
 // procedureScopeTerminators are the explicit scope terminators that close one
@@ -3555,6 +3747,7 @@ var procedureScopeTerminators = []string{
 	"END-IF", "END-PERFORM", "END-COMPUTE", "END-ADD", "END-SUBTRACT",
 	"END-MULTIPLY", "END-DIVIDE", "END-EVALUATE", "END-CALL",
 	"END-READ", "END-WRITE", "END-REWRITE", "END-DELETE", "END-START",
+	"END-STRING", "END-UNSTRING", "END-SEARCH",
 }
 
 // procedurePhraseKeywords are the clause/phrase keywords that introduce a part of
@@ -3565,6 +3758,9 @@ var procedurePhraseKeywords = []string{
 	"UNTIL", "VARYING", "WITH", "TEST", "BEFORE", "AFTER", "NO", "ADVANCING",
 	"DEPENDING", "ON", "RUN", "WHEN", "ALSO", "ANY", "OTHER",
 	"USING", "RETURNING", "NOT", "SIZE", "ERROR",
+	"UP", "DOWN", "DELIMITED", "POINTER", "OVERFLOW", "DELIMITER", "COUNT",
+	"TALLYING", "OR", "REPLACING", "CHARACTERS", "LEADING", "FIRST",
+	"INITIAL", "FOR", "CONVERTING",
 }
 
 // isStatementVerb reports whether tok is a recognized statement-leading verb.
@@ -3641,10 +3837,23 @@ func parseStatement(p *parser) (Statement, error) {
 		return parseDeleteStatement(p, tok)
 	case keywordIs(tok, "START"):
 		return parseStartStatement(p, tok)
+	case keywordIs(tok, "INITIALIZE"):
+		return parseInitializeStatement(p, tok)
+	case keywordIs(tok, "SET"):
+		return parseSetStatement(p, tok)
+	case keywordIs(tok, "STRING"):
+		return parseStringStatement(p, tok)
+	case keywordIs(tok, "UNSTRING"):
+		return parseUnstringStatement(p, tok)
+	case keywordIs(tok, "INSPECT"):
+		return parseInspectStatement(p, tok)
+	case keywordIs(tok, "SEARCH"):
+		return parseSearchStatement(p, tok)
 	default:
 		return nil, unexpectedKeyword(tok, "DISPLAY", "MOVE", "ACCEPT",
 			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "PERFORM", "EVALUATE", "CALL", "GO", "CONTINUE", "STOP",
-			"GOBACK", "EXIT", "OPEN", "CLOSE", "READ", "WRITE", "REWRITE", "DELETE", "START")
+			"GOBACK", "EXIT", "OPEN", "CLOSE", "READ", "WRITE", "REWRITE", "DELETE", "START",
+			"INITIALIZE", "SET", "STRING", "UNSTRING", "INSPECT", "SEARCH")
 	}
 }
 
@@ -4637,6 +4846,73 @@ func (p *parser) consumeSizeErrorLead() (bool, error) {
 	return true, nil
 }
 
+// parseOverflowPhrases parses the optional [ON] OVERFLOW and NOT [ON] OVERFLOW
+// imperative phrases that may follow a STRING or UNSTRING statement. Each phrase body
+// is a nested statement list (stopAtPhraseBody). ON, OVERFLOW, and NOT are reserved
+// words, so one-token lookahead disambiguates the phrase from a following statement or
+// scope terminator. It mirrors [parseSizeErrorPhrases].
+func parseOverflowPhrases(p *parser) (OverflowPhrases, error) {
+	var ph OverflowPhrases
+
+	onOver, err := p.consumeOverflowLead()
+	if err != nil {
+		return ph, err
+	}
+	if onOver {
+		ph.HasOnOverflow = true
+		body, err := parseStatementList(p, stopAtPhraseBody)
+		if err != nil {
+			return ph, err
+		}
+		ph.OnOverflow = body
+	}
+
+	hasNot, err := p.peekKeyword("NOT")
+	if err != nil {
+		return ph, err
+	}
+	if hasNot {
+		p.consume() // NOT
+		if err := p.skipOptionalKeyword("ON"); err != nil {
+			return ph, err
+		}
+		if _, err := p.expectKeyword("OVERFLOW"); err != nil {
+			return ph, err
+		}
+		ph.HasNotOnOverflow = true
+		body, err := parseStatementList(p, stopAtPhraseBody)
+		if err != nil {
+			return ph, err
+		}
+		ph.NotOnOverflow = body
+	}
+	return ph, nil
+}
+
+// consumeOverflowLead consumes an optional [ "ON" ] "OVERFLOW" lead-in, reporting
+// whether it was present. ON and OVERFLOW are reserved words, so the next token
+// unambiguously signals the phrase. It mirrors [parser.consumeSizeErrorLead].
+func (p *parser) consumeOverflowLead() (bool, error) {
+	on, err := p.peekKeyword("ON")
+	if err != nil {
+		return false, err
+	}
+	over, err := p.peekKeyword("OVERFLOW")
+	if err != nil {
+		return false, err
+	}
+	if !on && !over {
+		return false, nil
+	}
+	if on {
+		p.consume() // ON
+	}
+	if _, err := p.expectKeyword("OVERFLOW"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // parseExceptionPhrases parses the optional file I/O exception handler and its NOT
 // counterpart — one of [NOT] AT END, [NOT] INVALID KEY, or [NOT] AT END-OF-PAGE —
 // that may follow a READ/WRITE/REWRITE/DELETE/START statement. allowed lists the
@@ -5439,6 +5715,709 @@ func parseCallArgument(p *parser) (*CallArgument, error) {
 // statements; an arithmetic expression or identifier reference is a leaf
 // sub-grammar with its own natural precedence recursion, so plain recursive
 // helpers returning (Expr, error) / (*Identifier, error) are idiomatic here.
+
+// parseInitializeStatement parses an INITIALIZE statement whose verb kw has already
+// been read: one or more receiving identifiers.
+func parseInitializeStatement(p *parser, kw Token) (Statement, error) {
+	targets, err := parseIdentifierList(p)
+	if err != nil {
+		return nil, err
+	}
+	return &InitializeStatement{Pos: kw.Pos, Targets: targets}, nil
+}
+
+// parseSetStatement parses a SET statement whose verb kw has already been read: one
+// or more receivers followed by either "TO" ( operand | TRUE | FALSE ) or
+// ( "UP" | "DOWN" ) "BY" operand.
+func parseSetStatement(p *parser, kw Token) (Statement, error) {
+	targets, err := parseIdentifierList(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt := &SetStatement{Pos: kw.Pos, Targets: targets}
+
+	if dir, ok, err := p.acceptKeywordValue("UP", "DOWN"); err != nil {
+		return nil, err
+	} else if ok {
+		if _, err := p.expectKeyword("BY"); err != nil {
+			return nil, err
+		}
+		val, err := parseOperand(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Mode = dir + " BY"
+		stmt.Value = val
+		return stmt, nil
+	}
+
+	if _, err := p.expectKeyword("TO"); err != nil {
+		return nil, err
+	}
+	stmt.Mode = "TO"
+	if b, ok, err := p.acceptKeyword("TRUE", "FALSE"); err != nil {
+		return nil, err
+	} else if ok {
+		stmt.Value = &Word{Pos: b.Pos, Value: strings.ToUpper(string(b.Value))}
+		return stmt, nil
+	}
+	val, err := parseOperand(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Value = val
+	return stmt, nil
+}
+
+// parseStringStatement parses a STRING statement whose verb kw has already been read:
+// one or more DELIMITED-BY sending fragments, the INTO receiver, an optional [WITH]
+// POINTER phrase, the optional [NOT] ON OVERFLOW phrases, and an optional END-STRING.
+func parseStringStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &StringStatement{Pos: kw.Pos}
+
+	for {
+		src, err := parseStringSource(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Sources = append(stmt.Sources, src)
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !isOperandStart(tok) {
+			break
+		}
+	}
+
+	if _, err := p.expectKeyword("INTO"); err != nil {
+		return nil, err
+	}
+	into, err := parseIdentifierToken(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Into = into
+
+	ptr, err := parsePointerPhrase(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Pointer = ptr
+
+	overflow, err := parseOverflowPhrases(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Overflow = overflow
+
+	if end, err := p.peekKeyword("END-STRING"); err != nil {
+		return nil, err
+	} else if end {
+		p.consume()
+		stmt.EndString = true
+	}
+	return stmt, nil
+}
+
+// parseStringSource parses one STRING sending fragment: one or more operands and the
+// required DELIMITED [BY] ( operand | SIZE ) delimiter.
+func parseStringSource(p *parser) (*StringSource, error) {
+	first, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenIdentifier, TokenString, TokenNumber}}
+	}
+	if !isOperandStart(first) {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier, TokenString, TokenNumber}, Actual: first}
+	}
+	ops, err := parseOperandList(p)
+	if err != nil {
+		return nil, err
+	}
+	src := &StringSource{Pos: first.Pos, Operands: ops}
+
+	if _, err := p.expectKeyword("DELIMITED"); err != nil {
+		return nil, err
+	}
+	if err := p.skipOptionalKeyword("BY"); err != nil {
+		return nil, err
+	}
+	if sz, ok, err := p.acceptKeyword("SIZE"); err != nil {
+		return nil, err
+	} else if ok {
+		src.Delimiter = &Word{Pos: sz.Pos, Value: "SIZE"}
+	} else {
+		delim, err := parseOperand(p)
+		if err != nil {
+			return nil, err
+		}
+		src.Delimiter = delim
+	}
+	return src, nil
+}
+
+// parseUnstringStatement parses an UNSTRING statement whose verb kw has already been
+// read: the sending identifier, an optional DELIMITED BY phrase, the INTO receivers,
+// optional [WITH] POINTER and TALLYING IN phrases, the optional [NOT] ON OVERFLOW
+// phrases, and an optional END-UNSTRING.
+func parseUnstringStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &UnstringStatement{Pos: kw.Pos}
+
+	source, err := parseIdentifierToken(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Source = source
+
+	if delim, err := p.peekKeyword("DELIMITED"); err != nil {
+		return nil, err
+	} else if delim {
+		p.consume()
+		if err := p.skipOptionalKeyword("BY"); err != nil {
+			return nil, err
+		}
+		dels, err := parseUnstringDelimiters(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Delimiters = dels
+	}
+
+	if _, err := p.expectKeyword("INTO"); err != nil {
+		return nil, err
+	}
+	targets, err := parseUnstringTargets(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Into = targets
+
+	ptr, err := parsePointerPhrase(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Pointer = ptr
+
+	if tally, err := p.peekKeyword("TALLYING"); err != nil {
+		return nil, err
+	} else if tally {
+		p.consume()
+		if err := p.skipOptionalKeyword("IN"); err != nil {
+			return nil, err
+		}
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Tallying = id
+	}
+
+	overflow, err := parseOverflowPhrases(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Overflow = overflow
+
+	if end, err := p.peekKeyword("END-UNSTRING"); err != nil {
+		return nil, err
+	} else if end {
+		p.consume()
+		stmt.EndUnstring = true
+	}
+	return stmt, nil
+}
+
+// parseUnstringDelimiters parses one or more OR-joined UNSTRING delimiters.
+func parseUnstringDelimiters(p *parser) ([]*UnstringDelimiter, error) {
+	first, err := parseUnstringDelimiter(p)
+	if err != nil {
+		return nil, err
+	}
+	dels := []*UnstringDelimiter{first}
+	for {
+		or, err := p.peekKeyword("OR")
+		if err != nil {
+			return nil, err
+		}
+		if !or {
+			return dels, nil
+		}
+		p.consume() // OR
+		d, err := parseUnstringDelimiter(p)
+		if err != nil {
+			return nil, err
+		}
+		dels = append(dels, d)
+	}
+}
+
+// parseUnstringDelimiter parses one UNSTRING delimiter: an optional ALL and the
+// delimiter operand.
+func parseUnstringDelimiter(p *parser) (*UnstringDelimiter, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, UnexpectedEndOfTokensError{Expected: []TokenType{TokenIdentifier, TokenString, TokenNumber}}
+	}
+	pos := tok.Pos
+	all := false
+	if keywordIs(tok, "ALL") {
+		p.consume()
+		all = true
+	}
+	val, err := parseOperand(p)
+	if err != nil {
+		return nil, err
+	}
+	return &UnstringDelimiter{Pos: pos, All: all, Value: val}, nil
+}
+
+// parseUnstringTargets parses the UNSTRING INTO receiver list: one or more receiving
+// identifiers, each with optional DELIMITER IN and COUNT IN sub-receivers.
+func parseUnstringTargets(p *parser) ([]*UnstringTarget, error) {
+	first, err := parseUnstringTarget(p)
+	if err != nil {
+		return nil, err
+	}
+	targets := []*UnstringTarget{first}
+	for {
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !isOperandStart(tok) {
+			return targets, nil
+		}
+		t, err := parseUnstringTarget(p)
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, t)
+	}
+}
+
+// parseUnstringTarget parses one UNSTRING INTO receiver and its optional DELIMITER IN
+// and COUNT IN sub-receivers.
+func parseUnstringTarget(p *parser) (*UnstringTarget, error) {
+	into, err := parseIdentifierToken(p)
+	if err != nil {
+		return nil, err
+	}
+	t := &UnstringTarget{Pos: into.Pos, Into: into}
+
+	if d, err := p.peekKeyword("DELIMITER"); err != nil {
+		return nil, err
+	} else if d {
+		p.consume()
+		if err := p.skipOptionalKeyword("IN"); err != nil {
+			return nil, err
+		}
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		t.Delimiter = id
+	}
+
+	if c, err := p.peekKeyword("COUNT"); err != nil {
+		return nil, err
+	} else if c {
+		p.consume()
+		if err := p.skipOptionalKeyword("IN"); err != nil {
+			return nil, err
+		}
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		t.Count = id
+	}
+	return t, nil
+}
+
+// parsePointerPhrase parses the optional [WITH] POINTER identifier phrase shared by
+// STRING and UNSTRING, returning nil when absent. A WITH not followed by POINTER is
+// reported as a missing POINTER keyword.
+func parsePointerPhrase(p *parser) (*Identifier, error) {
+	_, hasWith, err := p.acceptKeyword("WITH")
+	if err != nil {
+		return nil, err
+	}
+	ptr, err := p.peekKeyword("POINTER")
+	if err != nil {
+		return nil, err
+	}
+	if !ptr {
+		if hasWith {
+			tok, _, _ := p.peek()
+			return nil, UnexpectedKeywordError{Expected: []string{"POINTER"}, Actual: tok}
+		}
+		return nil, nil
+	}
+	p.consume() // POINTER
+	return parseIdentifierToken(p)
+}
+
+// parseInspectStatement parses an INSPECT statement whose verb kw has already been
+// read: the inspected identifier and at least one of a TALLYING or REPLACING clause.
+func parseInspectStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &InspectStatement{Pos: kw.Pos}
+
+	target, err := parseIdentifierToken(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Target = target
+
+	if tally, err := p.peekKeyword("TALLYING"); err != nil {
+		return nil, err
+	} else if tally {
+		p.consume()
+		tallies, err := parseInspectTallies(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Tallying = tallies
+	}
+
+	if repl, err := p.peekKeyword("REPLACING"); err != nil {
+		return nil, err
+	} else if repl {
+		p.consume()
+		replaces, err := parseInspectReplaces(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Replacing = replaces
+	}
+
+	if len(stmt.Tallying) == 0 && len(stmt.Replacing) == 0 {
+		tok, _, _ := p.peek()
+		return nil, UnexpectedKeywordError{Expected: []string{"TALLYING", "REPLACING"}, Actual: tok}
+	}
+	return stmt, nil
+}
+
+// parseInspectTallies parses one or more INSPECT TALLYING clauses, each a counter
+// identifier, the FOR keyword, and its match specifications.
+func parseInspectTallies(p *parser) ([]*InspectTally, error) {
+	var tallies []*InspectTally
+	for {
+		count, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expectKeyword("FOR"); err != nil {
+			return nil, err
+		}
+		specs, err := parseInspectMatches(p)
+		if err != nil {
+			return nil, err
+		}
+		tallies = append(tallies, &InspectTally{Pos: count.Pos, Count: count, Specs: specs})
+
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !isOperandStart(tok) {
+			return tallies, nil
+		}
+	}
+}
+
+// parseInspectMatches parses one or more TALLYING … FOR match specifications.
+func parseInspectMatches(p *parser) ([]*InspectMatch, error) {
+	first, ok, err := parseInspectMatch(p)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		tok, _, _ := p.peek()
+		return nil, UnexpectedKeywordError{Expected: []string{"CHARACTERS", "ALL", "LEADING"}, Actual: tok}
+	}
+	matches := []*InspectMatch{first}
+	for {
+		m, ok, err := parseInspectMatch(p)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return matches, nil
+		}
+		matches = append(matches, m)
+	}
+}
+
+// parseInspectMatch parses one TALLYING … FOR specification — CHARACTERS or
+// ( ALL | LEADING ) operand, with an optional BEFORE/AFTER region — reporting ok
+// false when the next token does not begin one.
+func parseInspectMatch(p *parser) (*InspectMatch, bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	m := &InspectMatch{Pos: tok.Pos}
+	switch {
+	case keywordIs(tok, "CHARACTERS"):
+		p.consume()
+		m.Kind = "CHARACTERS"
+	case keywordIs(tok, "ALL", "LEADING"):
+		p.consume()
+		m.Kind = strings.ToUpper(string(tok.Value))
+		item, err := parseOperand(p)
+		if err != nil {
+			return nil, false, err
+		}
+		m.Item = item
+	default:
+		return nil, false, nil
+	}
+	region, err := parseInspectRegion(p)
+	if err != nil {
+		return nil, false, err
+	}
+	m.Region = region
+	return m, true, nil
+}
+
+// parseInspectReplaces parses one or more INSPECT REPLACING specifications.
+func parseInspectReplaces(p *parser) ([]*InspectReplace, error) {
+	first, ok, err := parseInspectReplace(p)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		tok, _, _ := p.peek()
+		return nil, UnexpectedKeywordError{Expected: []string{"CHARACTERS", "ALL", "LEADING", "FIRST"}, Actual: tok}
+	}
+	replaces := []*InspectReplace{first}
+	for {
+		r, ok, err := parseInspectReplace(p)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return replaces, nil
+		}
+		replaces = append(replaces, r)
+	}
+}
+
+// parseInspectReplace parses one REPLACING specification — CHARACTERS or
+// ( ALL | LEADING | FIRST ) operand, the BY replacement, and an optional region —
+// reporting ok false when the next token does not begin one.
+func parseInspectReplace(p *parser) (*InspectReplace, bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	r := &InspectReplace{Pos: tok.Pos}
+	switch {
+	case keywordIs(tok, "CHARACTERS"):
+		p.consume()
+		r.Kind = "CHARACTERS"
+	case keywordIs(tok, "ALL", "LEADING", "FIRST"):
+		p.consume()
+		r.Kind = strings.ToUpper(string(tok.Value))
+		item, err := parseOperand(p)
+		if err != nil {
+			return nil, false, err
+		}
+		r.Item = item
+	default:
+		return nil, false, nil
+	}
+	if _, err := p.expectKeyword("BY"); err != nil {
+		return nil, false, err
+	}
+	by, err := parseOperand(p)
+	if err != nil {
+		return nil, false, err
+	}
+	r.By = by
+	region, err := parseInspectRegion(p)
+	if err != nil {
+		return nil, false, err
+	}
+	r.Region = region
+	return r, true, nil
+}
+
+// parseInspectRegion parses the optional ( BEFORE | AFTER ) [ INITIAL ] operand
+// restriction on an INSPECT specification, returning nil when absent.
+func parseInspectRegion(p *parser) (*InspectRegion, error) {
+	tok, ok, err := p.acceptKeyword("BEFORE", "AFTER")
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	region := &InspectRegion{Pos: tok.Pos, Kind: strings.ToUpper(string(tok.Value))}
+	if init, err := p.peekKeyword("INITIAL"); err != nil {
+		return nil, err
+	} else if init {
+		p.consume()
+		region.Initial = true
+	}
+	operand, err := parseOperand(p)
+	if err != nil {
+		return nil, err
+	}
+	region.Operand = operand
+	return region, nil
+}
+
+// parseSearchStatement parses a SEARCH statement whose verb kw has already been read:
+// an optional ALL, the table identifier, an optional VARYING index, an optional
+// AT END body, one or more WHEN branches, and an optional END-SEARCH.
+func parseSearchStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &SearchStatement{Pos: kw.Pos}
+
+	if _, all, err := p.acceptKeyword("ALL"); err != nil {
+		return nil, err
+	} else if all {
+		stmt.All = true
+	}
+
+	target, err := parseIdentifierToken(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Target = target
+
+	if v, err := p.peekKeyword("VARYING"); err != nil {
+		return nil, err
+	} else if v {
+		p.consume()
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Varying = id
+	}
+
+	atEnd, err := acceptAtEnd(p)
+	if err != nil {
+		return nil, err
+	}
+	if atEnd {
+		stmt.HasAtEnd = true
+		body, err := parseStatementList(p, stopAtSearchBranch)
+		if err != nil {
+			return nil, err
+		}
+		stmt.AtEnd = body
+	}
+
+	for {
+		whenTok, ok, err := p.acceptKeyword("WHEN")
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		when, err := parseSearchWhen(p, whenTok)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Whens = append(stmt.Whens, when)
+	}
+	if len(stmt.Whens) == 0 {
+		tok, _, _ := p.peek()
+		return nil, UnexpectedKeywordError{Expected: []string{"WHEN"}, Actual: tok}
+	}
+
+	if end, err := p.peekKeyword("END-SEARCH"); err != nil {
+		return nil, err
+	} else if end {
+		p.consume()
+		stmt.EndSearch = true
+	}
+	return stmt, nil
+}
+
+// acceptAtEnd consumes an optional [ "AT" ] "END" lead-in, reporting whether it was
+// present. A bare "AT" must be followed by "END". END-SEARCH is a distinct token and
+// is not matched here.
+func acceptAtEnd(p *parser) (bool, error) {
+	if at, err := p.peekKeyword("AT"); err != nil {
+		return false, err
+	} else if at {
+		p.consume() // AT
+		if _, err := p.expectKeyword("END"); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if end, err := p.peekKeyword("END"); err != nil {
+		return false, err
+	} else if end {
+		p.consume()
+		return true, nil
+	}
+	return false, nil
+}
+
+// parseSearchWhen parses one SEARCH WHEN branch whose WHEN keyword whenTok has already
+// been read: the branch condition and its body.
+func parseSearchWhen(p *parser, whenTok Token) (*SearchWhen, error) {
+	cond, err := parseCondition(p)
+	if err != nil {
+		return nil, err
+	}
+	body, err := parseSearchBranch(p)
+	if err != nil {
+		return nil, err
+	}
+	return &SearchWhen{Pos: whenTok.Pos, Cond: cond, Body: body}, nil
+}
+
+// parseSearchBranch parses a SEARCH WHEN body: either the NEXT SENTENCE alternative —
+// yielding a single [NextSentenceStatement] — or a nested statement list stopping at
+// the branch's enclosing delimiters (stopAtSearchBranch). It mirrors parseIfBranch.
+func parseSearchBranch(p *parser) ([]Statement, error) {
+	isNext, err := p.peekKeyword("NEXT")
+	if err != nil {
+		return nil, err
+	}
+	if isNext {
+		next, _, _ := p.peek()
+		p.consume() // NEXT
+		if _, err := p.expectKeyword("SENTENCE"); err != nil {
+			return nil, err
+		}
+		return []Statement{&NextSentenceStatement{Pos: next.Pos}}, nil
+	}
+	return parseStatementList(p, stopAtSearchBranch)
+}
+
+// stopAtSearchBranch stops a SEARCH AT END or WHEN body at the next WHEN, any explicit
+// scope terminator (END-SEARCH, a nested END-IF …), a separator period, or end of
+// input. It mirrors [stopAtEvaluateBranch].
+func stopAtSearchBranch(p *parser) (bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return true, nil
+	}
+	return isPeriod(tok) || keywordIs(tok, "WHEN") || isScopeTerminator(tok), nil
+}
 
 // parseOperand parses an operand: an identifier or a literal (SPEC.md "operand").
 // A figurative constant (ZERO, SPACES, …) tokenizes as an identifier and so parses

@@ -712,6 +712,37 @@ start-statement  = "START" file-name
                        [ "KEY" [ "IS" ] relational-operator identifier ]
                        [ invalid-key ] [ "END-START" ]
 
+initialize-statement = "INITIALIZE" identifier { identifier }
+
+set-statement  = "SET" identifier { identifier }
+                     ( "TO" ( operand | "TRUE" | "FALSE" )
+                     | ( "UP" | "DOWN" ) "BY" operand )
+
+string-statement = "STRING"
+                     { operand { operand } "DELIMITED" [ "BY" ] ( operand | "SIZE" ) }
+                     "INTO" identifier [ [ "WITH" ] "POINTER" identifier ]
+                     [ overflow ] [ "END-STRING" ]
+
+unstring-statement = "UNSTRING" identifier
+                     [ "DELIMITED" [ "BY" ] [ "ALL" ] operand { "OR" [ "ALL" ] operand } ]
+                     "INTO" { identifier [ "DELIMITER" [ "IN" ] identifier ]
+                                         [ "COUNT" [ "IN" ] identifier ] }
+                     [ [ "WITH" ] "POINTER" identifier ] [ "TALLYING" [ "IN" ] identifier ]
+                     [ overflow ] [ "END-UNSTRING" ]
+
+inspect-statement = "INSPECT" identifier
+                     [ "TALLYING" { identifier "FOR"
+                         { ( "CHARACTERS" | ( "ALL" | "LEADING" ) operand ) [ region ] } } ]
+                     [ "REPLACING"
+                         { ( "CHARACTERS" "BY" operand [ region ]
+                           | ( "ALL" | "LEADING" | "FIRST" ) operand "BY" operand [ region ] ) } ]
+region = ( "BEFORE" | "AFTER" ) [ "INITIAL" ] operand
+
+search-statement = "SEARCH" [ "ALL" ] identifier
+                     [ "VARYING" identifier ] [ [ "AT" ] "END" { statement } ]
+                     { "WHEN" condition ( { statement } | "NEXT" "SENTENCE" ) }
+                     [ "END-SEARCH" ]
+
                                           « shared file I/O exception handlers »
 at-end       = [ "AT" ] "END" { statement }
                  [ "NOT" [ "AT" ] "END" { statement } ]
@@ -719,10 +750,15 @@ invalid-key  = "INVALID" [ "KEY" ] { statement }
                  [ "NOT" "INVALID" [ "KEY" ] { statement } ]
 end-of-page  = [ "AT" ] ( "END-OF-PAGE" | "EOP" ) { statement }
                  [ "NOT" [ "AT" ] ( "END-OF-PAGE" | "EOP" ) { statement } ]
+overflow     = [ "ON" ] "OVERFLOW" { statement }
+                 [ "NOT" [ "ON" ] "OVERFLOW" { statement } ]
 ```
 
-Other recognized verbs (grammar deferred to their stories): `INITIALIZE`,
-`SET`, `STRING`, `UNSTRING`, `INSPECT`, `SEARCH`, `CONTINUE`.
+The data-manipulation verbs above are parsed at a first-pass depth; the following
+sub-phrases remain deferred to a later story: `INSPECT … CONVERTING`; the SET
+pointer / `ADDRESS OF` and `ON`/`OFF` switch forms; `INITIALIZE … REPLACING` /
+`DEFAULT` / `WITH FILLER`; and the `SEARCH ALL` semantic constraints (a single WHEN
+of AND-joined equality tests).
 
 ```ebnf
 operand    = identifier | literal           « literal includes figurative-constant »

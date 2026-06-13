@@ -1017,6 +1017,18 @@ func printStatement(stmt Statement, depth int, next printerAction) printerAction
 		return printDeleteStatement(s, depth, next)
 	case *StartStatement:
 		return printStartStatement(s, depth, next)
+	case *InitializeStatement:
+		return printInitializeStatement(s, depth, next)
+	case *SetStatement:
+		return printSetStatement(s, depth, next)
+	case *StringStatement:
+		return printStringStatement(s, depth, next)
+	case *UnstringStatement:
+		return printUnstringStatement(s, depth, next)
+	case *InspectStatement:
+		return printInspectStatement(s, depth, next)
+	case *SearchStatement:
+		return printSearchStatement(s, depth, next)
 	case *GoToStatement:
 		return printGoToStatement(s, depth, next)
 	case *ContinueStatement:
@@ -1547,6 +1559,418 @@ func printStartStatement(stmt *StartStatement, depth int, next printerAction) pr
 		}
 		end := fileIOEndScope(stmt.EndStart, "END-START", stmt.Handler, depth, next)
 		return printExceptionPhrases(stmt.Handler, depth, end)
+	}
+}
+
+// printInitializeStatement prints an INITIALIZE statement on one line: the verb and
+// its receiving identifiers. A typed-nil statement, one with no receiver, or an
+// unprintable identifier is rejected with an [UnsupportedNodeError].
+func printInitializeStatement(stmt *InitializeStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || len(stmt.Targets) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "INITIALIZE")
+		for _, t := range stmt.Targets {
+			text, ok := identifierText(t)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: t})
+			}
+			pr.write(" " + text)
+		}
+		return next
+	}
+}
+
+// printSetStatement prints a SET statement on one line: the verb, the receivers, the
+// operation (TO, UP BY, or DOWN BY), and the value. A typed-nil statement, an
+// unsupported operation, a missing value, or an unprintable operand is rejected with
+// an [UnsupportedNodeError].
+func printSetStatement(stmt *SetStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || len(stmt.Targets) == 0 || stmt.Value == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		// Mode is an enum; an unsupported value would print invalid COBOL.
+		switch stmt.Mode {
+		case "TO", "UP BY", "DOWN BY":
+		default:
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "SET")
+		for _, t := range stmt.Targets {
+			text, ok := identifierText(t)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: t})
+			}
+			pr.write(" " + text)
+		}
+		val, ok := valueText(stmt.Value)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Value})
+		}
+		pr.write(" " + stmt.Mode + " " + val)
+		return next
+	}
+}
+
+// printStringStatement prints a STRING statement: the verb, each sending fragment
+// (its operands and DELIMITED BY delimiter), the INTO receiver, an optional WITH
+// POINTER phrase, the [NOT] ON OVERFLOW phrases (each on its own line), and an
+// optional END-STRING. A typed-nil statement, an empty/invalid fragment, a missing
+// receiver, or an unprintable operand is rejected with an [UnsupportedNodeError].
+func printStringStatement(stmt *StringStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || len(stmt.Sources) == 0 || stmt.Into == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "STRING")
+		for _, src := range stmt.Sources {
+			if src == nil || len(src.Operands) == 0 || src.Delimiter == nil {
+				return failPrint(UnsupportedNodeError{Node: stmt})
+			}
+			for _, op := range src.Operands {
+				text, ok := valueText(op)
+				if !ok {
+					return failPrint(UnsupportedNodeError{Node: op})
+				}
+				pr.write(" " + text)
+			}
+			delim, ok := valueText(src.Delimiter)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: src.Delimiter})
+			}
+			pr.write(" DELIMITED BY " + delim)
+		}
+		into, ok := identifierText(stmt.Into)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Into})
+		}
+		pr.write(" INTO " + into)
+		if stmt.Pointer != nil {
+			ptr, ok := identifierText(stmt.Pointer)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Pointer})
+			}
+			pr.write(" WITH POINTER " + ptr)
+		}
+		end := overflowEndScope(stmt.EndString, "END-STRING", stmt.Overflow, depth, next)
+		return printOverflowPhrases(stmt.Overflow, depth, end)
+	}
+}
+
+// printUnstringStatement prints an UNSTRING statement: the verb, the sending field,
+// an optional DELIMITED BY phrase, the INTO receivers (each with optional DELIMITER
+// IN / COUNT IN sub-receivers), optional WITH POINTER and TALLYING IN phrases, the
+// [NOT] ON OVERFLOW phrases, and an optional END-UNSTRING. A typed-nil statement, a
+// missing source/receiver, or an unprintable operand is rejected with an
+// [UnsupportedNodeError].
+func printUnstringStatement(stmt *UnstringStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.Source == nil || len(stmt.Into) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		src, ok := identifierText(stmt.Source)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Source})
+		}
+		pr.write(indent(depth) + "UNSTRING " + src)
+		if len(stmt.Delimiters) > 0 {
+			pr.write(" DELIMITED BY")
+			for i, d := range stmt.Delimiters {
+				if d == nil || d.Value == nil {
+					return failPrint(UnsupportedNodeError{Node: stmt})
+				}
+				if i > 0 {
+					pr.write(" OR")
+				}
+				if d.All {
+					pr.write(" ALL")
+				}
+				dv, ok := valueText(d.Value)
+				if !ok {
+					return failPrint(UnsupportedNodeError{Node: d.Value})
+				}
+				pr.write(" " + dv)
+			}
+		}
+		pr.write(" INTO")
+		for _, t := range stmt.Into {
+			if t == nil || t.Into == nil {
+				return failPrint(UnsupportedNodeError{Node: stmt})
+			}
+			it, ok := identifierText(t.Into)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: t.Into})
+			}
+			pr.write(" " + it)
+			if t.Delimiter != nil {
+				dt, ok := identifierText(t.Delimiter)
+				if !ok {
+					return failPrint(UnsupportedNodeError{Node: t.Delimiter})
+				}
+				pr.write(" DELIMITER IN " + dt)
+			}
+			if t.Count != nil {
+				ct, ok := identifierText(t.Count)
+				if !ok {
+					return failPrint(UnsupportedNodeError{Node: t.Count})
+				}
+				pr.write(" COUNT IN " + ct)
+			}
+		}
+		if stmt.Pointer != nil {
+			ptr, ok := identifierText(stmt.Pointer)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Pointer})
+			}
+			pr.write(" WITH POINTER " + ptr)
+		}
+		if stmt.Tallying != nil {
+			tl, ok := identifierText(stmt.Tallying)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Tallying})
+			}
+			pr.write(" TALLYING IN " + tl)
+		}
+		end := overflowEndScope(stmt.EndUnstring, "END-UNSTRING", stmt.Overflow, depth, next)
+		return printOverflowPhrases(stmt.Overflow, depth, end)
+	}
+}
+
+// onOverflowPresent reports whether the ON OVERFLOW phrase should be printed — the
+// flag is set or its body is non-empty. notOverflowPresent does the same for NOT ON
+// OVERFLOW. They mirror [SizeErrorPhrases.onSizeErrorPresent].
+func (ph OverflowPhrases) onOverflowPresent() bool {
+	return ph.HasOnOverflow || len(ph.OnOverflow) > 0
+}
+
+func (ph OverflowPhrases) notOverflowPresent() bool {
+	return ph.HasNotOnOverflow || len(ph.NotOnOverflow) > 0
+}
+
+// hasOverflow reports whether ph carries any [NOT] ON OVERFLOW phrase.
+func hasOverflow(ph OverflowPhrases) bool {
+	return ph.onOverflowPresent() || ph.notOverflowPresent()
+}
+
+// overflowEndScope threads an optional END-<verb> terminator for STRING/UNSTRING: it
+// joins the statement line with a space when no overflow phrase follows, or drops onto
+// its own line below the phrases (aligned with the verb) when one does. It mirrors
+// [fileIOEndScope].
+func overflowEndScope(present bool, terminator string, ph OverflowPhrases, depth int, next printerAction) printerAction {
+	if !present {
+		return next
+	}
+	sep := " "
+	if hasOverflow(ph) {
+		sep = "\n" + indent(depth)
+	}
+	return writeThen(sep+terminator, next)
+}
+
+// printOverflowPhrases prints the optional ON OVERFLOW and NOT ON OVERFLOW phrases
+// shared by STRING and UNSTRING: each phrase header on its own line at the statement's
+// depth, its imperative body one level deeper (the IF-branch layout). With no phrase
+// present it continues with next unchanged. It mirrors [printSizeErrorPhrases].
+func printOverflowPhrases(ph OverflowPhrases, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		tail := next
+		if ph.notOverflowPresent() {
+			tail = writeThen("\n"+indent(depth)+"NOT ON OVERFLOW",
+				printBranchStatementAt(ph.NotOnOverflow, 0, depth+1, tail))
+		}
+		if ph.onOverflowPresent() {
+			tail = writeThen("\n"+indent(depth)+"ON OVERFLOW",
+				printBranchStatementAt(ph.OnOverflow, 0, depth+1, tail))
+		}
+		return tail
+	}
+}
+
+// printInspectStatement prints an INSPECT statement on one line: the verb, the
+// inspected item, an optional TALLYING clause list, and an optional REPLACING clause
+// list. A typed-nil statement, a missing target, no clause, or an unprintable
+// operand is rejected with an [UnsupportedNodeError].
+func printInspectStatement(stmt *InspectStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.Target == nil || (len(stmt.Tallying) == 0 && len(stmt.Replacing) == 0) {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		target, ok := identifierText(stmt.Target)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Target})
+		}
+		pr.write(indent(depth) + "INSPECT " + target)
+		if len(stmt.Tallying) > 0 {
+			pr.write(" TALLYING")
+			for _, tally := range stmt.Tallying {
+				if tally == nil || tally.Count == nil || len(tally.Specs) == 0 {
+					return failPrint(UnsupportedNodeError{Node: stmt})
+				}
+				ct, ok := identifierText(tally.Count)
+				if !ok {
+					return failPrint(UnsupportedNodeError{Node: tally.Count})
+				}
+				pr.write(" " + ct + " FOR")
+				for _, spec := range tally.Specs {
+					text, ok := inspectMatchText(spec)
+					if !ok {
+						return failPrint(UnsupportedNodeError{Node: stmt})
+					}
+					pr.write(text)
+				}
+			}
+		}
+		if len(stmt.Replacing) > 0 {
+			pr.write(" REPLACING")
+			for _, repl := range stmt.Replacing {
+				text, ok := inspectReplaceText(repl)
+				if !ok {
+					return failPrint(UnsupportedNodeError{Node: stmt})
+				}
+				pr.write(text)
+			}
+		}
+		return next
+	}
+}
+
+// inspectMatchText renders one TALLYING … FOR specification, with a leading space:
+// " CHARACTERS" or " ALL <item>", plus an optional BEFORE/AFTER region.
+func inspectMatchText(m *InspectMatch) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	var s string
+	switch m.Kind {
+	case "CHARACTERS":
+		s = " CHARACTERS"
+	case "ALL", "LEADING":
+		item, ok := valueText(m.Item)
+		if !ok {
+			return "", false
+		}
+		s = " " + m.Kind + " " + item
+	default:
+		return "", false
+	}
+	region, ok := inspectRegionText(m.Region)
+	if !ok {
+		return "", false
+	}
+	return s + region, true
+}
+
+// inspectReplaceText renders one REPLACING specification, with a leading space:
+// " CHARACTERS BY <by>" or " ALL <item> BY <by>", plus an optional region.
+func inspectReplaceText(r *InspectReplace) (string, bool) {
+	if r == nil || r.By == nil {
+		return "", false
+	}
+	var s string
+	switch r.Kind {
+	case "CHARACTERS":
+		s = " CHARACTERS"
+	case "ALL", "LEADING", "FIRST":
+		item, ok := valueText(r.Item)
+		if !ok {
+			return "", false
+		}
+		s = " " + r.Kind + " " + item
+	default:
+		return "", false
+	}
+	by, ok := valueText(r.By)
+	if !ok {
+		return "", false
+	}
+	s += " BY " + by
+	region, ok := inspectRegionText(r.Region)
+	if !ok {
+		return "", false
+	}
+	return s + region, true
+}
+
+// inspectRegionText renders an optional BEFORE/AFTER [INITIAL] region with a leading
+// space, returning ("", true) when the region is absent.
+func inspectRegionText(r *InspectRegion) (string, bool) {
+	if r == nil {
+		return "", true
+	}
+	switch r.Kind {
+	case "BEFORE", "AFTER":
+	default:
+		return "", false
+	}
+	op, ok := valueText(r.Operand)
+	if !ok {
+		return "", false
+	}
+	s := " " + r.Kind
+	if r.Initial {
+		s += " INITIAL"
+	}
+	return s + " " + op, true
+}
+
+// printSearchStatement prints a SEARCH statement across multiple lines (the EVALUATE
+// layout): the header (verb, optional ALL, table, optional VARYING), an optional AT
+// END block, one WHEN <condition> branch per line with its body indented one level
+// deeper, and an optional END-SEARCH. A typed-nil statement, a missing target, no
+// WHEN branch, or an unprintable child is rejected with an [UnsupportedNodeError].
+func printSearchStatement(stmt *SearchStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.Target == nil || len(stmt.Whens) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		target, ok := identifierText(stmt.Target)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt.Target})
+		}
+		pr.write(indent(depth) + "SEARCH ")
+		if stmt.All {
+			pr.write("ALL ")
+		}
+		pr.write(target)
+		if stmt.Varying != nil {
+			v, ok := identifierText(stmt.Varying)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Varying})
+			}
+			pr.write(" VARYING " + v)
+		}
+		end := next
+		if stmt.EndSearch {
+			end = writeThen("\n"+indent(depth)+"END-SEARCH", next)
+		}
+		whens := printSearchWhenAt(stmt, 0, depth, end)
+		if stmt.HasAtEnd {
+			return writeThen("\n"+indent(depth)+"AT END",
+				printBranchStatementAt(stmt.AtEnd, 0, depth+1, whens))
+		}
+		return whens
+	}
+}
+
+// printSearchWhenAt prints the SEARCH WHEN branch at index i and chains to the next,
+// then to next once the branches are exhausted.
+func printSearchWhenAt(stmt *SearchStatement, i int, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(stmt.Whens) {
+			return next
+		}
+		when := stmt.Whens[i]
+		if when == nil || when.Cond == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		cond, ok := conditionText(when.Cond)
+		if !ok {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write("\n" + indent(depth) + "WHEN " + cond)
+		return printBranchStatementAt(when.Body, 0, depth+1, printSearchWhenAt(stmt, i+1, depth, next))
 	}
 }
 

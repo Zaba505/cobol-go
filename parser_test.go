@@ -2100,6 +2100,200 @@ func TestParser(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "initialize statement",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INITIALIZE A B.\n",
+			expected: dataManipFile([]*Sentence{
+				{
+					Pos: Pos{Line: 4, Column: 5},
+					Statements: []Statement{
+						&InitializeStatement{
+							Pos: Pos{Line: 4, Column: 5},
+							Targets: []*Identifier{
+								{Pos: Pos{Line: 4, Column: 16}, Name: &Word{Pos: Pos{Line: 4, Column: 16}, Value: "A"}},
+								{Pos: Pos{Line: 4, Column: 18}, Name: &Word{Pos: Pos{Line: 4, Column: 18}, Value: "B"}},
+							},
+						},
+					},
+				},
+			}),
+		},
+		{
+			name: "set statement forms",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SET I TO 1.\n" +
+				"    SET I UP BY 2.\n" +
+				"    SET D TO TRUE.\n",
+			expected: dataManipFile([]*Sentence{
+				{
+					Pos: Pos{Line: 4, Column: 5},
+					Statements: []Statement{
+						&SetStatement{
+							Pos:     Pos{Line: 4, Column: 5},
+							Targets: []*Identifier{{Pos: Pos{Line: 4, Column: 9}, Name: &Word{Pos: Pos{Line: 4, Column: 9}, Value: "I"}}},
+							Mode:    "TO",
+							Value:   &NumericLiteral{Pos: Pos{Line: 4, Column: 14}, Value: "1"},
+						},
+					},
+				},
+				{
+					Pos: Pos{Line: 5, Column: 5},
+					Statements: []Statement{
+						&SetStatement{
+							Pos:     Pos{Line: 5, Column: 5},
+							Targets: []*Identifier{{Pos: Pos{Line: 5, Column: 9}, Name: &Word{Pos: Pos{Line: 5, Column: 9}, Value: "I"}}},
+							Mode:    "UP BY",
+							Value:   &NumericLiteral{Pos: Pos{Line: 5, Column: 17}, Value: "2"},
+						},
+					},
+				},
+				{
+					Pos: Pos{Line: 6, Column: 5},
+					Statements: []Statement{
+						&SetStatement{
+							Pos:     Pos{Line: 6, Column: 5},
+							Targets: []*Identifier{{Pos: Pos{Line: 6, Column: 9}, Name: &Word{Pos: Pos{Line: 6, Column: 9}, Value: "D"}}},
+							Mode:    "TO",
+							Value:   &Word{Pos: Pos{Line: 6, Column: 14}, Value: "TRUE"},
+						},
+					},
+				},
+			}),
+		},
+		{
+			name: "string statement",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STRING WS-A WS-B DELIMITED BY SIZE INTO WS-R.\n",
+			expected: dataManipFile([]*Sentence{
+				{
+					Pos: Pos{Line: 4, Column: 5},
+					Statements: []Statement{
+						&StringStatement{
+							Pos: Pos{Line: 4, Column: 5},
+							Sources: []*StringSource{
+								{
+									Pos: Pos{Line: 4, Column: 12},
+									Operands: []Type{
+										&Identifier{Pos: Pos{Line: 4, Column: 12}, Name: &Word{Pos: Pos{Line: 4, Column: 12}, Value: "WS-A"}},
+										&Identifier{Pos: Pos{Line: 4, Column: 17}, Name: &Word{Pos: Pos{Line: 4, Column: 17}, Value: "WS-B"}},
+									},
+									Delimiter: &Word{Pos: Pos{Line: 4, Column: 35}, Value: "SIZE"},
+								},
+							},
+							Into: &Identifier{Pos: Pos{Line: 4, Column: 45}, Name: &Word{Pos: Pos{Line: 4, Column: 45}, Value: "WS-R"}},
+						},
+					},
+				},
+			}),
+		},
+		{
+			name: "unstring statement",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    UNSTRING WS-S DELIMITED BY \",\" INTO WS-A WS-B.\n",
+			expected: dataManipFile([]*Sentence{
+				{
+					Pos: Pos{Line: 4, Column: 5},
+					Statements: []Statement{
+						&UnstringStatement{
+							Pos:    Pos{Line: 4, Column: 5},
+							Source: &Identifier{Pos: Pos{Line: 4, Column: 14}, Name: &Word{Pos: Pos{Line: 4, Column: 14}, Value: "WS-S"}},
+							Delimiters: []*UnstringDelimiter{
+								{Pos: Pos{Line: 4, Column: 32}, Value: &StringLiteral{Pos: Pos{Line: 4, Column: 32}, Value: "\",\""}},
+							},
+							Into: []*UnstringTarget{
+								{Pos: Pos{Line: 4, Column: 41}, Into: &Identifier{Pos: Pos{Line: 4, Column: 41}, Name: &Word{Pos: Pos{Line: 4, Column: 41}, Value: "WS-A"}}},
+								{Pos: Pos{Line: 4, Column: 46}, Into: &Identifier{Pos: Pos{Line: 4, Column: 46}, Name: &Word{Pos: Pos{Line: 4, Column: 46}, Value: "WS-B"}}},
+							},
+						},
+					},
+				},
+			}),
+		},
+		{
+			name: "inspect tallying and replacing statements",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INSPECT WS-T TALLYING WS-C FOR ALL \"A\".\n" +
+				"    INSPECT WS-T REPLACING CHARACTERS BY \" \".\n",
+			expected: dataManipFile([]*Sentence{
+				{
+					Pos: Pos{Line: 4, Column: 5},
+					Statements: []Statement{
+						&InspectStatement{
+							Pos:    Pos{Line: 4, Column: 5},
+							Target: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "WS-T"}},
+							Tallying: []*InspectTally{
+								{
+									Pos:   Pos{Line: 4, Column: 27},
+									Count: &Identifier{Pos: Pos{Line: 4, Column: 27}, Name: &Word{Pos: Pos{Line: 4, Column: 27}, Value: "WS-C"}},
+									Specs: []*InspectMatch{
+										{Pos: Pos{Line: 4, Column: 36}, Kind: "ALL", Item: &StringLiteral{Pos: Pos{Line: 4, Column: 40}, Value: "\"A\""}},
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Pos: Pos{Line: 5, Column: 5},
+					Statements: []Statement{
+						&InspectStatement{
+							Pos:    Pos{Line: 5, Column: 5},
+							Target: &Identifier{Pos: Pos{Line: 5, Column: 13}, Name: &Word{Pos: Pos{Line: 5, Column: 13}, Value: "WS-T"}},
+							Replacing: []*InspectReplace{
+								{Pos: Pos{Line: 5, Column: 28}, Kind: "CHARACTERS", By: &StringLiteral{Pos: Pos{Line: 5, Column: 42}, Value: "\" \""}},
+							},
+						},
+					},
+				},
+			}),
+		},
+		{
+			name: "search statement",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SEARCH WS-T WHEN WS-X = 1 DISPLAY \"f\" END-SEARCH.\n",
+			expected: dataManipFile([]*Sentence{
+				{
+					Pos: Pos{Line: 4, Column: 5},
+					Statements: []Statement{
+						&SearchStatement{
+							Pos:    Pos{Line: 4, Column: 5},
+							Target: &Identifier{Pos: Pos{Line: 4, Column: 12}, Name: &Word{Pos: Pos{Line: 4, Column: 12}, Value: "WS-T"}},
+							Whens: []*SearchWhen{
+								{
+									Pos: Pos{Line: 4, Column: 17},
+									Cond: &RelationCondition{
+										Pos:   Pos{Line: 4, Column: 22},
+										Left:  &Identifier{Pos: Pos{Line: 4, Column: 22}, Name: &Word{Pos: Pos{Line: 4, Column: 22}, Value: "WS-X"}},
+										Op:    "=",
+										Right: &NumericLiteral{Pos: Pos{Line: 4, Column: 29}, Value: "1"},
+									},
+									Body: []Statement{
+										&DisplayStatement{
+											Pos:      Pos{Line: 4, Column: 31},
+											Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 39}, Value: "\"f\""}},
+										},
+									},
+								},
+							},
+							EndSearch: true,
+						},
+					},
+				},
+			}),
+		},
 	}
 
 	for _, tc := range testCases {
@@ -2111,6 +2305,36 @@ func TestParser(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tc.expected, f)
 		})
+	}
+}
+
+// dataManipFile wraps procedure-division sentences in the standard single-paragraph
+// program scaffold (program-name P) shared by the data-manipulation parser cases.
+func dataManipFile(sentences []*Sentence) *File {
+	return &File{
+		Programs: []*Program{
+			{
+				Pos: Pos{Line: 1, Column: 1},
+				Divisions: []Division{
+					&IdentificationDivision{
+						Pos: Pos{Line: 1, Column: 1},
+						ProgramID: &ProgramID{
+							Pos:  Pos{Line: 2, Column: 1},
+							Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+						},
+					},
+					&ProcedureDivision{
+						Pos: Pos{Line: 3, Column: 1},
+						Paragraphs: []*Paragraph{
+							{
+								Pos:       Pos{Line: 4, Column: 5},
+								Sentences: sentences,
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -2703,6 +2927,54 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedKeywordError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 6, Column: 16}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "set without a connector",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SET I BY 1.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 11}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "string without into",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    STRING WS-A DELIMITED BY SIZE.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 34}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "inspect without tallying or replacing",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INSPECT WS-T.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 17}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "search without when",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SEARCH WS-T END-SEARCH.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 17}, target.Actual.Pos)
 			},
 		},
 	}
