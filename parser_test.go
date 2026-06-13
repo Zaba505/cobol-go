@@ -1537,6 +1537,267 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "open statement with modes and options",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    OPEN INPUT F-A REVERSED OUTPUT F-B I-O F-C EXTEND F-D WITH NO REWIND.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&OpenStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Groups: []*OpenGroup{
+															{Pos: Pos{Line: 4, Column: 10}, Mode: "INPUT", Files: []*OpenFile{
+																{Pos: Pos{Line: 4, Column: 16}, Name: &Word{Pos: Pos{Line: 4, Column: 16}, Value: "F-A"}, Option: "REVERSED"},
+															}},
+															{Pos: Pos{Line: 4, Column: 29}, Mode: "OUTPUT", Files: []*OpenFile{
+																{Pos: Pos{Line: 4, Column: 36}, Name: &Word{Pos: Pos{Line: 4, Column: 36}, Value: "F-B"}},
+															}},
+															{Pos: Pos{Line: 4, Column: 40}, Mode: "I-O", Files: []*OpenFile{
+																{Pos: Pos{Line: 4, Column: 44}, Name: &Word{Pos: Pos{Line: 4, Column: 44}, Value: "F-C"}},
+															}},
+															{Pos: Pos{Line: 4, Column: 48}, Mode: "EXTEND", Files: []*OpenFile{
+																{Pos: Pos{Line: 4, Column: 55}, Name: &Word{Pos: Pos{Line: 4, Column: 55}, Value: "F-D"}, Option: "NO REWIND"},
+															}},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "close statement with options",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CLOSE F-A WITH LOCK F-B F-C FOR REMOVAL.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&CloseStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Files: []*CloseFile{
+															{Pos: Pos{Line: 4, Column: 11}, Name: &Word{Pos: Pos{Line: 4, Column: 11}, Value: "F-A"}, Option: "LOCK"},
+															{Pos: Pos{Line: 4, Column: 25}, Name: &Word{Pos: Pos{Line: 4, Column: 25}, Value: "F-B"}},
+															{Pos: Pos{Line: 4, Column: 29}, Name: &Word{Pos: Pos{Line: 4, Column: 29}, Value: "F-C"}, Option: "REMOVAL"},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "read statement with at end and not at end",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    READ F-A NEXT RECORD INTO WS-X AT END DISPLAY \"e\" NOT AT END DISPLAY \"n\" END-READ.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ReadStatement{
+														Pos:       Pos{Line: 4, Column: 5},
+														File:      &Word{Pos: Pos{Line: 4, Column: 10}, Value: "F-A"},
+														Direction: "NEXT",
+														Record:    true,
+														Into:      &Identifier{Pos: Pos{Line: 4, Column: 31}, Name: &Word{Pos: Pos{Line: 4, Column: 31}, Value: "WS-X"}},
+														Handler: ExceptionPhrases{
+															Kind:  "AT END",
+															HasOn: true,
+															On: []Statement{
+																&DisplayStatement{Pos: Pos{Line: 4, Column: 43}, Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 51}, Value: "\"e\""}}},
+															},
+															HasNotOn: true,
+															NotOn: []Statement{
+																&DisplayStatement{Pos: Pos{Line: 4, Column: 66}, Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 74}, Value: "\"n\""}}},
+															},
+														},
+														EndRead: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "write statement with advancing and invalid key",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    WRITE REC FROM WS-X AFTER ADVANCING 2 LINES INVALID KEY DISPLAY \"d\" END-WRITE.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&WriteStatement{
+														Pos:       Pos{Line: 4, Column: 5},
+														Record:    &Word{Pos: Pos{Line: 4, Column: 11}, Value: "REC"},
+														From:      &Identifier{Pos: Pos{Line: 4, Column: 20}, Name: &Word{Pos: Pos{Line: 4, Column: 20}, Value: "WS-X"}},
+														Advancing: &AdvancingPhrase{Pos: Pos{Line: 4, Column: 25}, When: "AFTER", Amount: &NumericLiteral{Pos: Pos{Line: 4, Column: 41}, Value: "2"}},
+														Handler: ExceptionPhrases{
+															Kind:  "INVALID KEY",
+															HasOn: true,
+															On: []Statement{
+																&DisplayStatement{Pos: Pos{Line: 4, Column: 61}, Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 69}, Value: "\"d\""}}},
+															},
+														},
+														EndWrite: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "start statement with key relational operator",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    START F-A KEY >= CUST-ID INVALID KEY DISPLAY \"x\" END-START.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&StartStatement{
+														Pos:  Pos{Line: 4, Column: 5},
+														File: &Word{Pos: Pos{Line: 4, Column: 11}, Value: "F-A"},
+														Key:  &StartKey{Pos: Pos{Line: 4, Column: 15}, Op: ">=", Name: &Identifier{Pos: Pos{Line: 4, Column: 22}, Name: &Word{Pos: Pos{Line: 4, Column: 22}, Value: "CUST-ID"}}},
+														Handler: ExceptionPhrases{
+															Kind:  "INVALID KEY",
+															HasOn: true,
+															On: []Statement{
+																&DisplayStatement{Pos: Pos{Line: 4, Column: 42}, Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 50}, Value: "\"x\""}}},
+															},
+														},
+														EndStart: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "procedure division using and returning phrases",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. LINK.\n" +
@@ -2329,6 +2590,102 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedKeywordError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 6, Column: 9}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "OPEN without an open-mode group",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    OPEN F-A.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 10}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "OPEN mode group with no file-name",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    OPEN INPUT OUTPUT F-B.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 16}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "READ AT not followed by END",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    READ F-A AT FOO.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 17}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "READ NOT phrase condition does not match the handler",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    READ F-A AT END CONTINUE NOT INVALID KEY CONTINUE.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 34}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "START KEY without a relational operator",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    START F-A KEY CUST-ID.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 19}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "READ file-name position holds a reserved keyword",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    READ INTO WS-X.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 10}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "OPEN file-name position holds an option keyword",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    OPEN INPUT REVERSED CUST-FILE.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 16}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "CLOSE WITH not followed by LOCK or NO REWIND",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CLOSE F-A WITH.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 19}, target.Actual.Pos)
 			},
 		},
 		{

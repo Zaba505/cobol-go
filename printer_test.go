@@ -752,6 +752,145 @@ func TestPrinter(t *testing.T) {
 				"    CALL WS-PROG USING BY REFERENCE WS-A BY CONTENT \"lit\" WS-B RETURNING WS-RC END-CALL.\n",
 		},
 		{
+			name: "procedure division file io",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "P"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										{Statements: []Statement{&OpenStatement{Groups: []*OpenGroup{
+											{Mode: "INPUT", Files: []*OpenFile{{Name: &Word{Value: "F-A"}, Option: "REVERSED"}}},
+											{Mode: "OUTPUT", Files: []*OpenFile{{Name: &Word{Value: "F-B"}}}},
+											{Mode: "I-O", Files: []*OpenFile{{Name: &Word{Value: "F-C"}}}},
+											{Mode: "EXTEND", Files: []*OpenFile{{Name: &Word{Value: "F-D"}, Option: "NO REWIND"}}},
+										}}}},
+										{Statements: []Statement{&CloseStatement{Files: []*CloseFile{
+											{Name: &Word{Value: "F-A"}, Option: "LOCK"},
+											{Name: &Word{Value: "F-B"}},
+											{Name: &Word{Value: "F-C"}, Option: "REMOVAL"},
+										}}}},
+										{Statements: []Statement{&ReadStatement{
+											File:      &Word{Value: "F-A"},
+											Direction: "NEXT",
+											Record:    true,
+											Into:      &Identifier{Name: &Word{Value: "WS-X"}},
+											Handler: ExceptionPhrases{
+												Kind:     "AT END",
+												HasOn:    true,
+												On:       []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"e"`}}}},
+												HasNotOn: true,
+												NotOn:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"n"`}}}},
+											},
+											EndRead: true,
+										}}},
+										{Statements: []Statement{&ReadStatement{
+											File: &Word{Value: "F-A"},
+											Key:  &Identifier{Name: &Word{Value: "WS-K"}},
+											Handler: ExceptionPhrases{
+												Kind:  "INVALID KEY",
+												HasOn: true,
+												On:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"k"`}}}},
+											},
+										}}},
+										{Statements: []Statement{&WriteStatement{
+											Record:    &Word{Value: "REC"},
+											From:      &Identifier{Name: &Word{Value: "WS-X"}},
+											Advancing: &AdvancingPhrase{When: "AFTER", Amount: &NumericLiteral{Value: "2"}},
+											Handler: ExceptionPhrases{
+												Kind:  "AT END-OF-PAGE",
+												HasOn: true,
+												On:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"p"`}}}},
+											},
+											EndWrite: true,
+										}}},
+										{Statements: []Statement{&WriteStatement{
+											Record:    &Word{Value: "REC"},
+											Advancing: &AdvancingPhrase{When: "BEFORE", Page: true},
+											Handler: ExceptionPhrases{
+												Kind:  "INVALID KEY",
+												HasOn: true,
+												On:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"d"`}}}},
+											},
+											EndWrite: true,
+										}}},
+										{Statements: []Statement{&RewriteStatement{
+											Record: &Word{Value: "REC"},
+											From:   &Identifier{Name: &Word{Value: "WS-X"}},
+											Handler: ExceptionPhrases{
+												Kind:  "INVALID KEY",
+												HasOn: true,
+												On:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"m"`}}}},
+											},
+											EndRewrite: true,
+										}}},
+										{Statements: []Statement{&DeleteStatement{
+											File:   &Word{Value: "F-A"},
+											Record: true,
+											Handler: ExceptionPhrases{
+												Kind:  "INVALID KEY",
+												HasOn: true,
+												On:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"x"`}}}},
+											},
+											EndDelete: true,
+										}}},
+										{Statements: []Statement{&StartStatement{
+											File: &Word{Value: "F-A"},
+											Key:  &StartKey{Op: ">", Name: &Identifier{Name: &Word{Value: "WS-K"}}},
+											Handler: ExceptionPhrases{
+												Kind:  "INVALID KEY",
+												HasOn: true,
+												On:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"s"`}}}},
+											},
+											EndStart: true,
+										}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    OPEN INPUT F-A REVERSED OUTPUT F-B I-O F-C EXTEND F-D WITH NO REWIND.\n" +
+				"    CLOSE F-A WITH LOCK F-B F-C FOR REMOVAL.\n" +
+				"    READ F-A NEXT RECORD INTO WS-X\n" +
+				"    AT END\n" +
+				"        DISPLAY \"e\"\n" +
+				"    NOT AT END\n" +
+				"        DISPLAY \"n\"\n" +
+				"    END-READ.\n" +
+				"    READ F-A KEY WS-K\n" +
+				"    INVALID KEY\n" +
+				"        DISPLAY \"k\".\n" +
+				"    WRITE REC FROM WS-X AFTER ADVANCING 2 LINES\n" +
+				"    AT END-OF-PAGE\n" +
+				"        DISPLAY \"p\"\n" +
+				"    END-WRITE.\n" +
+				"    WRITE REC BEFORE ADVANCING PAGE\n" +
+				"    INVALID KEY\n" +
+				"        DISPLAY \"d\"\n" +
+				"    END-WRITE.\n" +
+				"    REWRITE REC FROM WS-X\n" +
+				"    INVALID KEY\n" +
+				"        DISPLAY \"m\"\n" +
+				"    END-REWRITE.\n" +
+				"    DELETE F-A RECORD\n" +
+				"    INVALID KEY\n" +
+				"        DISPLAY \"x\"\n" +
+				"    END-DELETE.\n" +
+				"    START F-A KEY > WS-K\n" +
+				"    INVALID KEY\n" +
+				"        DISPLAY \"s\"\n" +
+				"    END-START.\n",
+		},
+		{
 			name: "procedure header using and returning",
 			input: &File{
 				Programs: []*Program{
@@ -1105,6 +1244,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_evaluate_cob", fixture: "procedure_evaluate.cob"},
 		{name: "procedure_control_flow_cob", fixture: "procedure_control_flow.cob"},
 		{name: "procedure_call_cob", fixture: "procedure_call.cob"},
+		{name: "procedure_file_io_cob", fixture: "procedure_file_io.cob"},
 		{name: "procedure_sections_cob", fixture: "procedure_sections.cob"},
 		{name: "program_linkage_cob", fixture: "program_linkage.cob"},
 		{name: "full_program_cob", fixture: "full_program.cob"},
@@ -1441,6 +1581,53 @@ func clearStatementPos(stmt Statement) {
 		s.Pos = Pos{}
 	case *NextSentenceStatement:
 		s.Pos = Pos{}
+	case *OpenStatement:
+		s.Pos = Pos{}
+		for _, g := range s.Groups {
+			g.Pos = Pos{}
+			for _, fl := range g.Files {
+				fl.Pos = Pos{}
+				clearWordPos(fl.Name)
+			}
+		}
+	case *CloseStatement:
+		s.Pos = Pos{}
+		for _, fl := range s.Files {
+			fl.Pos = Pos{}
+			clearWordPos(fl.Name)
+		}
+	case *ReadStatement:
+		s.Pos = Pos{}
+		clearWordPos(s.File)
+		clearIdentifierPos(s.Into)
+		clearIdentifierPos(s.Key)
+		clearExceptionPos(s.Handler)
+	case *WriteStatement:
+		s.Pos = Pos{}
+		clearWordPos(s.Record)
+		clearIdentifierPos(s.From)
+		if s.Advancing != nil {
+			s.Advancing.Pos = Pos{}
+			clearTypePos(s.Advancing.Amount)
+		}
+		clearExceptionPos(s.Handler)
+	case *RewriteStatement:
+		s.Pos = Pos{}
+		clearWordPos(s.Record)
+		clearIdentifierPos(s.From)
+		clearExceptionPos(s.Handler)
+	case *DeleteStatement:
+		s.Pos = Pos{}
+		clearWordPos(s.File)
+		clearExceptionPos(s.Handler)
+	case *StartStatement:
+		s.Pos = Pos{}
+		clearWordPos(s.File)
+		if s.Key != nil {
+			s.Key.Pos = Pos{}
+			clearIdentifierPos(s.Key.Name)
+		}
+		clearExceptionPos(s.Handler)
 	}
 }
 
@@ -1451,6 +1638,17 @@ func clearSizeErrorPos(ph SizeErrorPhrases) {
 		clearStatementPos(st)
 	}
 	for _, st := range ph.NotOnSizeError {
+		clearStatementPos(st)
+	}
+}
+
+// clearExceptionPos zeroes every Pos within a file I/O statement's exception
+// handler phrase bodies, so round-trip comparisons ignore printer-chosen positions.
+func clearExceptionPos(ph ExceptionPhrases) {
+	for _, st := range ph.On {
+		clearStatementPos(st)
+	}
+	for _, st := range ph.NotOn {
 		clearStatementPos(st)
 	}
 }
@@ -2357,6 +2555,89 @@ func TestPrinterErrors(t *testing.T) {
 				},
 				Nested: []*Program{nil},
 			}}},
+		},
+		{
+			name: "open group with no files",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&OpenStatement{Groups: []*OpenGroup{{Mode: "INPUT"}}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "open group with unsupported mode",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&OpenStatement{Groups: []*OpenGroup{{Mode: "SIDEWAYS", Files: []*OpenFile{{Name: &Word{Value: "F-A"}}}}}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "exception handler with unsupported kind",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&ReadStatement{
+							File:    &Word{Value: "F-A"},
+							Handler: ExceptionPhrases{Kind: "AT MIDDLE", HasOn: true, On: []Statement{&ContinueStatement{}}},
+						},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "open file with unsupported option",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&OpenStatement{Groups: []*OpenGroup{{Mode: "INPUT", Files: []*OpenFile{{Name: &Word{Value: "F-A"}, Option: "BOGUS"}}}}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "close file with unsupported option",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&CloseStatement{Files: []*CloseFile{{Name: &Word{Value: "F-A"}, Option: "BOGUS"}}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "read with unsupported direction",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&ReadStatement{File: &Word{Value: "F-A"}, Direction: "SIDEWAYS"},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "write advancing with unsupported timing",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&WriteStatement{Record: &Word{Value: "REC"}, Advancing: &AdvancingPhrase{When: "SIDEWAYS"}},
+					}}}},
+				}},
+			}}}},
+		},
+		{
+			name: "start key missing relational operator",
+			input: &File{Programs: []*Program{{Divisions: []Division{
+				&ProcedureDivision{Paragraphs: []*Paragraph{
+					{Sentences: []*Sentence{{Statements: []Statement{
+						&StartStatement{File: &Word{Value: "F-A"}, Key: &StartKey{Name: &Identifier{Name: &Word{Value: "K"}}}},
+					}}}},
+				}},
+			}}}},
 		},
 	}
 

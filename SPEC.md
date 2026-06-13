@@ -692,11 +692,37 @@ go-to-statement  = "GO" [ "TO" ] procedure-name
 
 on-size-error = [ "ON" ] "SIZE" "ERROR" { statement }
               [ "NOT" [ "ON" ] "SIZE" "ERROR" { statement } ]
+
+open-statement   = "OPEN" { ( "INPUT" | "OUTPUT" | "I-O" | "EXTEND" )
+                            { file-name [ "REVERSED" | [ "WITH" ] "NO" "REWIND" ] } }
+close-statement  = "CLOSE" { file-name [ [ "WITH" ] ( "LOCK" | "NO" "REWIND" )
+                                       | "FOR" "REMOVAL" ] }
+read-statement   = "READ" file-name [ "NEXT" | "PREVIOUS" ] [ "RECORD" ]
+                       [ "INTO" identifier ] [ "KEY" [ "IS" ] identifier ]
+                       [ at-end | invalid-key ] [ "END-READ" ]
+write-statement  = "WRITE" record-name [ "FROM" identifier ]
+                       [ ( "BEFORE" | "AFTER" ) [ "ADVANCING" ]
+                         ( ( identifier | integer ) [ "LINE" | "LINES" ] | "PAGE" ) ]
+                       [ end-of-page | invalid-key ] [ "END-WRITE" ]
+rewrite-statement = "REWRITE" record-name [ "FROM" identifier ]
+                       [ invalid-key ] [ "END-REWRITE" ]
+delete-statement = "DELETE" file-name [ "RECORD" ]
+                       [ invalid-key ] [ "END-DELETE" ]
+start-statement  = "START" file-name
+                       [ "KEY" [ "IS" ] relational-operator identifier ]
+                       [ invalid-key ] [ "END-START" ]
+
+                                          « shared file I/O exception handlers »
+at-end       = [ "AT" ] "END" { statement }
+                 [ "NOT" [ "AT" ] "END" { statement } ]
+invalid-key  = "INVALID" [ "KEY" ] { statement }
+                 [ "NOT" "INVALID" [ "KEY" ] { statement } ]
+end-of-page  = [ "AT" ] ( "END-OF-PAGE" | "EOP" ) { statement }
+                 [ "NOT" [ "AT" ] ( "END-OF-PAGE" | "EOP" ) { statement } ]
 ```
 
 Other recognized verbs (grammar deferred to their stories): `INITIALIZE`,
-`SET`, `STRING`, `UNSTRING`, `INSPECT`, `SEARCH`, `OPEN`, `CLOSE`, `READ`,
-`WRITE`, `REWRITE`, `DELETE`, `START`, `CONTINUE`.
+`SET`, `STRING`, `UNSTRING`, `INSPECT`, `SEARCH`, `CONTINUE`.
 
 ```ebnf
 operand    = identifier | literal           « literal includes figurative-constant »
