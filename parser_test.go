@@ -1945,6 +1945,32 @@ func TestParserErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "reserved word rejected where a receiver is required",
+			// "ON" cannot stand in for the receiver after the TO connector.
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    ADD A TO ON SIZE ERROR CONTINUE END-ADD.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 14}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "reserved word rejected where a remainder target is required",
+			// "ON" cannot stand in for the REMAINDER data-name.
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. HELLO.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    DIVIDE A INTO B GIVING C REMAINDER ON SIZE ERROR CONTINUE END-DIVIDE.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 40}, target.Actual.Pos)
+			},
+		},
+		{
 			name: "non-identifier where a statement is expected",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. HELLO.\n" +

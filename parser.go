@@ -4299,7 +4299,7 @@ func parseArithmeticStatement(p *parser, kw Token) (Statement, error) {
 			}
 			if remainder {
 				p.consume()
-				id, err := parseIdentifierToken(p)
+				id, err := parseReceiverIdentifier(p)
 				if err != nil {
 					return nil, err
 				}
@@ -4337,6 +4337,20 @@ func parseArithmeticStatement(p *parser, kw Token) (Statement, error) {
 func parseArithmeticReceivers(p *parser) ([]*ArithmeticTarget, error) {
 	var targets []*ArithmeticTarget
 	for {
+		// A receiver data-name is required as the first element and continues the
+		// list only while the next token can start an operand; reject a reserved
+		// verb, scope terminator, or phrase keyword standing in for a data-name.
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !isOperandStart(tok) {
+			if len(targets) == 0 {
+				return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+			}
+			return targets, nil
+		}
+
 		id, err := parseIdentifierToken(p)
 		if err != nil {
 			return nil, err
@@ -4351,15 +4365,21 @@ func parseArithmeticReceivers(p *parser) ([]*ArithmeticTarget, error) {
 			t.Rounded = true
 		}
 		targets = append(targets, t)
-
-		tok, err, ok := p.peek()
-		if err != nil {
-			return nil, err
-		}
-		if !ok || !isOperandStart(tok) {
-			return targets, nil
-		}
 	}
+}
+
+// parseReceiverIdentifier parses a single data-name in a position that requires one
+// (the DIVIDE REMAINDER target), rejecting a reserved verb, scope terminator, or
+// phrase keyword standing in for the data-name before consuming it.
+func parseReceiverIdentifier(p *parser) (*Identifier, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok || !isOperandStart(tok) {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+	}
+	return parseIdentifierToken(p)
 }
 
 // parseSizeErrorPhrases parses the optional [ON] SIZE ERROR and NOT [ON] SIZE ERROR
