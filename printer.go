@@ -1003,6 +1003,20 @@ func printStatement(stmt Statement, depth int, next printerAction) printerAction
 		return printEvaluateStatement(s, depth, next)
 	case *CallStatement:
 		return printCallStatement(s, depth, next)
+	case *OpenStatement:
+		return printOpenStatement(s, depth, next)
+	case *CloseStatement:
+		return printCloseStatement(s, depth, next)
+	case *ReadStatement:
+		return printReadStatement(s, depth, next)
+	case *WriteStatement:
+		return printWriteStatement(s, depth, next)
+	case *RewriteStatement:
+		return printRewriteStatement(s, depth, next)
+	case *DeleteStatement:
+		return printDeleteStatement(s, depth, next)
+	case *StartStatement:
+		return printStartStatement(s, depth, next)
 	case *GoToStatement:
 		return printGoToStatement(s, depth, next)
 	case *ContinueStatement:
@@ -1254,6 +1268,273 @@ func printSizeErrorPhrases(ph SizeErrorPhrases, depth int, next printerAction) p
 				printBranchStatementAt(ph.OnSizeError, 0, depth+1, tail))
 		}
 		return tail
+	}
+}
+
+// onPresent reports whether the positive exception handler should be printed — it
+// carries statements, or it was explicitly present but empty (HasOn) — so an empty
+// AT END/INVALID KEY/AT END-OF-PAGE round-trips without dropping its header.
+// notPresent does the same for the NOT counterpart. They mirror
+// [SizeErrorPhrases.onSizeErrorPresent].
+func (ph ExceptionPhrases) onPresent() bool  { return ph.HasOn || len(ph.On) > 0 }
+func (ph ExceptionPhrases) notPresent() bool { return ph.HasNotOn || len(ph.NotOn) > 0 }
+
+// hasException reports whether ph carries any exception handler phrase.
+func hasException(ph ExceptionPhrases) bool {
+	return ph.Kind != "" && (ph.onPresent() || ph.notPresent())
+}
+
+// printExceptionPhrases prints the optional file I/O exception handler and its NOT
+// counterpart shared by READ/WRITE/REWRITE/DELETE/START: each header (from ph.Kind,
+// e.g. "AT END", "INVALID KEY", "AT END-OF-PAGE") on its own line at the statement's
+// depth, its imperative body one level deeper (the IF-branch layout). With no phrase
+// present it continues with next unchanged. It mirrors [printSizeErrorPhrases].
+func printExceptionPhrases(ph ExceptionPhrases, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if ph.Kind == "" {
+			return next
+		}
+		tail := next
+		if ph.notPresent() {
+			tail = writeThen("\n"+indent(depth)+"NOT "+ph.Kind,
+				printBranchStatementAt(ph.NotOn, 0, depth+1, tail))
+		}
+		if ph.onPresent() {
+			tail = writeThen("\n"+indent(depth)+ph.Kind,
+				printBranchStatementAt(ph.On, 0, depth+1, tail))
+		}
+		return tail
+	}
+}
+
+// fileIOEndScope threads an optional END-<verb> scope terminator: it joins the
+// statement line with a space when no exception phrase follows, or drops onto its
+// own line below the phrases (aligned with the verb) when one does — mirroring the
+// arithmetic statements' END-<verb> placement.
+func fileIOEndScope(present bool, terminator string, handler ExceptionPhrases, depth int, next printerAction) printerAction {
+	if !present {
+		return next
+	}
+	sep := " "
+	if hasException(handler) {
+		sep = "\n" + indent(depth)
+	}
+	return writeThen(sep+terminator, next)
+}
+
+// printOpenStatement prints an OPEN statement on one line: the verb and each
+// open-mode group (its mode keyword followed by the files, each with an optional
+// REVERSED / WITH NO REWIND option). A typed-nil statement, an empty group, or a nil
+// file is rejected with an [UnsupportedNodeError].
+func printOpenStatement(stmt *OpenStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || len(stmt.Groups) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "OPEN")
+		for _, g := range stmt.Groups {
+			if g == nil || g.Mode == "" || len(g.Files) == 0 {
+				return failPrint(UnsupportedNodeError{Node: stmt})
+			}
+			pr.write(" " + g.Mode)
+			for _, fl := range g.Files {
+				if fl == nil || fl.Name == nil {
+					return failPrint(UnsupportedNodeError{Node: stmt})
+				}
+				pr.write(" " + fl.Name.Value)
+				switch fl.Option {
+				case "":
+				case "REVERSED":
+					pr.write(" REVERSED")
+				case "NO REWIND":
+					pr.write(" WITH NO REWIND")
+				default:
+					return failPrint(UnsupportedNodeError{Node: fl})
+				}
+			}
+		}
+		return next
+	}
+}
+
+// printCloseStatement prints a CLOSE statement on one line: the verb and each file
+// with its optional WITH LOCK / WITH NO REWIND / FOR REMOVAL option. A typed-nil
+// statement, an empty file list, or a nil file is rejected with an
+// [UnsupportedNodeError].
+func printCloseStatement(stmt *CloseStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || len(stmt.Files) == 0 {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "CLOSE")
+		for _, fl := range stmt.Files {
+			if fl == nil || fl.Name == nil {
+				return failPrint(UnsupportedNodeError{Node: stmt})
+			}
+			pr.write(" " + fl.Name.Value)
+			switch fl.Option {
+			case "":
+			case "LOCK":
+				pr.write(" WITH LOCK")
+			case "NO REWIND":
+				pr.write(" WITH NO REWIND")
+			case "REMOVAL":
+				pr.write(" FOR REMOVAL")
+			default:
+				return failPrint(UnsupportedNodeError{Node: fl})
+			}
+		}
+		return next
+	}
+}
+
+// printReadStatement prints a READ statement: the verb, file-name, optional
+// NEXT/PREVIOUS direction, optional RECORD, optional INTO and KEY phrases, the AT
+// END or INVALID KEY handler (each phrase on its own line), and an optional END-READ
+// (on its own line below the handler when present, else on the statement line). A
+// typed-nil statement, a missing file-name, an unsupported direction, or an
+// unprintable identifier is rejected with an [UnsupportedNodeError].
+func printReadStatement(stmt *ReadStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.File == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "READ " + stmt.File.Value)
+		switch stmt.Direction {
+		case "":
+		case "NEXT", "PREVIOUS":
+			pr.write(" " + stmt.Direction)
+		default:
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		if stmt.Record {
+			pr.write(" RECORD")
+		}
+		if stmt.Into != nil {
+			text, ok := identifierText(stmt.Into)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Into})
+			}
+			pr.write(" INTO " + text)
+		}
+		if stmt.Key != nil {
+			text, ok := identifierText(stmt.Key)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Key})
+			}
+			pr.write(" KEY " + text)
+		}
+		end := fileIOEndScope(stmt.EndRead, "END-READ", stmt.Handler, depth, next)
+		return printExceptionPhrases(stmt.Handler, depth, end)
+	}
+}
+
+// printWriteStatement prints a WRITE statement: the verb, record-name, optional FROM
+// phrase, optional BEFORE/AFTER ADVANCING phrase, the AT END-OF-PAGE or INVALID KEY
+// handler, and an optional END-WRITE. A typed-nil statement, a missing record-name,
+// or an unprintable operand is rejected with an [UnsupportedNodeError].
+func printWriteStatement(stmt *WriteStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.Record == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "WRITE " + stmt.Record.Value)
+		if stmt.From != nil {
+			text, ok := identifierText(stmt.From)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.From})
+			}
+			pr.write(" FROM " + text)
+		}
+		if stmt.Advancing != nil && !writeAdvancingPhrase(pr, stmt.Advancing) {
+			return failPrint(UnsupportedNodeError{Node: stmt.Advancing})
+		}
+		end := fileIOEndScope(stmt.EndWrite, "END-WRITE", stmt.Handler, depth, next)
+		return printExceptionPhrases(stmt.Handler, depth, end)
+	}
+}
+
+// writeAdvancingPhrase writes a WRITE statement's BEFORE/AFTER ADVANCING phrase in
+// canonical form ("AFTER ADVANCING PAGE" or "AFTER ADVANCING 2 LINES"), returning
+// false for an unsupported timing or an unprintable line count.
+func writeAdvancingPhrase(pr *printer, adv *AdvancingPhrase) bool {
+	if adv.When != "BEFORE" && adv.When != "AFTER" {
+		return false
+	}
+	pr.write(" " + adv.When + " ADVANCING")
+	if adv.Page {
+		pr.write(" PAGE")
+		return true
+	}
+	text, ok := valueText(adv.Amount)
+	if !ok {
+		return false
+	}
+	pr.write(" " + text + " LINES")
+	return true
+}
+
+// printRewriteStatement prints a REWRITE statement: the verb, record-name, optional
+// FROM phrase, the INVALID KEY handler, and an optional END-REWRITE. A typed-nil
+// statement, a missing record-name, or an unprintable identifier is rejected with an
+// [UnsupportedNodeError].
+func printRewriteStatement(stmt *RewriteStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.Record == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "REWRITE " + stmt.Record.Value)
+		if stmt.From != nil {
+			text, ok := identifierText(stmt.From)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.From})
+			}
+			pr.write(" FROM " + text)
+		}
+		end := fileIOEndScope(stmt.EndRewrite, "END-REWRITE", stmt.Handler, depth, next)
+		return printExceptionPhrases(stmt.Handler, depth, end)
+	}
+}
+
+// printDeleteStatement prints a DELETE statement: the verb, file-name, optional
+// RECORD, the INVALID KEY handler, and an optional END-DELETE. A typed-nil statement
+// or a missing file-name is rejected with an [UnsupportedNodeError].
+func printDeleteStatement(stmt *DeleteStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.File == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "DELETE " + stmt.File.Value)
+		if stmt.Record {
+			pr.write(" RECORD")
+		}
+		end := fileIOEndScope(stmt.EndDelete, "END-DELETE", stmt.Handler, depth, next)
+		return printExceptionPhrases(stmt.Handler, depth, end)
+	}
+}
+
+// printStartStatement prints a START statement: the verb, file-name, optional KEY
+// relational-operator positioning clause, the INVALID KEY handler, and an optional
+// END-START. A typed-nil statement, a missing file-name, or an incomplete/unprintable
+// KEY clause is rejected with an [UnsupportedNodeError].
+func printStartStatement(stmt *StartStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.File == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "START " + stmt.File.Value)
+		if stmt.Key != nil {
+			if stmt.Key.Op == "" || stmt.Key.Name == nil {
+				return failPrint(UnsupportedNodeError{Node: stmt.Key})
+			}
+			text, ok := identifierText(stmt.Key.Name)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Key.Name})
+			}
+			pr.write(" KEY " + stmt.Key.Op + " " + text)
+		}
+		end := fileIOEndScope(stmt.EndStart, "END-START", stmt.Handler, depth, next)
+		return printExceptionPhrases(stmt.Handler, depth, end)
 	}
 }
 

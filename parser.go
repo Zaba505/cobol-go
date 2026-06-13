@@ -435,6 +435,170 @@ type ExitStatement struct {
 
 func (*ExitStatement) statement() {}
 
+// ExceptionPhrases holds the optional exception handler and its NOT counterpart
+// shared by the file I/O statements — the [NOT] AT END, [NOT] INVALID KEY, or
+// [NOT] AT END-OF-PAGE imperative phrases (SPEC.md "at-end", "invalid-key",
+// "end-of-page"). Kind is the canonical header phrase ("AT END", "INVALID KEY",
+// or "AT END-OF-PAGE"), empty when no handler is present. On and NotOn are the
+// phrase bodies (nested statement lists); the Has flags distinguish a
+// present-but-empty phrase from an absent one (a nil body). It mirrors
+// [SizeErrorPhrases].
+type ExceptionPhrases struct {
+	Kind     string
+	On       []Statement
+	HasOn    bool
+	NotOn    []Statement
+	HasNotOn bool
+}
+
+// OpenStatement is an OPEN statement (SPEC.md "open-statement"): it readies one or
+// more files for I/O. Pos is the position of the OPEN keyword; Groups are the
+// open-mode groups in source order, each naming the files opened in that mode.
+type OpenStatement struct {
+	Pos    Pos
+	Groups []*OpenGroup
+}
+
+func (*OpenStatement) statement() {}
+
+// OpenGroup is one open-mode group of an OPEN statement: a mode keyword and the
+// files opened in it. Pos is the position of the mode keyword; Mode is the
+// canonical open mode ("INPUT", "OUTPUT", "I-O", or "EXTEND"); Files are the
+// file-names, each with an optional REVERSED / NO REWIND option.
+type OpenGroup struct {
+	Pos   Pos
+	Mode  string
+	Files []*OpenFile
+}
+
+// OpenFile is one file-name of an OPEN group. Pos is the position of the
+// file-name; Name is the file-name; Option is the canonical per-file option
+// ("REVERSED" or "NO REWIND"), empty when none.
+type OpenFile struct {
+	Pos    Pos
+	Name   *Word
+	Option string
+}
+
+// CloseStatement is a CLOSE statement (SPEC.md "close-statement"): it terminates
+// processing of one or more files. Pos is the position of the CLOSE keyword;
+// Files are the closed files in source order, each with an optional option.
+type CloseStatement struct {
+	Pos   Pos
+	Files []*CloseFile
+}
+
+func (*CloseStatement) statement() {}
+
+// CloseFile is one file-name of a CLOSE statement. Pos is the position of the
+// file-name; Name is the file-name; Option is the canonical per-file option
+// ("LOCK", "NO REWIND", or "REMOVAL"), empty when none.
+type CloseFile struct {
+	Pos    Pos
+	Name   *Word
+	Option string
+}
+
+// ReadStatement is a READ statement (SPEC.md "read-statement"): it makes the next
+// or a keyed record of a file available. Pos is the position of the READ keyword;
+// File is the file-name; Direction is the sequential direction ("NEXT" or
+// "PREVIOUS", empty when unspecified); Record reports an explicit RECORD noise
+// word; Into is the optional INTO receiving area; Key is the optional KEY
+// data-name (indexed access); Handler carries the AT END or INVALID KEY phrases;
+// EndRead reports an explicit END-READ scope terminator.
+type ReadStatement struct {
+	Pos       Pos
+	File      *Word
+	Direction string
+	Record    bool
+	Into      *Identifier
+	Key       *Identifier
+	Handler   ExceptionPhrases
+	EndRead   bool
+}
+
+func (*ReadStatement) statement() {}
+
+// WriteStatement is a WRITE statement (SPEC.md "write-statement"): it releases a
+// record to a file. Pos is the position of the WRITE keyword; Record is the
+// record-name; From is the optional FROM source area; Advancing is the optional
+// BEFORE/AFTER ADVANCING phrase; Handler carries the AT END-OF-PAGE or INVALID
+// KEY phrases; EndWrite reports an explicit END-WRITE scope terminator.
+type WriteStatement struct {
+	Pos       Pos
+	Record    *Word
+	From      *Identifier
+	Advancing *AdvancingPhrase
+	Handler   ExceptionPhrases
+	EndWrite  bool
+}
+
+func (*WriteStatement) statement() {}
+
+// AdvancingPhrase is the BEFORE/AFTER ADVANCING phrase of a WRITE statement. Pos
+// is the position of the BEFORE/AFTER keyword; When is the canonical timing
+// ("BEFORE" or "AFTER"); Page reports the ADVANCING PAGE form; Amount is the line
+// count (an identifier or numeric literal) for the non-PAGE form, nil when Page.
+type AdvancingPhrase struct {
+	Pos    Pos
+	When   string
+	Page   bool
+	Amount Type
+}
+
+// RewriteStatement is a REWRITE statement (SPEC.md "rewrite-statement"): it
+// replaces an existing record. Pos is the position of the REWRITE keyword; Record
+// is the record-name; From is the optional FROM source area; Handler carries the
+// INVALID KEY phrases; EndRewrite reports an explicit END-REWRITE.
+type RewriteStatement struct {
+	Pos        Pos
+	Record     *Word
+	From       *Identifier
+	Handler    ExceptionPhrases
+	EndRewrite bool
+}
+
+func (*RewriteStatement) statement() {}
+
+// DeleteStatement is a DELETE statement (SPEC.md "delete-statement"): it removes a
+// record from a file. Pos is the position of the DELETE keyword; File is the
+// file-name; Record reports an explicit RECORD noise word; Handler carries the
+// INVALID KEY phrases; EndDelete reports an explicit END-DELETE.
+type DeleteStatement struct {
+	Pos       Pos
+	File      *Word
+	Record    bool
+	Handler   ExceptionPhrases
+	EndDelete bool
+}
+
+func (*DeleteStatement) statement() {}
+
+// StartStatement is a START statement (SPEC.md "start-statement"): it positions an
+// indexed or relative file for sequential retrieval. Pos is the position of the
+// START keyword; File is the file-name; Key is the optional KEY positioning
+// clause; Handler carries the INVALID KEY phrases; EndStart reports an explicit
+// END-START.
+type StartStatement struct {
+	Pos      Pos
+	File     *Word
+	Key      *StartKey
+	Handler  ExceptionPhrases
+	EndStart bool
+}
+
+func (*StartStatement) statement() {}
+
+// StartKey is the KEY positioning clause of a START statement. Pos is the position
+// of the KEY keyword; Op is the canonical relational operator (the symbol form
+// from [parser.parseRelationalOperator], e.g. "=", ">", ">="); Name is the key
+// data-name compared against.
+type StartKey struct {
+	Pos  Pos
+	Op   string
+	Name *Identifier
+}
+
 // EvaluateStatement is an EVALUATE statement (SPEC.md "evaluate-statement"): a
 // multi-branch case construct. Pos is the position of the EVALUATE keyword;
 // Subjects are the selection subjects joined by ALSO; Whens are the WHEN branches
@@ -3382,6 +3546,7 @@ var procedureVerbs = []string{
 	"DISPLAY", "MOVE", "ACCEPT", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
 	"COMPUTE", "IF", "PERFORM", "EVALUATE", "CALL", "GO", "CONTINUE", "STOP",
 	"GOBACK", "EXIT",
+	"OPEN", "CLOSE", "READ", "WRITE", "REWRITE", "DELETE", "START",
 }
 
 // procedureScopeTerminators are the explicit scope terminators that close one
@@ -3389,6 +3554,7 @@ var procedureVerbs = []string{
 var procedureScopeTerminators = []string{
 	"END-IF", "END-PERFORM", "END-COMPUTE", "END-ADD", "END-SUBTRACT",
 	"END-MULTIPLY", "END-DIVIDE", "END-EVALUATE", "END-CALL",
+	"END-READ", "END-WRITE", "END-REWRITE", "END-DELETE", "END-START",
 }
 
 // procedurePhraseKeywords are the clause/phrase keywords that introduce a part of
@@ -3461,10 +3627,24 @@ func parseStatement(p *parser) (Statement, error) {
 		return &GobackStatement{Pos: tok.Pos}, nil
 	case keywordIs(tok, "EXIT"):
 		return parseExitStatement(p, tok)
+	case keywordIs(tok, "OPEN"):
+		return parseOpenStatement(p, tok)
+	case keywordIs(tok, "CLOSE"):
+		return parseCloseStatement(p, tok)
+	case keywordIs(tok, "READ"):
+		return parseReadStatement(p, tok)
+	case keywordIs(tok, "WRITE"):
+		return parseWriteStatement(p, tok)
+	case keywordIs(tok, "REWRITE"):
+		return parseRewriteStatement(p, tok)
+	case keywordIs(tok, "DELETE"):
+		return parseDeleteStatement(p, tok)
+	case keywordIs(tok, "START"):
+		return parseStartStatement(p, tok)
 	default:
 		return nil, unexpectedKeyword(tok, "DISPLAY", "MOVE", "ACCEPT",
 			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "PERFORM", "EVALUATE", "CALL", "GO", "CONTINUE", "STOP",
-			"GOBACK", "EXIT")
+			"GOBACK", "EXIT", "OPEN", "CLOSE", "READ", "WRITE", "REWRITE", "DELETE", "START")
 	}
 }
 
@@ -3483,11 +3663,12 @@ func stopAtNested(p *parser) (bool, error) {
 	return isPeriod(tok) || keywordIs(tok, "ELSE") || isScopeTerminator(tok), nil
 }
 
-// stopAtSizeError stops a SIZE ERROR phrase body at a separator period, the NOT
-// keyword introducing the NOT ON SIZE ERROR phrase, any explicit scope terminator
-// (END-ADD, a nested END-IF …), or end of input — each consumed by an enclosing
-// construct, not the phrase body.
-func stopAtSizeError(p *parser) (bool, error) {
+// stopAtPhraseBody stops a conditional phrase body — an [ON] SIZE ERROR body or a
+// file I/O exception handler (AT END, INVALID KEY, AT END-OF-PAGE) — at a
+// separator period, the NOT keyword introducing the negated phrase, any explicit
+// scope terminator (END-ADD, END-READ, a nested END-IF …), or end of input. Each
+// is consumed by an enclosing construct, not the phrase body.
+func stopAtPhraseBody(p *parser) (bool, error) {
 	tok, err, ok := p.peek()
 	if err != nil {
 		return false, err
@@ -4396,7 +4577,7 @@ func parseSizeErrorPhrases(p *parser) (SizeErrorPhrases, error) {
 	}
 	if onSize {
 		ph.HasOnSizeError = true
-		body, err := parseStatementList(p, stopAtSizeError)
+		body, err := parseStatementList(p, stopAtPhraseBody)
 		if err != nil {
 			return ph, err
 		}
@@ -4419,7 +4600,7 @@ func parseSizeErrorPhrases(p *parser) (SizeErrorPhrases, error) {
 			return ph, err
 		}
 		ph.HasNotOnSizeError = true
-		body, err := parseStatementList(p, stopAtSizeError)
+		body, err := parseStatementList(p, stopAtPhraseBody)
 		if err != nil {
 			return ph, err
 		}
@@ -4454,6 +4635,573 @@ func (p *parser) consumeSizeErrorLead() (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// parseExceptionPhrases parses the optional file I/O exception handler and its NOT
+// counterpart — one of [NOT] AT END, [NOT] INVALID KEY, or [NOT] AT END-OF-PAGE —
+// that may follow a READ/WRITE/REWRITE/DELETE/START statement. allowed lists the
+// condition kinds valid for the calling statement (e.g. "AT END" and "INVALID KEY"
+// for READ). Each phrase body is a nested statement list (stopAtPhraseBody). It
+// mirrors parseSizeErrorPhrases; AT/END/INVALID/KEY/END-OF-PAGE/EOP/NOT are
+// reserved words, so one-token lookahead disambiguates the phrase from a following
+// statement, scope terminator, or sentence period.
+func parseExceptionPhrases(p *parser, allowed ...string) (ExceptionPhrases, error) {
+	var ph ExceptionPhrases
+
+	kind, ok, err := acceptExceptionCondition(p, allowed)
+	if err != nil {
+		return ph, err
+	}
+	if !ok {
+		return ph, nil
+	}
+	ph.Kind = kind
+	ph.HasOn = true
+	on, err := parseStatementList(p, stopAtPhraseBody)
+	if err != nil {
+		return ph, err
+	}
+	ph.On = on
+
+	hasNot, err := p.peekKeyword("NOT")
+	if err != nil {
+		return ph, err
+	}
+	if hasNot {
+		p.consume() // NOT
+		// NOT must be followed by the same condition keywords.
+		if _, ok, err := acceptExceptionCondition(p, []string{kind}); err != nil {
+			return ph, err
+		} else if !ok {
+			tok, _, _ := p.peek()
+			return ph, UnexpectedKeywordError{Expected: exceptionLeadKeywords(kind), Actual: tok}
+		}
+		ph.HasNotOn = true
+		notOn, err := parseStatementList(p, stopAtPhraseBody)
+		if err != nil {
+			return ph, err
+		}
+		ph.NotOn = notOn
+	}
+	return ph, nil
+}
+
+// acceptExceptionCondition consumes an exception-condition lead from the allowed
+// kinds, reporting the canonical kind it matched. It recognizes "INVALID" [ "KEY" ]
+// → "INVALID KEY", an optional "AT" then "END" → "AT END", and an optional "AT"
+// then "END-OF-PAGE" | "EOP" → "AT END-OF-PAGE". A bare "AT" must be followed by a
+// valid condition keyword, so a malformed lead reports an error.
+func acceptExceptionCondition(p *parser, allowed []string) (string, bool, error) {
+	if slices.Contains(allowed, "INVALID KEY") {
+		if invalid, err := p.peekKeyword("INVALID"); err != nil {
+			return "", false, err
+		} else if invalid {
+			p.consume() // INVALID
+			if err := p.skipOptionalKeyword("KEY"); err != nil {
+				return "", false, err
+			}
+			return "INVALID KEY", true, nil
+		}
+	}
+
+	atEnd := slices.Contains(allowed, "AT END")
+	atEop := slices.Contains(allowed, "AT END-OF-PAGE")
+	if !atEnd && !atEop {
+		return "", false, nil
+	}
+
+	if hasAt, err := p.peekKeyword("AT"); err != nil {
+		return "", false, err
+	} else if hasAt {
+		p.consume() // AT — unambiguously starts an exception phrase here.
+		return finishAtCondition(p, atEnd, atEop)
+	}
+	if atEnd {
+		if end, err := p.peekKeyword("END"); err != nil {
+			return "", false, err
+		} else if end {
+			p.consume()
+			return "AT END", true, nil
+		}
+	}
+	if atEop {
+		if eop, err := p.peekKeyword("END-OF-PAGE", "EOP"); err != nil {
+			return "", false, err
+		} else if eop {
+			p.consume()
+			return "AT END-OF-PAGE", true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// finishAtCondition completes an exception lead whose optional "AT" has just been
+// consumed: it requires the following END (→ "AT END") or END-OF-PAGE/EOP (→ "AT
+// END-OF-PAGE"), limited to the kinds enabled by atEnd/atEop.
+func finishAtCondition(p *parser, atEnd, atEop bool) (string, bool, error) {
+	var kws []string
+	if atEnd {
+		kws = append(kws, "END")
+	}
+	if atEop {
+		kws = append(kws, "END-OF-PAGE", "EOP")
+	}
+	tok, err := p.expectKeyword(kws...)
+	if err != nil {
+		return "", false, err
+	}
+	if keywordIs(tok, "END") {
+		return "AT END", true, nil
+	}
+	return "AT END-OF-PAGE", true, nil
+}
+
+// exceptionLeadKeywords returns the keywords that may begin the given exception
+// condition, for building an [UnexpectedKeywordError] when a NOT phrase is not
+// followed by its matching condition.
+func exceptionLeadKeywords(kind string) []string {
+	switch kind {
+	case "AT END":
+		return []string{"AT", "END"}
+	case "AT END-OF-PAGE":
+		return []string{"AT", "END-OF-PAGE", "EOP"}
+	default: // "INVALID KEY"
+		return []string{"INVALID"}
+	}
+}
+
+// peekFileName reports whether the next (unconsumed) token can begin a file-name in
+// a file I/O operand list: a user-defined word, i.e. an identifier that is not a
+// reserved verb, scope terminator, statement phrase keyword, or one of the caller's
+// structural keywords (stop). A file-name can never be a reserved word, so these
+// exclusions end the list cleanly.
+func (p *parser) peekFileName(stop ...string) (bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if !ok || tok.Type != TokenIdentifier {
+		return false, nil
+	}
+	if isStatementVerb(tok) || isScopeTerminator(tok) || isPhraseKeyword(tok) || keywordIs(tok, stop...) {
+		return false, nil
+	}
+	return true, nil
+}
+
+// parseFileName consumes one identifier token and returns it as a file- or
+// record-name [Word].
+func parseFileName(p *parser) (*Word, error) {
+	tok, err := p.expect(TokenIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	return &Word{Pos: tok.Pos, Value: string(tok.Value)}, nil
+}
+
+// parseOpenStatement parses an OPEN statement whose verb kw has already been read:
+// one or more open-mode groups (INPUT/OUTPUT/I-O/EXTEND), each naming one or more
+// files, each file with an optional REVERSED or [WITH] NO REWIND option.
+func parseOpenStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &OpenStatement{Pos: kw.Pos}
+	for {
+		modeTok, ok, err := p.acceptKeyword("INPUT", "OUTPUT", "I-O", "EXTEND")
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		group := &OpenGroup{Pos: modeTok.Pos, Mode: strings.ToUpper(string(modeTok.Value))}
+		for {
+			isFile, err := p.peekFileName("INPUT", "OUTPUT", "I-O", "EXTEND")
+			if err != nil {
+				return nil, err
+			}
+			if !isFile {
+				break
+			}
+			name, err := parseFileName(p)
+			if err != nil {
+				return nil, err
+			}
+			option, err := parseOpenOption(p)
+			if err != nil {
+				return nil, err
+			}
+			group.Files = append(group.Files, &OpenFile{Pos: name.Pos, Name: name, Option: option})
+		}
+		if len(group.Files) == 0 {
+			tok, _, _ := p.peek()
+			return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+		}
+		stmt.Groups = append(stmt.Groups, group)
+	}
+	if len(stmt.Groups) == 0 {
+		tok, _, _ := p.peek()
+		return nil, UnexpectedKeywordError{Expected: []string{"INPUT", "OUTPUT", "I-O", "EXTEND"}, Actual: tok}
+	}
+	return stmt, nil
+}
+
+// parseOpenOption parses a file's optional OPEN option: REVERSED or [WITH] NO
+// REWIND, returning the canonical option ("" when none).
+func parseOpenOption(p *parser) (string, error) {
+	if _, ok, err := p.acceptKeyword("REVERSED"); err != nil {
+		return "", err
+	} else if ok {
+		return "REVERSED", nil
+	}
+	if with, err := p.peekKeyword("WITH"); err != nil {
+		return "", err
+	} else if with {
+		p.consume() // WITH — only introduces NO REWIND here.
+		if _, err := p.expectKeyword("NO"); err != nil {
+			return "", err
+		}
+		if _, err := p.expectKeyword("REWIND"); err != nil {
+			return "", err
+		}
+		return "NO REWIND", nil
+	}
+	if no, err := p.peekKeyword("NO"); err != nil {
+		return "", err
+	} else if no {
+		p.consume() // NO
+		if _, err := p.expectKeyword("REWIND"); err != nil {
+			return "", err
+		}
+		return "NO REWIND", nil
+	}
+	return "", nil
+}
+
+// parseCloseStatement parses a CLOSE statement whose verb kw has already been read:
+// one or more files, each with an optional [WITH] LOCK / [WITH] NO REWIND / FOR
+// REMOVAL option.
+func parseCloseStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &CloseStatement{Pos: kw.Pos}
+	for {
+		isFile, err := p.peekFileName("LOCK", "REWIND", "FOR", "REMOVAL")
+		if err != nil {
+			return nil, err
+		}
+		if !isFile {
+			break
+		}
+		name, err := parseFileName(p)
+		if err != nil {
+			return nil, err
+		}
+		option, err := parseCloseOption(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Files = append(stmt.Files, &CloseFile{Pos: name.Pos, Name: name, Option: option})
+	}
+	if len(stmt.Files) == 0 {
+		tok, _, _ := p.peek()
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+	}
+	return stmt, nil
+}
+
+// parseCloseOption parses a file's optional CLOSE option: FOR REMOVAL, or [WITH]
+// followed by LOCK or NO REWIND, returning the canonical option ("" when none).
+func parseCloseOption(p *parser) (string, error) {
+	if forKw, err := p.peekKeyword("FOR"); err != nil {
+		return "", err
+	} else if forKw {
+		p.consume() // FOR
+		if _, err := p.expectKeyword("REMOVAL"); err != nil {
+			return "", err
+		}
+		return "REMOVAL", nil
+	}
+	if err := p.skipOptionalKeyword("WITH"); err != nil {
+		return "", err
+	}
+	if lock, err := p.peekKeyword("LOCK"); err != nil {
+		return "", err
+	} else if lock {
+		p.consume()
+		return "LOCK", nil
+	}
+	if no, err := p.peekKeyword("NO"); err != nil {
+		return "", err
+	} else if no {
+		p.consume() // NO
+		if _, err := p.expectKeyword("REWIND"); err != nil {
+			return "", err
+		}
+		return "NO REWIND", nil
+	}
+	return "", nil
+}
+
+// parseReadStatement parses a READ statement whose verb kw has already been read:
+// the file-name, an optional NEXT/PREVIOUS direction, an optional RECORD noise word,
+// an optional INTO receiving area, an optional KEY data-name, the AT END or INVALID
+// KEY handler, and an optional END-READ scope terminator.
+func parseReadStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &ReadStatement{Pos: kw.Pos}
+	file, err := parseFileName(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.File = file
+
+	if dir, ok, err := p.acceptKeywordValue("NEXT", "PREVIOUS"); err != nil {
+		return nil, err
+	} else if ok {
+		stmt.Direction = dir
+	}
+	if rec, err := p.peekKeyword("RECORD"); err != nil {
+		return nil, err
+	} else if rec {
+		p.consume()
+		stmt.Record = true
+	}
+	if into, err := p.peekKeyword("INTO"); err != nil {
+		return nil, err
+	} else if into {
+		p.consume()
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Into = id
+	}
+	if key, err := p.peekKeyword("KEY"); err != nil {
+		return nil, err
+	} else if key {
+		p.consume()
+		if err := p.skipOptionalKeyword("IS"); err != nil {
+			return nil, err
+		}
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Key = id
+	}
+
+	handler, err := parseExceptionPhrases(p, "AT END", "INVALID KEY")
+	if err != nil {
+		return nil, err
+	}
+	stmt.Handler = handler
+
+	if end, err := p.peekKeyword("END-READ"); err != nil {
+		return nil, err
+	} else if end {
+		p.consume()
+		stmt.EndRead = true
+	}
+	return stmt, nil
+}
+
+// parseWriteStatement parses a WRITE statement whose verb kw has already been read:
+// the record-name, an optional FROM source area, an optional BEFORE/AFTER ADVANCING
+// phrase, the AT END-OF-PAGE or INVALID KEY handler, and an optional END-WRITE.
+func parseWriteStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &WriteStatement{Pos: kw.Pos}
+	record, err := parseFileName(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Record = record
+
+	if from, err := p.peekKeyword("FROM"); err != nil {
+		return nil, err
+	} else if from {
+		p.consume()
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.From = id
+	}
+
+	adv, err := parseAdvancingPhrase(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Advancing = adv
+
+	handler, err := parseExceptionPhrases(p, "AT END-OF-PAGE", "INVALID KEY")
+	if err != nil {
+		return nil, err
+	}
+	stmt.Handler = handler
+
+	if end, err := p.peekKeyword("END-WRITE"); err != nil {
+		return nil, err
+	} else if end {
+		p.consume()
+		stmt.EndWrite = true
+	}
+	return stmt, nil
+}
+
+// parseAdvancingPhrase parses an optional BEFORE/AFTER [ADVANCING] phrase of a WRITE
+// statement: either PAGE, or a line count (identifier or integer) with an optional
+// LINE/LINES noise word. It returns nil when no BEFORE/AFTER lead is present.
+func parseAdvancingPhrase(p *parser) (*AdvancingPhrase, error) {
+	whenTok, ok, err := p.acceptKeyword("BEFORE", "AFTER")
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	phrase := &AdvancingPhrase{Pos: whenTok.Pos, When: strings.ToUpper(string(whenTok.Value))}
+	if err := p.skipOptionalKeyword("ADVANCING"); err != nil {
+		return nil, err
+	}
+
+	if page, err := p.peekKeyword("PAGE"); err != nil {
+		return nil, err
+	} else if page {
+		p.consume()
+		phrase.Page = true
+		return phrase, nil
+	}
+
+	tok, err := p.expect(TokenIdentifier, TokenNumber)
+	if err != nil {
+		return nil, err
+	}
+	if tok.Type == TokenNumber {
+		phrase.Amount = &NumericLiteral{Pos: tok.Pos, Value: string(tok.Value)}
+	} else {
+		id, err := parseIdentifier(p, tok)
+		if err != nil {
+			return nil, err
+		}
+		phrase.Amount = id
+	}
+	if err := p.skipOptionalKeyword("LINE", "LINES"); err != nil {
+		return nil, err
+	}
+	return phrase, nil
+}
+
+// parseRewriteStatement parses a REWRITE statement whose verb kw has already been
+// read: the record-name, an optional FROM source area, the INVALID KEY handler, and
+// an optional END-REWRITE.
+func parseRewriteStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &RewriteStatement{Pos: kw.Pos}
+	record, err := parseFileName(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Record = record
+
+	if from, err := p.peekKeyword("FROM"); err != nil {
+		return nil, err
+	} else if from {
+		p.consume()
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.From = id
+	}
+
+	handler, err := parseExceptionPhrases(p, "INVALID KEY")
+	if err != nil {
+		return nil, err
+	}
+	stmt.Handler = handler
+
+	if end, err := p.peekKeyword("END-REWRITE"); err != nil {
+		return nil, err
+	} else if end {
+		p.consume()
+		stmt.EndRewrite = true
+	}
+	return stmt, nil
+}
+
+// parseDeleteStatement parses a DELETE statement whose verb kw has already been
+// read: the file-name, an optional RECORD noise word, the INVALID KEY handler, and
+// an optional END-DELETE.
+func parseDeleteStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &DeleteStatement{Pos: kw.Pos}
+	file, err := parseFileName(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.File = file
+
+	if rec, err := p.peekKeyword("RECORD"); err != nil {
+		return nil, err
+	} else if rec {
+		p.consume()
+		stmt.Record = true
+	}
+
+	handler, err := parseExceptionPhrases(p, "INVALID KEY")
+	if err != nil {
+		return nil, err
+	}
+	stmt.Handler = handler
+
+	if end, err := p.peekKeyword("END-DELETE"); err != nil {
+		return nil, err
+	} else if end {
+		p.consume()
+		stmt.EndDelete = true
+	}
+	return stmt, nil
+}
+
+// parseStartStatement parses a START statement whose verb kw has already been read:
+// the file-name, an optional KEY [IS] relational-operator data-name positioning
+// clause, the INVALID KEY handler, and an optional END-START.
+func parseStartStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &StartStatement{Pos: kw.Pos}
+	file, err := parseFileName(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.File = file
+
+	if keyTok, ok, err := p.acceptKeyword("KEY"); err != nil {
+		return nil, err
+	} else if ok {
+		if err := p.skipOptionalKeyword("IS"); err != nil {
+			return nil, err
+		}
+		op, ok, err := parseRelationalOperator(p)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			tok, _, _ := p.peek()
+			return nil, UnexpectedTokenError{Expected: []TokenType{TokenSymbol, TokenIdentifier}, Actual: tok}
+		}
+		name, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Key = &StartKey{Pos: keyTok.Pos, Op: op, Name: name}
+	}
+
+	handler, err := parseExceptionPhrases(p, "INVALID KEY")
+	if err != nil {
+		return nil, err
+	}
+	stmt.Handler = handler
+
+	if end, err := p.peekKeyword("END-START"); err != nil {
+		return nil, err
+	} else if end {
+		p.consume()
+		stmt.EndStart = true
+	}
+	return stmt, nil
 }
 
 // parseComputeStatement parses a COMPUTE statement whose verb kw has already been
