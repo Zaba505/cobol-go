@@ -1100,17 +1100,22 @@ func printAcceptStatement(stmt *AcceptStatement, depth int, next printerAction) 
 }
 
 // printArithmeticStatement prints an ADD/SUBTRACT/MULTIPLY/DIVIDE statement: the
-// verb, source operands, optional connector and in-place targets, optional GIVING
-// result, optional ROUNDED, and optional END-<verb> terminator. A statement with
-// no verb, no operands, or no receiving field is rejected with an
-// [UnsupportedNodeError]. The connector and in-place targets are paired: a
-// connector without targets, or targets without a connector (which would silently
-// drop the targets), is also rejected.
+// verb, source operands, optional connector and in-place receivers, optional GIVING
+// result list, optional DIVIDE REMAINDER, optional [NOT] ON SIZE ERROR phrases, and
+// optional END-<verb> terminator. Each receiver carries its own optional ROUNDED. A
+// statement with no verb, no operands, or no receiving field is rejected with an
+// [UnsupportedNodeError]. The connector and in-place receivers are paired: a
+// connector without receivers, or receivers without a connector (which would
+// silently drop them), is also rejected, as is a REMAINDER without a GIVING result
+// or on a non-DIVIDE verb, and a nil receiver. When a SIZE ERROR phrase is present
+// the END-<verb> moves onto its own line below the phrases; otherwise it stays on
+// the statement line, as before.
 func printArithmeticStatement(stmt *ArithmeticStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil || stmt.Verb == "" || len(stmt.Operands) == 0 ||
-			(len(stmt.Targets) == 0 && stmt.Giving == nil) ||
-			(stmt.Connector == "") != (len(stmt.Targets) == 0) {
+			(len(stmt.Targets) == 0 && len(stmt.Giving) == 0) ||
+			(stmt.Connector == "") != (len(stmt.Targets) == 0) ||
+			(stmt.Remainder != nil && (len(stmt.Giving) == 0 || stmt.Verb != "DIVIDE")) {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
 		pr.write(indent(depth) + stmt.Verb)
@@ -1124,34 +1129,64 @@ func printArithmeticStatement(stmt *ArithmeticStatement, depth int, next printer
 		if stmt.Connector != "" {
 			pr.write(" " + stmt.Connector)
 			for _, t := range stmt.Targets {
-				text, ok := identifierText(t)
-				if !ok {
-					return failPrint(UnsupportedNodeError{Node: t})
+				if t == nil {
+					return failPrint(UnsupportedNodeError{Node: stmt})
 				}
-				pr.write(" " + text)
+				if !writeArithmeticReceiver(pr, t) {
+					return failPrint(UnsupportedNodeError{Node: t.Name})
+				}
 			}
 		}
-		if stmt.Giving != nil {
-			text, ok := identifierText(stmt.Giving)
+		if len(stmt.Giving) > 0 {
+			pr.write(" GIVING")
+			for _, t := range stmt.Giving {
+				if t == nil {
+					return failPrint(UnsupportedNodeError{Node: stmt})
+				}
+				if !writeArithmeticReceiver(pr, t) {
+					return failPrint(UnsupportedNodeError{Node: t.Name})
+				}
+			}
+		}
+		if stmt.Remainder != nil {
+			text, ok := identifierText(stmt.Remainder)
 			if !ok {
-				return failPrint(UnsupportedNodeError{Node: stmt.Giving})
+				return failPrint(UnsupportedNodeError{Node: stmt.Remainder})
 			}
-			pr.write(" GIVING " + text)
+			pr.write(" REMAINDER " + text)
 		}
-		if stmt.Rounded {
-			pr.write(" ROUNDED")
-		}
+
+		end := next
 		if stmt.EndScope {
-			pr.write(" END-" + stmt.Verb)
+			sep := " "
+			if hasSizeError(stmt.SizeError) {
+				sep = "\n" + indent(depth)
+			}
+			end = writeThen(sep+"END-"+stmt.Verb, next)
 		}
-		return next
+		return printSizeErrorPhrases(stmt.SizeError, depth, end)
 	}
 }
 
+// writeArithmeticReceiver writes a single receiving field — its identifier and a
+// trailing ROUNDED when set — returning false if the identifier is unprintable.
+func writeArithmeticReceiver(pr *printer, t *ArithmeticTarget) bool {
+	text, ok := identifierText(t.Name)
+	if !ok {
+		return false
+	}
+	pr.write(" " + text)
+	if t.Rounded {
+		pr.write(" ROUNDED")
+	}
+	return true
+}
+
 // printComputeStatement prints a COMPUTE statement: the receiving fields (each
-// optionally ROUNDED), "=", the arithmetic expression, and an optional
-// END-COMPUTE. A statement with no targets or an unprintable expression is
-// rejected with an [UnsupportedNodeError].
+// optionally ROUNDED), "=", the arithmetic expression, optional [NOT] ON SIZE ERROR
+// phrases, and an optional END-COMPUTE. A statement with no targets or an
+// unprintable expression is rejected with an [UnsupportedNodeError]. As with the
+// arithmetic verbs, END-COMPUTE moves onto its own line below a SIZE ERROR phrase.
 func printComputeStatement(stmt *ComputeStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil || len(stmt.Targets) == 0 {
@@ -1173,10 +1208,52 @@ func printComputeStatement(stmt *ComputeStatement, depth int, next printerAction
 			return failPrint(UnsupportedNodeError{Node: stmt.Expr})
 		}
 		pr.write(" = " + e)
+
+		end := next
 		if stmt.EndScope {
-			pr.write(" END-COMPUTE")
+			sep := " "
+			if hasSizeError(stmt.SizeError) {
+				sep = "\n" + indent(depth)
+			}
+			end = writeThen(sep+"END-COMPUTE", next)
 		}
-		return next
+		return printSizeErrorPhrases(stmt.SizeError, depth, end)
+	}
+}
+
+// onSizeErrorPresent reports whether the ON SIZE ERROR phrase should be printed —
+// the flag is set or its body is non-empty. Treating a non-empty body as present
+// (rather than trusting the flag alone) keeps a directly-built AST from silently
+// dropping its statements. notSizeErrorPresent does the same for NOT ON SIZE ERROR.
+func (ph SizeErrorPhrases) onSizeErrorPresent() bool {
+	return ph.HasOnSizeError || len(ph.OnSizeError) > 0
+}
+
+func (ph SizeErrorPhrases) notSizeErrorPresent() bool {
+	return ph.HasNotOnSizeError || len(ph.NotOnSizeError) > 0
+}
+
+// hasSizeError reports whether ph carries any [NOT] ON SIZE ERROR phrase.
+func hasSizeError(ph SizeErrorPhrases) bool {
+	return ph.onSizeErrorPresent() || ph.notSizeErrorPresent()
+}
+
+// printSizeErrorPhrases prints the optional ON SIZE ERROR and NOT ON SIZE ERROR
+// phrases shared by the arithmetic statements and COMPUTE: each phrase header on
+// its own line at the statement's depth, its imperative body one level deeper (the
+// IF-branch layout). With no phrase present it continues with next unchanged.
+func printSizeErrorPhrases(ph SizeErrorPhrases, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		tail := next
+		if ph.notSizeErrorPresent() {
+			tail = writeThen("\n"+indent(depth)+"NOT ON SIZE ERROR",
+				printBranchStatementAt(ph.NotOnSizeError, 0, depth+1, tail))
+		}
+		if ph.onSizeErrorPresent() {
+			tail = writeThen("\n"+indent(depth)+"ON SIZE ERROR",
+				printBranchStatementAt(ph.OnSizeError, 0, depth+1, tail))
+		}
+		return tail
 	}
 }
 
