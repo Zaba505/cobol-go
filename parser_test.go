@@ -2653,6 +2653,42 @@ func TestParserErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "READ file-name position holds a reserved keyword",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    READ INTO WS-X.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 10}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "OPEN file-name position holds an option keyword",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    OPEN INPUT REVERSED CUST-FILE.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 16}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "CLOSE WITH not followed by LOCK or NO REWIND",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    CLOSE F-A WITH.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 19}, target.Actual.Pos)
+			},
+		},
+		{
 			name: "global is not valid for the debugging use form",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +

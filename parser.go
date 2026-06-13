@@ -4565,7 +4565,7 @@ func parseReceiverIdentifier(p *parser) (*Identifier, error) {
 
 // parseSizeErrorPhrases parses the optional [ON] SIZE ERROR and NOT [ON] SIZE ERROR
 // imperative phrases that may follow an arithmetic statement's receivers or a
-// COMPUTE expression. Each phrase body is a nested statement list (stopAtSizeError).
+// COMPUTE expression. Each phrase body is a nested statement list (stopAtPhraseBody).
 // ON, SIZE, ERROR, and NOT are reserved words, so one-token lookahead disambiguates
 // the phrase from a following statement or scope terminator.
 func parseSizeErrorPhrases(p *parser) (SizeErrorPhrases, error) {
@@ -4790,11 +4790,17 @@ func (p *parser) peekFileName(stop ...string) (bool, error) {
 }
 
 // parseFileName consumes one identifier token and returns it as a file- or
-// record-name [Word].
+// record-name [Word]. A file-name is a user-defined word, so a reserved statement
+// verb, scope terminator, or phrase keyword in its place (e.g. READ with no
+// file-name before INTO) is rejected rather than silently swallowed as a name —
+// mirroring how parseCallArgument guards a required operand.
 func parseFileName(p *parser) (*Word, error) {
 	tok, err := p.expect(TokenIdentifier)
 	if err != nil {
 		return nil, err
+	}
+	if isStatementVerb(tok) || isScopeTerminator(tok) || isPhraseKeyword(tok) {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
 	}
 	return &Word{Pos: tok.Pos, Value: string(tok.Value)}, nil
 }
@@ -4814,7 +4820,7 @@ func parseOpenStatement(p *parser, kw Token) (Statement, error) {
 		}
 		group := &OpenGroup{Pos: modeTok.Pos, Mode: strings.ToUpper(string(modeTok.Value))}
 		for {
-			isFile, err := p.peekFileName("INPUT", "OUTPUT", "I-O", "EXTEND")
+			isFile, err := p.peekFileName("INPUT", "OUTPUT", "I-O", "EXTEND", "REVERSED", "NO", "REWIND", "WITH")
 			if err != nil {
 				return nil, err
 			}
@@ -4918,9 +4924,29 @@ func parseCloseOption(p *parser) (string, error) {
 		}
 		return "REMOVAL", nil
 	}
-	if err := p.skipOptionalKeyword("WITH"); err != nil {
+	// A present WITH must introduce LOCK or NO REWIND; consuming it speculatively
+	// and falling through would silently accept malformed input like "CLOSE F WITH.".
+	with, err := p.peekKeyword("WITH")
+	if err != nil {
 		return "", err
 	}
+	if with {
+		p.consume() // WITH
+		if lock, err := p.peekKeyword("LOCK"); err != nil {
+			return "", err
+		} else if lock {
+			p.consume()
+			return "LOCK", nil
+		}
+		if _, err := p.expectKeyword("NO"); err != nil {
+			return "", err
+		}
+		if _, err := p.expectKeyword("REWIND"); err != nil {
+			return "", err
+		}
+		return "NO REWIND", nil
+	}
+
 	if lock, err := p.peekKeyword("LOCK"); err != nil {
 		return "", err
 	} else if lock {
