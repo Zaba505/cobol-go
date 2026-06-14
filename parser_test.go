@@ -2495,6 +2495,135 @@ func TestParser(t *testing.T) {
 	}
 }
 
+// TestParserFixedFormat drives Parse with WithSourceFormat(FixedFormat) to prove
+// the source-format option is wired through to the tokenizer. The expected AST
+// mirrors the free-format minimal program but with fixed-format column positions
+// (copied from the "minimal program with Area A and Area B" tokenizer test).
+func TestParserFixedFormat(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		src      string
+		expected *File
+	}{
+		{
+			// Sequence numbers fill columns 1–6 (ignored only in fixed format),
+			// headers/names begin in Area A (column 8), statements in Area B
+			// (column 12 onward).
+			name: "minimal program with sequence area, Area A and Area B",
+			src: "000100 IDENTIFICATION DIVISION.\n" +
+				"000200 PROGRAM-ID. HELLO.\n" +
+				"000300 PROCEDURE DIVISION.\n" +
+				"000400     DISPLAY \"Hello, world!\".\n" +
+				"000500     STOP RUN.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 8},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 8},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 8},
+									Name: &Word{Pos: Pos{Line: 2, Column: 20}, Value: "HELLO"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 8},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 12},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 12},
+												Statements: []Statement{
+													&DisplayStatement{
+														Pos: Pos{Line: 4, Column: 12},
+														Operands: []Type{
+															&StringLiteral{Pos: Pos{Line: 4, Column: 20}, Value: `"Hello, world!"`},
+														},
+													},
+												},
+											},
+											{
+												Pos: Pos{Line: 5, Column: 12},
+												Statements: []Statement{
+													&StopStatement{Pos: Pos{Line: 5, Column: 12}, Run: true},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f, err := Parse(strings.NewReader(tc.src), WithSourceFormat(FixedFormat))
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, f)
+
+			// The same source must NOT parse as free format: the columns 1–6
+			// sequence numbers are only ignored in fixed format, so a free-format
+			// parse sees them as stray tokens and errors. This proves the option
+			// is actually wired through to the tokenizer rather than a no-op.
+			_, freeErr := Parse(strings.NewReader(tc.src))
+			require.Error(t, freeErr)
+		})
+	}
+}
+
+// TestParserDefaultSourceFormat pins the documented default: parsing with no
+// options is free format, and WithSourceFormat(FreeFormat) is equivalent.
+func TestParserDefaultSourceFormat(t *testing.T) {
+	t.Parallel()
+
+	src := "IDENTIFICATION DIVISION.\n" +
+		"PROGRAM-ID. HELLO.\n" +
+		"PROCEDURE DIVISION.\n" +
+		"    DISPLAY \"Hello, world!\".\n" +
+		"    STOP RUN.\n"
+
+	defaultAST, err := Parse(strings.NewReader(src))
+	require.NoError(t, err)
+
+	explicitAST, err := Parse(strings.NewReader(src), WithSourceFormat(FreeFormat))
+	require.NoError(t, err)
+
+	require.Equal(t, defaultAST, explicitAST)
+}
+
+// TestSourceFormatString pins the String() rendering of each SourceFormat.
+func TestSourceFormatString(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		format   SourceFormat
+		expected string
+	}{
+		{name: "free", format: FreeFormat, expected: "Free"},
+		{name: "fixed", format: FixedFormat, expected: "Fixed"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tc.expected, tc.format.String())
+		})
+	}
+}
+
 // dataManipFile wraps procedure-division sentences in the standard single-paragraph
 // program scaffold (program-name P) shared by the data-manipulation parser cases.
 func dataManipFile(sentences []*Sentence) *File {

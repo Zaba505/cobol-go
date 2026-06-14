@@ -1397,12 +1397,74 @@ type RenamesClause struct {
 
 func (*RenamesClause) dataClause() {}
 
+// SourceFormat selects the COBOL reference format [Parse] uses to read source.
+type SourceFormat int
+
+const (
+	FreeFormat SourceFormat = iota // no column significance (the default)
+	// FixedFormat is the column-oriented "reference format": column positions
+	// are significant — sequence area (1–6, ignored), indicator (7), Area A/B
+	// (8–72), and the identification area (73+, ignored).
+	FixedFormat
+)
+
+func (f SourceFormat) String() string {
+	switch f {
+	case FreeFormat:
+		return "Free"
+	case FixedFormat:
+		return "Fixed"
+	default:
+		panic(fmt.Sprintf("unknown source format: %d", f))
+	}
+}
+
+// ParseOption configures [Parse].
+type ParseOption func(*parseConfig)
+
+// parseConfig holds the resolved [ParseOption] values; its zero value selects
+// the defaults ([FreeFormat]).
+type parseConfig struct {
+	// format is the reference format used to tokenize the source. FreeFormat is
+	// the zero value and the default.
+	format SourceFormat
+}
+
+// WithSourceFormat selects the reference format [Parse] uses to tokenize the
+// source. The default is [FreeFormat]; pass [FixedFormat] for column-oriented
+// ("reference format") source.
+//
+// This is the parser-level counterpart of the tokenizer's [WithFixedFormat];
+// honoring an in-source >>SOURCE FORMAT directive is a later story.
+func WithSourceFormat(f SourceFormat) ParseOption {
+	return func(c *parseConfig) { c.format = f }
+}
+
 // Parse the COBOL source from the given reader into a [File].
 //
 // It pulls tokens from [Tokenize] with [iter.Pull2] and runs the top-level
 // action loop against a *File.
-func Parse(r io.Reader) (*File, error) {
-	next, stop := iter.Pull2(Tokenize(r))
+//
+// By default the source is read as free format. Pass
+// [WithSourceFormat]([FixedFormat]) to parse fixed-format ("reference format")
+// source instead.
+func Parse(r io.Reader, opts ...ParseOption) (*File, error) {
+	cfg := parseConfig{} // zero value => FreeFormat
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	var topts []TokenizeOption
+	switch cfg.format {
+	case FreeFormat:
+		// no column significance; the tokenizer's default
+	case FixedFormat:
+		topts = append(topts, WithFixedFormat())
+	default:
+		panic(fmt.Sprintf("unknown source format: %d", cfg.format))
+	}
+
+	next, stop := iter.Pull2(Tokenize(r, topts...))
 	defer stop()
 
 	p := &parser{next: next}
