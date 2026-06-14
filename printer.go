@@ -74,6 +74,60 @@ func writeThen(s string, next printerAction) printerAction {
 	}
 }
 
+// printComments emits a node's leading comments — one free-format "*>" line per
+// comment at the given nesting depth — then continues with next. An empty slice
+// is a no-op. The parser normalized each comment's text, so a fixed-format
+// column-7 banner ("* note") and a free-format comment ("*> note") both re-emit
+// identically as "*> note", keeping Parse -> Print -> Parse stable (SPEC
+// "Reference format independence"). It mirrors the closure-over-index pattern of
+// the other slice printers (e.g. printDivisionAt).
+func printComments(comments []*Comment, depth int, next printerAction) printerAction {
+	return printCommentAt(comments, depth, 0, next)
+}
+
+func printCommentAt(comments []*Comment, depth, i int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if i >= len(comments) {
+			return next
+		}
+		c := comments[i]
+		if c == nil {
+			return failPrint(UnsupportedNodeError{Node: c})
+		}
+		if c.Text == "" {
+			pr.write(indent(depth) + "*>\n")
+		} else {
+			pr.write(indent(depth) + "*> " + c.Text + "\n")
+		}
+		return printCommentAt(comments, depth, i+1, next)
+	}
+}
+
+// divComments returns a division's leading comments without panicking on a
+// typed-nil division (an interface holding a nil concrete pointer), which the
+// concrete printers reject separately.
+func divComments(div Division) []*Comment {
+	switch d := div.(type) {
+	case *IdentificationDivision:
+		if d != nil {
+			return d.Comments
+		}
+	case *EnvironmentDivision:
+		if d != nil {
+			return d.Comments
+		}
+	case *DataDivision:
+		if d != nil {
+			return d.Comments
+		}
+	case *ProcedureDivision:
+		if d != nil {
+			return d.Comments
+		}
+	}
+	return nil
+}
+
 // failPrint returns a terminal action that records err and stops the loop — the
 // printer's only structural-error path (write failures already set pr.err).
 func failPrint(err error) printerAction {
@@ -124,7 +178,7 @@ func printProgram(prog *Program, next printerAction) printerAction {
 			tail = printEndProgram(prog.End, tail)
 		}
 		tail = printNestedProgramAt(prog.Nested, 0, tail)
-		return printDivisionAt(prog, 0, tail)
+		return printComments(prog.Comments, 0, printDivisionAt(prog, 0, tail))
 	}
 }
 
@@ -172,18 +226,21 @@ func printDivisionAt(prog *Program, i int, next printerAction) printerAction {
 // loop with an [UnsupportedNodeError] rather than silently dropping the division
 // and emitting invalid source.
 func printDivision(div Division, next printerAction) printerAction {
-	switch d := div.(type) {
-	case *IdentificationDivision:
-		return printIdentificationDivision(d, next)
-	case *EnvironmentDivision:
-		return printEnvironmentDivision(d, next)
-	case *DataDivision:
-		return printDataDivision(d, next)
-	case *ProcedureDivision:
-		return printProcedureDivision(d, next)
-	default:
-		return failPrint(UnsupportedNodeError{Node: div})
+	body := func(pr *printer, f *File) printerAction {
+		switch d := div.(type) {
+		case *IdentificationDivision:
+			return printIdentificationDivision(d, next)
+		case *EnvironmentDivision:
+			return printEnvironmentDivision(d, next)
+		case *DataDivision:
+			return printDataDivision(d, next)
+		case *ProcedureDivision:
+			return printProcedureDivision(d, next)
+		default:
+			return failPrint(UnsupportedNodeError{Node: div})
+		}
 	}
+	return printComments(divComments(div), 0, body)
 }
 
 // printEnvironmentDivision prints the ENVIRONMENT DIVISION header followed by its
@@ -558,22 +615,25 @@ func printDataEntry(entry *DataDescriptionEntry, depth int, next printerAction) 
 		if entry == nil {
 			return failPrint(UnsupportedNodeError{Node: entry})
 		}
-		pr.writef("%s%02d", indent(depth), entry.Level)
-		if entry.Filler {
-			pr.write(" FILLER")
-		} else if entry.Name != nil {
-			pr.writef(" %s", entry.Name.Value)
-		}
-		for _, clause := range entry.Clauses {
-			text, ok := dataClauseText(clause)
-			if !ok {
-				return failPrint(UnsupportedNodeError{Node: clause})
+		body := func(pr *printer, f *File) printerAction {
+			pr.writef("%s%02d", indent(depth), entry.Level)
+			if entry.Filler {
+				pr.write(" FILLER")
+			} else if entry.Name != nil {
+				pr.writef(" %s", entry.Name.Value)
 			}
-			pr.write(" ")
-			pr.write(text)
+			for _, clause := range entry.Clauses {
+				text, ok := dataClauseText(clause)
+				if !ok {
+					return failPrint(UnsupportedNodeError{Node: clause})
+				}
+				pr.write(" ")
+				pr.write(text)
+			}
+			pr.write(".\n")
+			return next
 		}
-		pr.write(".\n")
-		return next
+		return printComments(entry.Comments, depth, body)
 	}
 }
 
@@ -907,7 +967,8 @@ func printSection(sec *Section, next printerAction) printerAction {
 		if sec.Segment != nil {
 			header += " " + sec.Segment.Value
 		}
-		return writeThen(header+".\n", printParagraphAt(sec.Paragraphs, 0, next))
+		return printComments(sec.Comments, 0,
+			writeThen(header+".\n", printParagraphAt(sec.Paragraphs, 0, next)))
 	}
 }
 
@@ -931,10 +992,10 @@ func printParagraph(para *Paragraph, next printerAction) printerAction {
 			return failPrint(UnsupportedNodeError{Node: para})
 		}
 		body := printSentenceAt(para.Sentences, 0, next)
-		if para.Name == nil {
-			return body
+		if para.Name != nil {
+			body = writeThen(para.Name.Value+".\n", body)
 		}
-		return writeThen(para.Name.Value+".\n", body)
+		return printComments(para.Comments, 0, body)
 	}
 }
 
@@ -957,7 +1018,7 @@ func printSentence(sent *Sentence, next printerAction) printerAction {
 		if sent == nil || len(sent.Statements) == 0 {
 			return failPrint(UnsupportedNodeError{Node: sent})
 		}
-		return printSentenceStatementAt(sent, 0, next)
+		return printComments(sent.Comments, 1, printSentenceStatementAt(sent, 0, next))
 	}
 }
 

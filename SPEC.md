@@ -207,6 +207,24 @@ marks whole-line comments (*GnuCOBOL §2.1.16*):
   program is compiled `WITH DEBUGGING MODE` (the `SOURCE-COMPUTER … WITH
   DEBUGGING MODE` clause), in which case columns 8–72 are ordinary Area B source.
 
+> **Implementation note (#23): comment preservation.** A comment (a free-format
+> `*>` or a fixed-format column-7 `*`/`/` line) is parsed into a `Comment` AST
+> node and attached as the **leading** comments of the structural node it
+> precedes — the program, a division, a section, a paragraph, a sentence, or a
+> data-description entry. A comment's `Text` is **normalized**: the introducer and
+> one following space (plus any trailing spaces) are removed, so the same comment
+> compares equal across reference formats. The printer always re-emits a comment
+> as a free-format `*>` line at the node's indent; together with normalization
+> this keeps `Parse → Print → Parse` stable (a fixed-format `* note` and a
+> free-format `*> note` both round-trip to the `Comment{Text: "note"}` node).
+> Each comment attaches to the **next** structural node, so an inline comment
+> written after code on the same line is re-emitted on its own line before the
+> following node rather than kept inline — meaning-preserving and round-trip
+> stable, but not position-faithful. A comment with no following node (a trailing
+> comment at end of input) is not attached and does not survive printing;
+> preserving those is deferred. A `D`/`d` debugging line is still tokenized as a
+> `Debug` token, not a `Comment`, and is not attached.
+
 ### Line Continuation
 
 How a long construct is spread across multiple physical lines is the other
