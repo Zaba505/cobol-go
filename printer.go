@@ -1562,9 +1562,10 @@ func printStartStatement(stmt *StartStatement, depth int, next printerAction) pr
 	}
 }
 
-// printInitializeStatement prints an INITIALIZE statement on one line: the verb and
-// its receiving identifiers. A typed-nil statement, one with no receiver, or an
-// unprintable identifier is rejected with an [UnsupportedNodeError].
+// printInitializeStatement prints an INITIALIZE statement on one line: the verb, its
+// receiving identifiers, and the optional WITH FILLER, "… TO VALUE", REPLACING, and
+// DEFAULT phrases. A typed-nil statement, one with no receiver, or an unprintable
+// identifier or operand is rejected with an [UnsupportedNodeError].
 func printInitializeStatement(stmt *InitializeStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
 		if stmt == nil || len(stmt.Targets) == 0 {
@@ -1577,6 +1578,38 @@ func printInitializeStatement(stmt *InitializeStatement, depth int, next printer
 				return failPrint(UnsupportedNodeError{Node: t})
 			}
 			pr.write(" " + text)
+		}
+		if stmt.Filler {
+			pr.write(" WITH FILLER")
+		}
+		if len(stmt.ToValue) > 0 {
+			for _, w := range stmt.ToValue {
+				if w == nil {
+					return failPrint(UnsupportedNodeError{Node: stmt})
+				}
+				pr.write(" " + w.Value)
+			}
+			pr.write(" TO VALUE")
+		}
+		if len(stmt.Replacing) > 0 {
+			pr.write(" REPLACING")
+			for _, rep := range stmt.Replacing {
+				if rep == nil || rep.Category == nil {
+					return failPrint(UnsupportedNodeError{Node: stmt})
+				}
+				pr.write(" " + rep.Category.Value)
+				if rep.Data {
+					pr.write(" DATA")
+				}
+				by, ok := valueText(rep.By)
+				if !ok {
+					return failPrint(UnsupportedNodeError{Node: rep.By})
+				}
+				pr.write(" BY " + by)
+			}
+		}
+		if stmt.Default {
+			pr.write(" DEFAULT")
 		}
 		return next
 	}
@@ -1603,7 +1636,11 @@ func printSetStatement(stmt *SetStatement, depth int, next printerAction) printe
 			if !ok {
 				return failPrint(UnsupportedNodeError{Node: t})
 			}
-			pr.write(" " + text)
+			if stmt.TargetIsAddr {
+				pr.write(" ADDRESS OF " + text)
+			} else {
+				pr.write(" " + text)
+			}
 		}
 		val, ok := valueText(stmt.Value)
 		if !ok {
@@ -1789,12 +1826,13 @@ func printOverflowPhrases(ph OverflowPhrases, depth int, next printerAction) pri
 }
 
 // printInspectStatement prints an INSPECT statement on one line: the verb, the
-// inspected item, an optional TALLYING clause list, and an optional REPLACING clause
-// list. A typed-nil statement, a missing target, no clause, or an unprintable
-// operand is rejected with an [UnsupportedNodeError].
+// inspected item, and an optional TALLYING clause list, REPLACING clause list, and
+// CONVERTING phrase. A typed-nil statement, a missing target, no clause, or an
+// unprintable operand is rejected with an [UnsupportedNodeError].
 func printInspectStatement(stmt *InspectStatement, depth int, next printerAction) printerAction {
 	return func(pr *printer, f *File) printerAction {
-		if stmt == nil || stmt.Target == nil || (len(stmt.Tallying) == 0 && len(stmt.Replacing) == 0) {
+		if stmt == nil || stmt.Target == nil ||
+			(len(stmt.Tallying) == 0 && len(stmt.Replacing) == 0 && stmt.Converting == nil) {
 			return failPrint(UnsupportedNodeError{Node: stmt})
 		}
 		target, ok := identifierText(stmt.Target)
@@ -1832,8 +1870,40 @@ func printInspectStatement(stmt *InspectStatement, depth int, next printerAction
 				pr.write(text)
 			}
 		}
+		if stmt.Converting != nil {
+			text, ok := inspectConvertText(stmt.Converting)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt})
+			}
+			pr.write(text)
+		}
 		return next
 	}
+}
+
+// inspectConvertText renders an INSPECT CONVERTING phrase, with a leading space:
+// " CONVERTING <from> TO <to>", plus an optional BEFORE/AFTER region.
+func inspectConvertText(c *InspectConvert) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	from, ok := valueText(c.From)
+	if !ok {
+		return "", false
+	}
+	to, ok := valueText(c.To)
+	if !ok {
+		return "", false
+	}
+	s := " CONVERTING " + from + " TO " + to
+	if c.Region != nil {
+		region, ok := inspectRegionText(c.Region)
+		if !ok {
+			return "", false
+		}
+		s += region
+	}
+	return s, true
 }
 
 // inspectMatchText renders one TALLYING … FOR specification, with a leading space:
@@ -2557,6 +2627,15 @@ func valueText(v Type) (string, bool) {
 		return n.Value, true
 	case *Identifier:
 		return identifierText(n)
+	case *AddressOf:
+		if n == nil || n.Of == nil {
+			return "", false
+		}
+		of, ok := identifierText(n.Of)
+		if !ok {
+			return "", false
+		}
+		return "ADDRESS OF " + of, true
 	default:
 		return "", false
 	}

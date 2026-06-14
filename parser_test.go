@@ -2294,6 +2294,193 @@ func TestParser(t *testing.T) {
 				},
 			}),
 		},
+		{
+			name: "inspect converting statement",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INSPECT WS-T CONVERTING \"ab\" TO \"AB\" AFTER INITIAL \" \".\n",
+			expected: dataManipFile([]*Sentence{
+				{
+					Pos: Pos{Line: 4, Column: 5},
+					Statements: []Statement{
+						&InspectStatement{
+							Pos:    Pos{Line: 4, Column: 5},
+							Target: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "WS-T"}},
+							Converting: &InspectConvert{
+								Pos:  Pos{Line: 4, Column: 18},
+								From: &StringLiteral{Pos: Pos{Line: 4, Column: 29}, Value: "\"ab\""},
+								To:   &StringLiteral{Pos: Pos{Line: 4, Column: 37}, Value: "\"AB\""},
+								Region: &InspectRegion{
+									Pos:     Pos{Line: 4, Column: 42},
+									Kind:    "AFTER",
+									Initial: true,
+									Operand: &StringLiteral{Pos: Pos{Line: 4, Column: 56}, Value: "\" \""},
+								},
+							},
+						},
+					},
+				},
+			}),
+		},
+		{
+			name: "set pointer and switch forms",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SET P TO ADDRESS OF R.\n" +
+				"    SET ADDRESS OF R TO P.\n" +
+				"    SET S TO ON.\n" +
+				"    SET S TO OFF.\n",
+			expected: dataManipFile([]*Sentence{
+				{
+					Pos: Pos{Line: 4, Column: 5},
+					Statements: []Statement{
+						&SetStatement{
+							Pos:     Pos{Line: 4, Column: 5},
+							Targets: []*Identifier{{Pos: Pos{Line: 4, Column: 9}, Name: &Word{Pos: Pos{Line: 4, Column: 9}, Value: "P"}}},
+							Mode:    "TO",
+							Value: &AddressOf{
+								Pos: Pos{Line: 4, Column: 14},
+								Of:  &Identifier{Pos: Pos{Line: 4, Column: 25}, Name: &Word{Pos: Pos{Line: 4, Column: 25}, Value: "R"}},
+							},
+						},
+					},
+				},
+				{
+					Pos: Pos{Line: 5, Column: 5},
+					Statements: []Statement{
+						&SetStatement{
+							Pos:          Pos{Line: 5, Column: 5},
+							Targets:      []*Identifier{{Pos: Pos{Line: 5, Column: 20}, Name: &Word{Pos: Pos{Line: 5, Column: 20}, Value: "R"}}},
+							TargetIsAddr: true,
+							Mode:         "TO",
+							Value:        &Identifier{Pos: Pos{Line: 5, Column: 25}, Name: &Word{Pos: Pos{Line: 5, Column: 25}, Value: "P"}},
+						},
+					},
+				},
+				{
+					Pos: Pos{Line: 6, Column: 5},
+					Statements: []Statement{
+						&SetStatement{
+							Pos:     Pos{Line: 6, Column: 5},
+							Targets: []*Identifier{{Pos: Pos{Line: 6, Column: 9}, Name: &Word{Pos: Pos{Line: 6, Column: 9}, Value: "S"}}},
+							Mode:    "TO",
+							Value:   &Word{Pos: Pos{Line: 6, Column: 14}, Value: "ON"},
+						},
+					},
+				},
+				{
+					Pos: Pos{Line: 7, Column: 5},
+					Statements: []Statement{
+						&SetStatement{
+							Pos:     Pos{Line: 7, Column: 5},
+							Targets: []*Identifier{{Pos: Pos{Line: 7, Column: 9}, Name: &Word{Pos: Pos{Line: 7, Column: 9}, Value: "S"}}},
+							Mode:    "TO",
+							Value:   &Word{Pos: Pos{Line: 7, Column: 14}, Value: "OFF"},
+						},
+					},
+				},
+			}),
+		},
+		{
+			name: "initialize replacing filler value and default",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INITIALIZE A REPLACING NUMERIC BY 0.\n" +
+				"    INITIALIZE B WITH FILLER ALL TO VALUE.\n" +
+				"    INITIALIZE C REPLACING ALPHANUMERIC DATA BY SPACE DEFAULT.\n",
+			expected: dataManipFile([]*Sentence{
+				{
+					Pos: Pos{Line: 4, Column: 5},
+					Statements: []Statement{
+						&InitializeStatement{
+							Pos:     Pos{Line: 4, Column: 5},
+							Targets: []*Identifier{{Pos: Pos{Line: 4, Column: 16}, Name: &Word{Pos: Pos{Line: 4, Column: 16}, Value: "A"}}},
+							Replacing: []*InitializeReplace{
+								{
+									Pos:      Pos{Line: 4, Column: 28},
+									Category: &Word{Pos: Pos{Line: 4, Column: 28}, Value: "NUMERIC"},
+									By:       &NumericLiteral{Pos: Pos{Line: 4, Column: 39}, Value: "0"},
+								},
+							},
+						},
+					},
+				},
+				{
+					Pos: Pos{Line: 5, Column: 5},
+					Statements: []Statement{
+						&InitializeStatement{
+							Pos:     Pos{Line: 5, Column: 5},
+							Targets: []*Identifier{{Pos: Pos{Line: 5, Column: 16}, Name: &Word{Pos: Pos{Line: 5, Column: 16}, Value: "B"}}},
+							Filler:  true,
+							ToValue: []*Word{{Pos: Pos{Line: 5, Column: 30}, Value: "ALL"}},
+						},
+					},
+				},
+				{
+					Pos: Pos{Line: 6, Column: 5},
+					Statements: []Statement{
+						&InitializeStatement{
+							Pos:     Pos{Line: 6, Column: 5},
+							Targets: []*Identifier{{Pos: Pos{Line: 6, Column: 16}, Name: &Word{Pos: Pos{Line: 6, Column: 16}, Value: "C"}}},
+							Replacing: []*InitializeReplace{
+								{
+									Pos:      Pos{Line: 6, Column: 28},
+									Category: &Word{Pos: Pos{Line: 6, Column: 28}, Value: "ALPHANUMERIC"},
+									Data:     true,
+									By:       &Identifier{Pos: Pos{Line: 6, Column: 49}, Name: &Word{Pos: Pos{Line: 6, Column: 49}, Value: "SPACE"}},
+								},
+							},
+							Default: true,
+						},
+					},
+				},
+			}),
+		},
+		{
+			name: "search all with conjunction",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SEARCH ALL T WHEN K = 1 AND V DISPLAY \"f\" END-SEARCH.\n",
+			expected: dataManipFile([]*Sentence{
+				{
+					Pos: Pos{Line: 4, Column: 5},
+					Statements: []Statement{
+						&SearchStatement{
+							Pos:    Pos{Line: 4, Column: 5},
+							All:    true,
+							Target: &Identifier{Pos: Pos{Line: 4, Column: 16}, Name: &Word{Pos: Pos{Line: 4, Column: 16}, Value: "T"}},
+							Whens: []*SearchWhen{
+								{
+									Pos: Pos{Line: 4, Column: 18},
+									Cond: &LogicalCondition{
+										Pos: Pos{Line: 4, Column: 23},
+										Op:  "AND",
+										Left: &RelationCondition{
+											Pos:   Pos{Line: 4, Column: 23},
+											Left:  &Identifier{Pos: Pos{Line: 4, Column: 23}, Name: &Word{Pos: Pos{Line: 4, Column: 23}, Value: "K"}},
+											Op:    "=",
+											Right: &NumericLiteral{Pos: Pos{Line: 4, Column: 27}, Value: "1"},
+										},
+										Right: &ConditionNameCondition{Pos: Pos{Line: 4, Column: 33}, Name: &Identifier{Pos: Pos{Line: 4, Column: 33}, Name: &Word{Pos: Pos{Line: 4, Column: 33}, Value: "V"}}},
+									},
+									Body: []Statement{
+										&DisplayStatement{
+											Pos:      Pos{Line: 4, Column: 35},
+											Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 43}, Value: "\"f\""}},
+										},
+									},
+								},
+							},
+							EndSearch: true,
+						},
+					},
+				},
+			}),
+		},
 	}
 
 	for _, tc := range testCases {
@@ -2986,6 +3173,42 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedKeywordError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 17}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "search all with multiple whens",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SEARCH ALL WS-T WHEN A = 1 WHEN B = 2 END-SEARCH.\n",
+			assert: func(t *testing.T, err error) {
+				var target SearchAllConstraintError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 32}, target.Pos)
+			},
+		},
+		{
+			name: "search all with or condition",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SEARCH ALL WS-T WHEN A = 1 OR B = 2 END-SEARCH.\n",
+			assert: func(t *testing.T, err error) {
+				var target SearchAllConstraintError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 21}, target.Pos)
+			},
+		},
+		{
+			name: "search all with non-equality condition",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SEARCH ALL WS-T WHEN A > 1 END-SEARCH.\n",
+			assert: func(t *testing.T, err error) {
+				var target SearchAllConstraintError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 21}, target.Pos)
 			},
 		},
 	}

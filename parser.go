@@ -651,29 +651,57 @@ type EvaluateObject struct {
 // InitializeStatement is an INITIALIZE statement (SPEC.md "initialize-statement"):
 // it sets one or more data items to the standard initial value for their category.
 // Pos is the position of the INITIALIZE keyword; Targets are the receiving items in
-// source order. (The REPLACING/DEFAULT/category phrases are deferred to a later
-// story.)
+// source order. Filler reports the WITH FILLER phrase; ToValue holds the
+// category/ALL keywords of a "… TO VALUE" phrase (nil when absent); Replacing are
+// the REPLACING specifications; Default reports a trailing DEFAULT.
 type InitializeStatement struct {
-	Pos     Pos
-	Targets []*Identifier
+	Pos       Pos
+	Targets   []*Identifier
+	Filler    bool
+	ToValue   []*Word
+	Replacing []*InitializeReplace
+	Default   bool
 }
 
 func (*InitializeStatement) statement() {}
 
-// SetStatement is a SET statement (SPEC.md "set-statement") in its index/assignment
-// forms. Pos is the position of the SET keyword; Targets are the receiving items.
-// Mode is the canonical operation — "TO", "UP BY", or "DOWN BY". Value is the
-// assigned/increment value: an operand, or a *Word holding the keyword "TRUE" or
-// "FALSE" for the SET … TO TRUE/FALSE form. (Pointer/ADDRESS and ON/OFF switch
-// forms are deferred to a later story.)
+// InitializeReplace is one REPLACING specification of an INITIALIZE statement. Pos
+// is the position of the category keyword; Category is that keyword (canonical
+// upper case — "ALPHABETIC", "NUMERIC", …); Data reports an explicit DATA noise
+// word; By is the replacement operand.
+type InitializeReplace struct {
+	Pos      Pos
+	Category *Word
+	Data     bool
+	By       Type
+}
+
+// SetStatement is a SET statement (SPEC.md "set-statement"). Pos is the position of
+// the SET keyword; Targets are the receiving items. TargetIsAddr reports the
+// "SET ADDRESS OF <Targets…> TO …" pointer form, in which each target is the
+// operand of an ADDRESS OF. Mode is the canonical operation — "TO", "UP BY", or
+// "DOWN BY". Value is the assigned/increment value: an operand; a *Word holding a
+// keyword ("TRUE", "FALSE", "ON", or "OFF"); or an *AddressOf for the
+// "TO ADDRESS OF <id>" form.
 type SetStatement struct {
-	Pos     Pos
-	Targets []*Identifier
-	Mode    string
-	Value   Type
+	Pos          Pos
+	Targets      []*Identifier
+	TargetIsAddr bool
+	Mode         string
+	Value        Type
 }
 
 func (*SetStatement) statement() {}
+
+// AddressOf is an ADDRESS OF data reference used as a SET value (or, with the
+// target-address form, receiver). Pos is the position of the ADDRESS keyword; Of is
+// the referenced data item.
+type AddressOf struct {
+	Pos Pos
+	Of  *Identifier
+}
+
+func (*AddressOf) cobol() {}
 
 // StringStatement is a STRING statement (SPEC.md "string-statement"): it
 // concatenates sending fields into a receiver. Pos is the position of the STRING
@@ -741,18 +769,30 @@ type UnstringTarget struct {
 	Count     *Identifier
 }
 
-// InspectStatement is an INSPECT statement (SPEC.md "inspect-statement") in its
-// TALLYING and/or REPLACING forms. Pos is the position of the INSPECT keyword;
-// Target is the inspected identifier; Tallying are the TALLYING clauses; Replacing
-// are the REPLACING clauses. (The CONVERTING form is deferred to a later story.)
+// InspectStatement is an INSPECT statement (SPEC.md "inspect-statement"). Pos is the
+// position of the INSPECT keyword; Target is the inspected identifier; Tallying are
+// the TALLYING clauses; Replacing are the REPLACING clauses; Converting is the
+// CONVERTING phrase (nil when absent).
 type InspectStatement struct {
-	Pos       Pos
-	Target    *Identifier
-	Tallying  []*InspectTally
-	Replacing []*InspectReplace
+	Pos        Pos
+	Target     *Identifier
+	Tallying   []*InspectTally
+	Replacing  []*InspectReplace
+	Converting *InspectConvert
 }
 
 func (*InspectStatement) statement() {}
+
+// InspectConvert is the CONVERTING phrase of an INSPECT statement: it translates the
+// characters of From to the corresponding characters of To. Pos is the position of
+// the CONVERTING keyword; From is the search set; To is the replacement set; Region
+// is the optional BEFORE/AFTER INITIAL restriction.
+type InspectConvert struct {
+	Pos    Pos
+	From   Type
+	To     Type
+	Region *InspectRegion
+}
 
 // InspectTally is one TALLYING clause of an INSPECT statement: a counter and the
 // FOR specifications counted into it. Pos is the position of the counter; Count is
@@ -5716,25 +5756,193 @@ func parseCallArgument(p *parser) (*CallArgument, error) {
 // sub-grammar with its own natural precedence recursion, so plain recursive
 // helpers returning (Expr, error) / (*Identifier, error) are idiomatic here.
 
-// parseInitializeStatement parses an INITIALIZE statement whose verb kw has already
-// been read: one or more receiving identifiers.
-func parseInitializeStatement(p *parser, kw Token) (Statement, error) {
-	targets, err := parseIdentifierList(p)
-	if err != nil {
-		return nil, err
-	}
-	return &InitializeStatement{Pos: kw.Pos, Targets: targets}, nil
+// initializeCategories are the data category keywords usable in an INITIALIZE
+// statement's "… TO VALUE" and REPLACING phrases.
+var initializeCategories = []string{
+	"ALPHABETIC", "ALPHANUMERIC", "NUMERIC", "ALPHANUMERIC-EDITED",
+	"NUMERIC-EDITED", "NATIONAL", "NATIONAL-EDITED",
 }
 
-// parseSetStatement parses a SET statement whose verb kw has already been read: one
-// or more receivers followed by either "TO" ( operand | TRUE | FALSE ) or
-// ( "UP" | "DOWN" ) "BY" operand.
+// parseInitializeStatement parses an INITIALIZE statement whose verb kw has already
+// been read: one or more receiving identifiers, then the optional WITH FILLER,
+// "… TO VALUE", REPLACING, and DEFAULT phrases in that order.
+func parseInitializeStatement(p *parser, kw Token) (Statement, error) {
+	targets, err := parseInitializeTargets(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt := &InitializeStatement{Pos: kw.Pos, Targets: targets}
+
+	if _, ok, err := p.acceptKeyword("WITH"); err != nil {
+		return nil, err
+	} else if ok {
+		if _, err := p.expectKeyword("FILLER"); err != nil {
+			return nil, err
+		}
+		stmt.Filler = true
+	}
+
+	if cats, ok, err := parseInitializeToValue(p); err != nil {
+		return nil, err
+	} else if ok {
+		stmt.ToValue = cats
+	}
+
+	if _, ok, err := p.acceptKeyword("REPLACING"); err != nil {
+		return nil, err
+	} else if ok {
+		replacing, err := parseInitializeReplacing(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Replacing = replacing
+	}
+
+	if _, ok, err := p.acceptKeyword("DEFAULT"); err != nil {
+		return nil, err
+	} else if ok {
+		stmt.Default = true
+	}
+	return stmt, nil
+}
+
+// parseInitializeTargets parses the receiving identifiers of an INITIALIZE
+// statement. Unlike parseIdentifierList, it also stops at the clause keywords that
+// tokenize as plain identifiers (ALL, a category, VALUE, DEFAULT, FILLER) so they
+// open their phrase rather than being swallowed as targets.
+func parseInitializeTargets(p *parser) ([]*Identifier, error) {
+	first, err := parseIdentifierToken(p)
+	if err != nil {
+		return nil, err
+	}
+	ids := []*Identifier{first}
+	for {
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !isOperandStart(tok) || isInitializeClauseStart(tok) {
+			return ids, nil
+		}
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+}
+
+// isInitializeClauseStart reports whether tok opens an INITIALIZE phrase but
+// tokenizes as a plain identifier, so the target list must stop before it.
+func isInitializeClauseStart(tok Token) bool {
+	return keywordIs(tok, "ALL", "VALUE", "DEFAULT", "FILLER") ||
+		keywordIs(tok, initializeCategories...)
+}
+
+// initializeValueKeywords are the keywords usable before "TO VALUE": ALL and the
+// data categories.
+var initializeValueKeywords = append([]string{"ALL"}, initializeCategories...)
+
+// parseInitializeToValue parses an optional "( ALL | category { category } ) TO
+// VALUE" phrase, returning the category/ALL keywords and whether the phrase was
+// present.
+func parseInitializeToValue(p *parser) ([]*Word, bool, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok || !keywordIs(tok, initializeValueKeywords...) {
+		return nil, false, nil
+	}
+	var cats []*Word
+	for {
+		w, ok, err := p.acceptKeyword(initializeValueKeywords...)
+		if err != nil {
+			return nil, false, err
+		}
+		if !ok {
+			break
+		}
+		cats = append(cats, &Word{Pos: w.Pos, Value: strings.ToUpper(string(w.Value))})
+	}
+	if _, err := p.expectKeyword("TO"); err != nil {
+		return nil, false, err
+	}
+	if _, err := p.expectKeyword("VALUE"); err != nil {
+		return nil, false, err
+	}
+	return cats, true, nil
+}
+
+// parseInitializeReplacing parses one or more "category [DATA] BY operand"
+// specifications of an INITIALIZE REPLACING phrase, whose REPLACING keyword has
+// already been read.
+func parseInitializeReplacing(p *parser) ([]*InitializeReplace, error) {
+	var replacing []*InitializeReplace
+	for {
+		cat, ok, err := p.acceptKeyword(initializeCategories...)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		rep := &InitializeReplace{Pos: cat.Pos, Category: &Word{Pos: cat.Pos, Value: strings.ToUpper(string(cat.Value))}}
+		if _, ok, err := p.acceptKeyword("DATA"); err != nil {
+			return nil, err
+		} else if ok {
+			rep.Data = true
+		}
+		if _, err := p.expectKeyword("BY"); err != nil {
+			return nil, err
+		}
+		by, err := parseOperand(p)
+		if err != nil {
+			return nil, err
+		}
+		rep.By = by
+		replacing = append(replacing, rep)
+	}
+	if len(replacing) == 0 {
+		tok, _, _ := p.peek()
+		return nil, UnexpectedKeywordError{Expected: initializeCategories, Actual: tok}
+	}
+	return replacing, nil
+}
+
+// parseSetStatement parses a SET statement whose verb kw has already been read. It
+// recognizes the "SET ADDRESS OF id … TO set-value" pointer form, the index/switch
+// "id … TO set-value" form, and the "id … ( UP | DOWN ) BY operand" form. set-value
+// is an operand, a TRUE/FALSE/ON/OFF keyword, or "ADDRESS OF id".
 func parseSetStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &SetStatement{Pos: kw.Pos}
+
+	if addr, err := p.peekKeyword("ADDRESS"); err != nil {
+		return nil, err
+	} else if addr {
+		targets, err := parseAddressOfTargets(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Targets = targets
+		stmt.TargetIsAddr = true
+		if _, err := p.expectKeyword("TO"); err != nil {
+			return nil, err
+		}
+		stmt.Mode = "TO"
+		val, err := parseSetValue(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Value = val
+		return stmt, nil
+	}
+
 	targets, err := parseIdentifierList(p)
 	if err != nil {
 		return nil, err
 	}
-	stmt := &SetStatement{Pos: kw.Pos, Targets: targets}
+	stmt.Targets = targets
 
 	if dir, ok, err := p.acceptKeywordValue("UP", "DOWN"); err != nil {
 		return nil, err
@@ -5755,18 +5963,57 @@ func parseSetStatement(p *parser, kw Token) (Statement, error) {
 		return nil, err
 	}
 	stmt.Mode = "TO"
-	if b, ok, err := p.acceptKeyword("TRUE", "FALSE"); err != nil {
-		return nil, err
-	} else if ok {
-		stmt.Value = &Word{Pos: b.Pos, Value: strings.ToUpper(string(b.Value))}
-		return stmt, nil
-	}
-	val, err := parseOperand(p)
+	val, err := parseSetValue(p)
 	if err != nil {
 		return nil, err
 	}
 	stmt.Value = val
 	return stmt, nil
+}
+
+// parseAddressOfTargets parses one or more "ADDRESS OF identifier" receivers of a
+// SET statement, returning the referenced identifiers.
+func parseAddressOfTargets(p *parser) ([]*Identifier, error) {
+	var ids []*Identifier
+	for {
+		if _, ok, err := p.acceptKeyword("ADDRESS"); err != nil {
+			return nil, err
+		} else if !ok {
+			break
+		}
+		if _, err := p.expectKeyword("OF"); err != nil {
+			return nil, err
+		}
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// parseSetValue parses the value following a SET … TO: a TRUE/FALSE/ON/OFF keyword,
+// an "ADDRESS OF identifier" reference, or an operand.
+func parseSetValue(p *parser) (Type, error) {
+	if b, ok, err := p.acceptKeyword("TRUE", "FALSE", "ON", "OFF"); err != nil {
+		return nil, err
+	} else if ok {
+		return &Word{Pos: b.Pos, Value: strings.ToUpper(string(b.Value))}, nil
+	}
+	if addr, ok, err := p.acceptKeyword("ADDRESS"); err != nil {
+		return nil, err
+	} else if ok {
+		if _, err := p.expectKeyword("OF"); err != nil {
+			return nil, err
+		}
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		return &AddressOf{Pos: addr.Pos, Of: id}, nil
+	}
+	return parseOperand(p)
 }
 
 // parseStringStatement parses a STRING statement whose verb kw has already been read:
@@ -6099,9 +6346,30 @@ func parseInspectStatement(p *parser, kw Token) (Statement, error) {
 		stmt.Replacing = replaces
 	}
 
-	if len(stmt.Tallying) == 0 && len(stmt.Replacing) == 0 {
+	if conv, ok, err := p.acceptKeyword("CONVERTING"); err != nil {
+		return nil, err
+	} else if ok {
+		from, err := parseOperand(p)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expectKeyword("TO"); err != nil {
+			return nil, err
+		}
+		to, err := parseOperand(p)
+		if err != nil {
+			return nil, err
+		}
+		region, err := parseInspectRegion(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Converting = &InspectConvert{Pos: conv.Pos, From: from, To: to, Region: region}
+	}
+
+	if len(stmt.Tallying) == 0 && len(stmt.Replacing) == 0 && stmt.Converting == nil {
 		tok, _, _ := p.peek()
-		return nil, UnexpectedKeywordError{Expected: []string{"TALLYING", "REPLACING"}, Actual: tok}
+		return nil, UnexpectedKeywordError{Expected: []string{"TALLYING", "REPLACING", "CONVERTING"}, Actual: tok}
 	}
 	return stmt, nil
 }
@@ -6343,6 +6611,14 @@ func parseSearchStatement(p *parser, kw Token) (Statement, error) {
 		tok, _, _ := p.peek()
 		return nil, UnexpectedKeywordError{Expected: []string{"WHEN"}, Actual: tok}
 	}
+	if stmt.All {
+		if len(stmt.Whens) != 1 {
+			return nil, SearchAllConstraintError{Pos: stmt.Whens[1].Pos, Reason: "SEARCH ALL requires exactly one WHEN"}
+		}
+		if !isSearchAllCondition(stmt.Whens[0].Cond) {
+			return nil, SearchAllConstraintError{Pos: stmt.Whens[0].Pos, Reason: "SEARCH ALL WHEN must be an AND of equality or condition-name tests"}
+		}
+	}
 
 	if end, err := p.peekKeyword("END-SEARCH"); err != nil {
 		return nil, err
@@ -6351,6 +6627,23 @@ func parseSearchStatement(p *parser, kw Token) (Statement, error) {
 		stmt.EndSearch = true
 	}
 	return stmt, nil
+}
+
+// isSearchAllCondition reports whether c satisfies the SEARCH ALL constraint: an
+// AND-conjunction of equality ("=") relations and bare condition-name tests. OR,
+// NOT, non-equality relations, class/sign tests, and parenthesized groups are not
+// permitted in a binary-search key condition.
+func isSearchAllCondition(c Condition) bool {
+	switch cc := c.(type) {
+	case *LogicalCondition:
+		return cc.Op == "AND" && isSearchAllCondition(cc.Left) && isSearchAllCondition(cc.Right)
+	case *RelationCondition:
+		return cc.Op == "="
+	case *ConditionNameCondition:
+		return true
+	default:
+		return false
+	}
 }
 
 // acceptAtEnd consumes an optional [ "AT" ] "END" lead-in, reporting whether it was
@@ -7120,4 +7413,18 @@ type InvalidLevelNumberError struct {
 // Error implements the [error] interface.
 func (e InvalidLevelNumberError) Error() string {
 	return fmt.Sprintf("invalid level-number %q at line %d, column %d, expected 01-49, 66, 77, or 88", e.Value, e.Pos.Line, e.Pos.Column)
+}
+
+// SearchAllConstraintError is returned when a SEARCH ALL statement violates the
+// binary-search constraint: it must have exactly one WHEN whose condition is an
+// AND-conjunction of equality or condition-name tests. Pos is the position of the
+// offending WHEN; Reason describes the violation.
+type SearchAllConstraintError struct {
+	Pos    Pos
+	Reason string
+}
+
+// Error implements the [error] interface.
+func (e SearchAllConstraintError) Error() string {
+	return fmt.Sprintf("invalid SEARCH ALL at line %d, column %d: %s", e.Pos.Line, e.Pos.Column, e.Reason)
 }

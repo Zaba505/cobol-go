@@ -714,10 +714,18 @@ start-statement  = "START" file-name
                        [ invalid-key ] [ "END-START" ]
 
 initialize-statement = "INITIALIZE" identifier { identifier }
+                     [ "WITH" "FILLER" ]
+                     [ ( "ALL" | category { category } ) "TO" "VALUE" ]
+                     [ "REPLACING" { category [ "DATA" ] "BY" operand } ]
+                     [ "DEFAULT" ]
+category = "ALPHABETIC" | "ALPHANUMERIC" | "NUMERIC" | "ALPHANUMERIC-EDITED"
+         | "NUMERIC-EDITED" | "NATIONAL" | "NATIONAL-EDITED"
 
-set-statement  = "SET" identifier { identifier }
-                     ( "TO" ( operand | "TRUE" | "FALSE" )
-                     | ( "UP" | "DOWN" ) "BY" operand )
+set-statement  = "SET"
+                     ( "ADDRESS" "OF" identifier { "ADDRESS" "OF" identifier } "TO" set-source
+                     | identifier { identifier }
+                       ( "TO" set-source | ( "UP" | "DOWN" ) "BY" operand ) )
+set-source = operand | "TRUE" | "FALSE" | "ON" | "OFF" | "ADDRESS" "OF" identifier
 
 string-statement = "STRING"
                      { operand { operand } "DELIMITED" [ "BY" ] ( operand | "SIZE" ) }
@@ -737,12 +745,15 @@ inspect-statement = "INSPECT" identifier
                      [ "REPLACING"
                          { ( "CHARACTERS" "BY" operand [ region ]
                            | ( "ALL" | "LEADING" | "FIRST" ) operand "BY" operand [ region ] ) } ]
+                     [ "CONVERTING" operand "TO" operand [ region ] ]
 region = ( "BEFORE" | "AFTER" ) [ "INITIAL" ] operand
 
 search-statement = "SEARCH" [ "ALL" ] identifier
                      [ "VARYING" identifier ] [ [ "AT" ] "END" { statement } ]
                      { "WHEN" condition ( { statement } | "NEXT" "SENTENCE" ) }
                      [ "END-SEARCH" ]
+        « SEARCH ALL admits exactly one WHEN, and its condition must be an
+          AND-conjunction of equality ("=") or condition-name tests »
 
                                           « shared file I/O exception handlers »
 at-end       = [ "AT" ] "END" { statement }
@@ -755,11 +766,11 @@ overflow     = [ "ON" ] "OVERFLOW" { statement }
                  [ "NOT" [ "ON" ] "OVERFLOW" { statement } ]
 ```
 
-The data-manipulation verbs above are parsed at a first-pass depth; the following
-sub-phrases remain deferred to a later story: `INSPECT … CONVERTING`; the SET
-pointer / `ADDRESS OF` and `ON`/`OFF` switch forms; `INITIALIZE … REPLACING` /
-`DEFAULT` / `WITH FILLER`; and the `SEARCH ALL` semantic constraints (a single WHEN
-of AND-joined equality tests).
+The data-manipulation verbs above now include the previously deferred sub-phrases:
+`INSPECT … CONVERTING`; the SET pointer / `ADDRESS OF` and `ON`/`OFF` switch forms;
+`INITIALIZE … REPLACING` / `DEFAULT` / `WITH FILLER` / `… TO VALUE`; and the
+`SEARCH ALL` semantic constraint (a single WHEN of AND-joined equality or
+condition-name tests).
 
 ```ebnf
 operand    = identifier | literal           « literal includes figurative-constant »
