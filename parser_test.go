@@ -1431,6 +1431,115 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "perform varying with after phrases and with test composition",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    PERFORM VARYING I FROM 1 BY 1 UNTIL I > 10 AFTER J FROM 1 BY 1 UNTIL J > 5 AFTER K FROM 1 BY 1 UNTIL K > 3\n" +
+				"        DISPLAY I\n" +
+				"    END-PERFORM.\n" +
+				"    PERFORM WITH TEST AFTER VARYING I FROM 1 BY 1 UNTIL I > 10 AFTER J FROM 1 BY 1 UNTIL J > 5\n" +
+				"        DISPLAY I\n" +
+				"    END-PERFORM.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&PerformStatement{
+														Pos:    Pos{Line: 4, Column: 5},
+														Inline: true,
+														Varying: &PerformVarying{
+															VaryingClause: VaryingClause{
+																Pos:   Pos{Line: 4, Column: 13},
+																Name:  &Identifier{Pos: Pos{Line: 4, Column: 21}, Name: &Word{Pos: Pos{Line: 4, Column: 21}, Value: "I"}},
+																From:  &NumericLiteral{Pos: Pos{Line: 4, Column: 28}, Value: "1"},
+																By:    &NumericLiteral{Pos: Pos{Line: 4, Column: 33}, Value: "1"},
+																Until: &RelationCondition{Pos: Pos{Line: 4, Column: 41}, Left: &Identifier{Pos: Pos{Line: 4, Column: 41}, Name: &Word{Pos: Pos{Line: 4, Column: 41}, Value: "I"}}, Op: ">", Right: &NumericLiteral{Pos: Pos{Line: 4, Column: 45}, Value: "10"}},
+															},
+															After: []VaryingClause{{
+																Pos:   Pos{Line: 4, Column: 48},
+																Name:  &Identifier{Pos: Pos{Line: 4, Column: 54}, Name: &Word{Pos: Pos{Line: 4, Column: 54}, Value: "J"}},
+																From:  &NumericLiteral{Pos: Pos{Line: 4, Column: 61}, Value: "1"},
+																By:    &NumericLiteral{Pos: Pos{Line: 4, Column: 66}, Value: "1"},
+																Until: &RelationCondition{Pos: Pos{Line: 4, Column: 74}, Left: &Identifier{Pos: Pos{Line: 4, Column: 74}, Name: &Word{Pos: Pos{Line: 4, Column: 74}, Value: "J"}}, Op: ">", Right: &NumericLiteral{Pos: Pos{Line: 4, Column: 78}, Value: "5"}},
+															}, {
+																Pos:   Pos{Line: 4, Column: 80},
+																Name:  &Identifier{Pos: Pos{Line: 4, Column: 86}, Name: &Word{Pos: Pos{Line: 4, Column: 86}, Value: "K"}},
+																From:  &NumericLiteral{Pos: Pos{Line: 4, Column: 93}, Value: "1"},
+																By:    &NumericLiteral{Pos: Pos{Line: 4, Column: 98}, Value: "1"},
+																Until: &RelationCondition{Pos: Pos{Line: 4, Column: 106}, Left: &Identifier{Pos: Pos{Line: 4, Column: 106}, Name: &Word{Pos: Pos{Line: 4, Column: 106}, Value: "K"}}, Op: ">", Right: &NumericLiteral{Pos: Pos{Line: 4, Column: 110}, Value: "3"}},
+															}},
+														},
+														Body: []Statement{
+															&DisplayStatement{
+																Pos:      Pos{Line: 5, Column: 9},
+																Operands: []Type{&Identifier{Pos: Pos{Line: 5, Column: 17}, Name: &Word{Pos: Pos{Line: 5, Column: 17}, Value: "I"}}},
+															},
+														},
+														EndPerform: true,
+													},
+												},
+											},
+											{
+												Pos: Pos{Line: 7, Column: 5},
+												Statements: []Statement{
+													&PerformStatement{
+														Pos:       Pos{Line: 7, Column: 5},
+														Inline:    true,
+														TestAfter: true,
+														Varying: &PerformVarying{
+															VaryingClause: VaryingClause{
+																Pos:   Pos{Line: 7, Column: 29},
+																Name:  &Identifier{Pos: Pos{Line: 7, Column: 37}, Name: &Word{Pos: Pos{Line: 7, Column: 37}, Value: "I"}},
+																From:  &NumericLiteral{Pos: Pos{Line: 7, Column: 44}, Value: "1"},
+																By:    &NumericLiteral{Pos: Pos{Line: 7, Column: 49}, Value: "1"},
+																Until: &RelationCondition{Pos: Pos{Line: 7, Column: 57}, Left: &Identifier{Pos: Pos{Line: 7, Column: 57}, Name: &Word{Pos: Pos{Line: 7, Column: 57}, Value: "I"}}, Op: ">", Right: &NumericLiteral{Pos: Pos{Line: 7, Column: 61}, Value: "10"}},
+															},
+															After: []VaryingClause{{
+																Pos:   Pos{Line: 7, Column: 64},
+																Name:  &Identifier{Pos: Pos{Line: 7, Column: 70}, Name: &Word{Pos: Pos{Line: 7, Column: 70}, Value: "J"}},
+																From:  &NumericLiteral{Pos: Pos{Line: 7, Column: 77}, Value: "1"},
+																By:    &NumericLiteral{Pos: Pos{Line: 7, Column: 82}, Value: "1"},
+																Until: &RelationCondition{Pos: Pos{Line: 7, Column: 90}, Left: &Identifier{Pos: Pos{Line: 7, Column: 90}, Name: &Word{Pos: Pos{Line: 7, Column: 90}, Value: "J"}}, Op: ">", Right: &NumericLiteral{Pos: Pos{Line: 7, Column: 94}, Value: "5"}},
+															}},
+														},
+														Body: []Statement{
+															&DisplayStatement{
+																Pos:      Pos{Line: 8, Column: 9},
+																Operands: []Type{&Identifier{Pos: Pos{Line: 8, Column: 17}, Name: &Word{Pos: Pos{Line: 8, Column: 17}, Value: "I"}}},
+															},
+														},
+														EndPerform: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "next sentence in both if branches",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +

@@ -2355,10 +2355,11 @@ func evaluateObjectText(o *EvaluateObject) (string, bool) {
 
 // performLoopText returns the canonical text of a PERFORM loop specification, with
 // a leading space when non-empty, and whether it could be rendered. WITH TEST
-// BEFORE/AFTER only qualifies an UNTIL loop, so TestAfter without an Until is an
-// inconsistent state that would silently drop the phrase and is rejected.
+// BEFORE/AFTER qualifies an UNTIL or VARYING loop, so TestAfter without either an
+// Until or a Varying is an inconsistent state that would silently drop the phrase
+// and is rejected.
 func performLoopText(stmt *PerformStatement) (string, bool) {
-	if stmt.TestAfter && stmt.Until == nil {
+	if stmt.TestAfter && stmt.Until == nil && stmt.Varying == nil {
 		return "", false
 	}
 	switch {
@@ -2370,23 +2371,23 @@ func performLoopText(stmt *PerformStatement) (string, bool) {
 		return " " + t + " TIMES", true
 	case stmt.Varying != nil:
 		v := stmt.Varying
-		name, ok := identifierText(v.Name)
+		head, ok := varyingClauseText(v.VaryingClause)
 		if !ok {
 			return "", false
 		}
-		from, ok := valueText(v.From)
-		if !ok {
-			return "", false
+		s := " "
+		if stmt.TestAfter {
+			s += "WITH TEST AFTER "
 		}
-		by, ok := valueText(v.By)
-		if !ok {
-			return "", false
+		s += "VARYING " + head
+		for _, a := range v.After {
+			at, ok := varyingClauseText(a)
+			if !ok {
+				return "", false
+			}
+			s += " AFTER " + at
 		}
-		cond, ok := conditionText(v.Until)
-		if !ok {
-			return "", false
-		}
-		return " VARYING " + name + " FROM " + from + " BY " + by + " UNTIL " + cond, true
+		return s, true
 	case stmt.Until != nil:
 		cond, ok := conditionText(stmt.Until)
 		if !ok {
@@ -2400,6 +2401,29 @@ func performLoopText(stmt *PerformStatement) (string, bool) {
 	default:
 		return "", true
 	}
+}
+
+// varyingClauseText returns the canonical text of one VARYING/AFTER phrase —
+// "name FROM from BY by UNTIL cond" — and whether it could be rendered. The
+// introducing VARYING/AFTER keyword is supplied by the caller.
+func varyingClauseText(c VaryingClause) (string, bool) {
+	name, ok := identifierText(c.Name)
+	if !ok {
+		return "", false
+	}
+	from, ok := valueText(c.From)
+	if !ok {
+		return "", false
+	}
+	by, ok := valueText(c.By)
+	if !ok {
+		return "", false
+	}
+	cond, ok := conditionText(c.Until)
+	if !ok {
+		return "", false
+	}
+	return name + " FROM " + from + " BY " + by + " UNTIL " + cond, true
 }
 
 // printBranchStatementAt prints the branch statement at index i on its own line

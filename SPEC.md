@@ -808,8 +808,10 @@ perform-statement =
       "PERFORM"
       [ procedure-name [ ( "THROUGH" | "THRU" ) procedure-name ] ]
       [ NumericLiteral "TIMES"
-      | [ "WITH" "TEST" ( "BEFORE" | "AFTER" ) ] "UNTIL" condition
-      | "VARYING" identifier "FROM" operand "BY" operand "UNTIL" condition ]
+      | [ "WITH" "TEST" ( "BEFORE" | "AFTER" ) ]
+        ( "UNTIL" condition
+        | "VARYING" identifier "FROM" operand "BY" operand "UNTIL" condition
+          { "AFTER" identifier "FROM" operand "BY" operand "UNTIL" condition } ) ]
       [ { statement } "END-PERFORM" ]
 
 evaluate-statement =

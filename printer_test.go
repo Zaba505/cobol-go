@@ -570,10 +570,51 @@ func TestPrinter(t *testing.T) {
 										{Statements: []Statement{&PerformStatement{
 											Inline: true,
 											Varying: &PerformVarying{
-												Name:  &Identifier{Name: &Word{Value: "I"}},
-												From:  &NumericLiteral{Value: "1"},
-												By:    &NumericLiteral{Value: "1"},
-												Until: &RelationCondition{Left: &Identifier{Name: &Word{Value: "I"}}, Op: ">", Right: &Identifier{Name: &Word{Value: "N"}}},
+												VaryingClause: VaryingClause{
+													Name:  &Identifier{Name: &Word{Value: "I"}},
+													From:  &NumericLiteral{Value: "1"},
+													By:    &NumericLiteral{Value: "1"},
+													Until: &RelationCondition{Left: &Identifier{Name: &Word{Value: "I"}}, Op: ">", Right: &Identifier{Name: &Word{Value: "N"}}},
+												},
+											},
+											Body:       []Statement{&DisplayStatement{Operands: []Type{&Identifier{Name: &Word{Value: "I"}}}}},
+											EndPerform: true,
+										}}},
+										{Statements: []Statement{&PerformStatement{
+											Inline: true,
+											Varying: &PerformVarying{
+												VaryingClause: VaryingClause{
+													Name:  &Identifier{Name: &Word{Value: "I"}},
+													From:  &NumericLiteral{Value: "1"},
+													By:    &NumericLiteral{Value: "1"},
+													Until: &RelationCondition{Left: &Identifier{Name: &Word{Value: "I"}}, Op: ">", Right: &Identifier{Name: &Word{Value: "N"}}},
+												},
+												After: []VaryingClause{{
+													Name:  &Identifier{Name: &Word{Value: "J"}},
+													From:  &NumericLiteral{Value: "1"},
+													By:    &NumericLiteral{Value: "1"},
+													Until: &RelationCondition{Left: &Identifier{Name: &Word{Value: "J"}}, Op: ">", Right: &Identifier{Name: &Word{Value: "M"}}},
+												}},
+											},
+											Body:       []Statement{&DisplayStatement{Operands: []Type{&Identifier{Name: &Word{Value: "I"}}}}},
+											EndPerform: true,
+										}}},
+										{Statements: []Statement{&PerformStatement{
+											Inline:    true,
+											TestAfter: true,
+											Varying: &PerformVarying{
+												VaryingClause: VaryingClause{
+													Name:  &Identifier{Name: &Word{Value: "I"}},
+													From:  &NumericLiteral{Value: "1"},
+													By:    &NumericLiteral{Value: "1"},
+													Until: &RelationCondition{Left: &Identifier{Name: &Word{Value: "I"}}, Op: ">", Right: &Identifier{Name: &Word{Value: "N"}}},
+												},
+												After: []VaryingClause{{
+													Name:  &Identifier{Name: &Word{Value: "J"}},
+													From:  &NumericLiteral{Value: "1"},
+													By:    &NumericLiteral{Value: "1"},
+													Until: &RelationCondition{Left: &Identifier{Name: &Word{Value: "J"}}, Op: ">", Right: &Identifier{Name: &Word{Value: "M"}}},
+												}},
 											},
 											Body:       []Statement{&DisplayStatement{Operands: []Type{&Identifier{Name: &Word{Value: "I"}}}}},
 											EndPerform: true,
@@ -593,6 +634,12 @@ func TestPrinter(t *testing.T) {
 				"        ADD 1 TO A\n" +
 				"    END-PERFORM.\n" +
 				"    PERFORM VARYING I FROM 1 BY 1 UNTIL I > N\n" +
+				"        DISPLAY I\n" +
+				"    END-PERFORM.\n" +
+				"    PERFORM VARYING I FROM 1 BY 1 UNTIL I > N AFTER J FROM 1 BY 1 UNTIL J > M\n" +
+				"        DISPLAY I\n" +
+				"    END-PERFORM.\n" +
+				"    PERFORM WITH TEST AFTER VARYING I FROM 1 BY 1 UNTIL I > N AFTER J FROM 1 BY 1 UNTIL J > M\n" +
 				"        DISPLAY I\n" +
 				"    END-PERFORM.\n",
 		},
@@ -1889,6 +1936,13 @@ func clearStatementPos(stmt Statement) {
 			clearTypePos(s.Varying.From)
 			clearTypePos(s.Varying.By)
 			clearConditionPos(s.Varying.Until)
+			for i := range s.Varying.After {
+				s.Varying.After[i].Pos = Pos{}
+				clearIdentifierPos(s.Varying.After[i].Name)
+				clearTypePos(s.Varying.After[i].From)
+				clearTypePos(s.Varying.After[i].By)
+				clearConditionPos(s.Varying.After[i].Until)
+			}
 		}
 		for _, st := range s.Body {
 			clearStatementPos(st)
