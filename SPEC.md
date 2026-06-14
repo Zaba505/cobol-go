@@ -857,6 +857,28 @@ start-statement  = "START" file-name
                        [ "KEY" [ "IS" ] relational-operator identifier ]
                        [ invalid-key ] [ "END-START" ]
 
+                                          « sort-merge verbs operate on an SD file »
+sort-statement   = "SORT" file-name
+                       { [ "ON" ] ( "ASCENDING" | "DESCENDING" ) [ "KEY" ] data-name { data-name } }
+                       [ [ "WITH" ] "DUPLICATES" [ "IN" "ORDER" ] ]
+                       [ "COLLATING" "SEQUENCE" [ "IS" ] alphabet-name ]
+                       ( "USING" file-name { file-name }
+                       | "INPUT" "PROCEDURE" [ "IS" ] procedure-name
+                            [ ( "THROUGH" | "THRU" ) procedure-name ] )
+                       ( "GIVING" file-name { file-name }
+                       | "OUTPUT" "PROCEDURE" [ "IS" ] procedure-name
+                            [ ( "THROUGH" | "THRU" ) procedure-name ] )
+merge-statement  = "MERGE" file-name
+                       { [ "ON" ] ( "ASCENDING" | "DESCENDING" ) [ "KEY" ] data-name { data-name } }
+                       [ "COLLATING" "SEQUENCE" [ "IS" ] alphabet-name ]
+                       "USING" file-name file-name { file-name }
+                       ( "GIVING" file-name { file-name }
+                       | "OUTPUT" "PROCEDURE" [ "IS" ] procedure-name
+                            [ ( "THROUGH" | "THRU" ) procedure-name ] )
+release-statement = "RELEASE" record-name [ "FROM" identifier ]
+return-statement = "RETURN" file-name [ "RECORD" ] [ "INTO" identifier ]
+                       at-end [ "END-RETURN" ]
+
 initialize-statement = "INITIALIZE" identifier { identifier }
                      [ "WITH" "FILLER" ]
                      [ ( "ALL" | category { category } ) "TO" "VALUE" ]
@@ -915,6 +937,13 @@ The data-manipulation verbs above now include the previously deferred sub-phrase
 `INITIALIZE … REPLACING` / `DEFAULT` / `WITH FILLER` / `… TO VALUE`; and the
 `SEARCH ALL` semantic constraint (a single WHEN of AND-joined equality or
 condition-name tests).
+
+The sort-merge verbs (`SORT`, `MERGE`, `RELEASE`, `RETURN`) operate on the `SD`
+sort-merge file description in §Data Division: `SORT`/`MERGE` order records by
+their `ASCENDING`/`DESCENDING KEY` data-names; `RELEASE` hands a record to a
+`SORT` `INPUT PROCEDURE`, and `RETURN` retrieves the next ordered record in an
+`OUTPUT PROCEDURE` (its `AT END` mirrors `READ`). They close the
+`SD`-without-`SORT` asymmetry — the data-level `SD` had no procedure-level verbs.
 
 ```ebnf
 operand    = identifier | literal | function-reference

@@ -607,6 +607,95 @@ type StartKey struct {
 	Name *Identifier
 }
 
+// SortStatement is a SORT statement (SPEC.md "sort-statement"): it orders the
+// records of an SD sort-merge file. Pos is the position of the SORT keyword; File
+// is the sort file (an SD description). Keys are the ON ASCENDING/DESCENDING KEY
+// phrases in source order; Duplicates reports WITH DUPLICATES [IN ORDER];
+// Collating is the COLLATING SEQUENCE alphabet-name, nil when absent. The input
+// is exactly one of Using (USING file-list) or Input (INPUT PROCEDURE); the
+// output is exactly one of Giving (GIVING file-list) or Output (OUTPUT PROCEDURE).
+type SortStatement struct {
+	Pos        Pos
+	File       *Word
+	Keys       []SortKey
+	Duplicates bool
+	Collating  *Word
+	Using      []*Word
+	Input      *SortProcedure
+	Giving     []*Word
+	Output     *SortProcedure
+}
+
+func (*SortStatement) statement() {}
+
+// MergeStatement is a MERGE statement (SPEC.md "merge-statement"): it combines two
+// or more already-ordered files into one ordered SD file. Pos is the position of
+// the MERGE keyword; File is the sort-merge file. Keys are the ON
+// ASCENDING/DESCENDING KEY phrases; Collating is the COLLATING SEQUENCE
+// alphabet-name, nil when absent; Using are the two-or-more input files. The
+// output is exactly one of Giving (GIVING file-list) or Output (OUTPUT PROCEDURE).
+// MERGE has neither an INPUT PROCEDURE nor a DUPLICATES phrase.
+type MergeStatement struct {
+	Pos       Pos
+	File      *Word
+	Keys      []SortKey
+	Collating *Word
+	Using     []*Word
+	Giving    []*Word
+	Output    *SortProcedure
+}
+
+func (*MergeStatement) statement() {}
+
+// SortKey is one ON ASCENDING/DESCENDING KEY phrase of a SORT or MERGE statement,
+// mirroring [OccursKey]. Pos is the position of the introducing keyword (ON, or
+// ASCENDING/DESCENDING when ON is omitted); Ascending reports ASCENDING (vs
+// DESCENDING); Names are the one or more key data-names in the phrase.
+type SortKey struct {
+	Pos       Pos
+	Ascending bool
+	Names     []*Word
+}
+
+// SortProcedure is an INPUT or OUTPUT PROCEDURE phrase of a SORT or MERGE
+// statement. Pos is the position of the INPUT/OUTPUT keyword; Target is the
+// procedure-name to run; Through is the optional THROUGH/THRU range-end
+// procedure-name, nil when absent (the PERFORM procedure-range shape).
+type SortProcedure struct {
+	Pos     Pos
+	Target  *Word
+	Through *Word
+}
+
+// ReleaseStatement is a RELEASE statement (SPEC.md "release-statement"): it hands a
+// record to a SORT input procedure. Pos is the position of the RELEASE keyword;
+// Record is the sort-file record-name; From is the optional FROM source area, nil
+// when absent.
+type ReleaseStatement struct {
+	Pos    Pos
+	Record *Word
+	From   *Identifier
+}
+
+func (*ReleaseStatement) statement() {}
+
+// ReturnStatement is a RETURN statement (SPEC.md "return-statement"): it obtains
+// the next record from a SORT/MERGE output procedure, mirroring [ReadStatement].
+// Pos is the position of the RETURN keyword; File is the sort-merge file-name;
+// Record reports an explicit RECORD noise word; Into is the optional INTO
+// receiving area; Handler carries the AT END phrases; EndReturn reports an
+// explicit END-RETURN scope terminator.
+type ReturnStatement struct {
+	Pos       Pos
+	File      *Word
+	Record    bool
+	Into      *Identifier
+	Handler   ExceptionPhrases
+	EndReturn bool
+}
+
+func (*ReturnStatement) statement() {}
+
 // EvaluateStatement is an EVALUATE statement (SPEC.md "evaluate-statement"): a
 // multi-branch case construct. Pos is the position of the EVALUATE keyword;
 // Subjects are the selection subjects joined by ALSO; Whens are the WHEN branches
@@ -3867,6 +3956,7 @@ var procedureVerbs = []string{
 	"COMPUTE", "IF", "PERFORM", "EVALUATE", "CALL", "GO", "CONTINUE", "STOP",
 	"GOBACK", "EXIT",
 	"OPEN", "CLOSE", "READ", "WRITE", "REWRITE", "DELETE", "START",
+	"SORT", "MERGE", "RELEASE", "RETURN",
 	"INITIALIZE", "SET", "STRING", "UNSTRING", "INSPECT", "SEARCH",
 }
 
@@ -3876,6 +3966,7 @@ var procedureScopeTerminators = []string{
 	"END-IF", "END-PERFORM", "END-COMPUTE", "END-ADD", "END-SUBTRACT",
 	"END-MULTIPLY", "END-DIVIDE", "END-EVALUATE", "END-CALL",
 	"END-READ", "END-WRITE", "END-REWRITE", "END-DELETE", "END-START",
+	"END-RETURN",
 	"END-STRING", "END-UNSTRING", "END-SEARCH",
 }
 
@@ -3966,6 +4057,14 @@ func parseStatement(p *parser) (Statement, error) {
 		return parseDeleteStatement(p, tok)
 	case keywordIs(tok, "START"):
 		return parseStartStatement(p, tok)
+	case keywordIs(tok, "SORT"):
+		return parseSortStatement(p, tok)
+	case keywordIs(tok, "MERGE"):
+		return parseMergeStatement(p, tok)
+	case keywordIs(tok, "RELEASE"):
+		return parseReleaseStatement(p, tok)
+	case keywordIs(tok, "RETURN"):
+		return parseReturnStatement(p, tok)
 	case keywordIs(tok, "INITIALIZE"):
 		return parseInitializeStatement(p, tok)
 	case keywordIs(tok, "SET"):
@@ -3982,6 +4081,7 @@ func parseStatement(p *parser) (Statement, error) {
 		return nil, unexpectedKeyword(tok, "DISPLAY", "MOVE", "ACCEPT",
 			"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "IF", "PERFORM", "EVALUATE", "CALL", "GO", "CONTINUE", "STOP",
 			"GOBACK", "EXIT", "OPEN", "CLOSE", "READ", "WRITE", "REWRITE", "DELETE", "START",
+			"SORT", "MERGE", "RELEASE", "RETURN",
 			"INITIALIZE", "SET", "STRING", "UNSTRING", "INSPECT", "SEARCH")
 	}
 }
@@ -5672,6 +5772,364 @@ func parseStartStatement(p *parser, kw Token) (Statement, error) {
 	} else if end {
 		p.consume()
 		stmt.EndStart = true
+	}
+	return stmt, nil
+}
+
+// sortKeyStopWords are the keywords that end a SORT/MERGE key data-name list: the
+// next key phrase (ON / ASCENDING / DESCENDING), the DUPLICATES, COLLATING, and
+// input/output phrases. ON, WITH, USING, and GIVING are already procedure phrase
+// keywords, but listing them keeps the boundary explicit and self-documenting.
+var sortKeyStopWords = []string{
+	"ON", "ASCENDING", "DESCENDING", "WITH", "DUPLICATES",
+	"COLLATING", "SEQUENCE", "USING", "INPUT", "GIVING", "OUTPUT",
+}
+
+// parseSortStatement parses a SORT statement whose verb kw has already been read:
+// the SD sort file, its ON ASCENDING/DESCENDING KEY phrases, an optional [WITH]
+// DUPLICATES [IN ORDER], an optional COLLATING SEQUENCE, the input source (USING
+// files or an INPUT PROCEDURE), and the output sink (GIVING files or an OUTPUT
+// PROCEDURE).
+func parseSortStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &SortStatement{Pos: kw.Pos}
+	file, err := parseFileName(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.File = file
+
+	keys, err := parseSortKeys(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Keys = keys
+
+	dup, err := parseDuplicatesPhrase(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Duplicates = dup
+
+	coll, err := parseCollatingPhrase(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Collating = coll
+
+	using, input, err := parseSortInput(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Using, stmt.Input = using, input
+
+	giving, output, err := parseSortOutput(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Giving, stmt.Output = giving, output
+	return stmt, nil
+}
+
+// parseMergeStatement parses a MERGE statement whose verb kw has already been read:
+// the SD sort-merge file, its key phrases, an optional COLLATING SEQUENCE, the
+// required USING input files, and the output sink (GIVING files or an OUTPUT
+// PROCEDURE). MERGE has neither a DUPLICATES phrase nor an INPUT PROCEDURE.
+func parseMergeStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &MergeStatement{Pos: kw.Pos}
+	file, err := parseFileName(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.File = file
+
+	keys, err := parseSortKeys(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Keys = keys
+
+	coll, err := parseCollatingPhrase(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Collating = coll
+
+	if _, err := p.expectKeyword("USING"); err != nil {
+		return nil, err
+	}
+	names, err := parseSortFileList(p, "GIVING", "OUTPUT")
+	if err != nil {
+		return nil, err
+	}
+	stmt.Using = names
+
+	giving, output, err := parseSortOutput(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Giving, stmt.Output = giving, output
+	return stmt, nil
+}
+
+// parseSortKeys parses the zero or more ON ASCENDING/DESCENDING KEY phrases of a
+// SORT or MERGE, mirroring the OCCURS key loop. The leading ON is accepted as
+// optional. Each phrase carries one or more key data-names.
+func parseSortKeys(p *parser) ([]SortKey, error) {
+	var keys []SortKey
+	for {
+		tok, err, ok := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !keywordIs(tok, "ON", "ASCENDING", "DESCENDING") {
+			break
+		}
+		leadPos := tok.Pos
+		if keywordIs(tok, "ON") {
+			p.consume() // ON — optional lead of a key phrase.
+		}
+		dir, err := p.expectKeyword("ASCENDING", "DESCENDING")
+		if err != nil {
+			return nil, err
+		}
+		if err := p.skipOptionalKeyword("KEY"); err != nil {
+			return nil, err
+		}
+		names, err := parseSortFileList(p, sortKeyStopWords...)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, SortKey{
+			Pos:       leadPos,
+			Ascending: keywordIs(dir, "ASCENDING"),
+			Names:     names,
+		})
+	}
+	return keys, nil
+}
+
+// parseDuplicatesPhrase parses the optional [WITH] DUPLICATES [IN ORDER] phrase of
+// a SORT, reporting whether it was present. A present WITH must introduce
+// DUPLICATES (the OPEN/CLOSE WITH-option style).
+func parseDuplicatesPhrase(p *parser) (bool, error) {
+	if with, err := p.peekKeyword("WITH"); err != nil {
+		return false, err
+	} else if with {
+		p.consume() // WITH — only introduces DUPLICATES here.
+		if _, err := p.expectKeyword("DUPLICATES"); err != nil {
+			return false, err
+		}
+	} else if dup, err := p.peekKeyword("DUPLICATES"); err != nil {
+		return false, err
+	} else if dup {
+		p.consume() // DUPLICATES
+	} else {
+		return false, nil
+	}
+	if in, err := p.peekKeyword("IN"); err != nil {
+		return false, err
+	} else if in {
+		p.consume() // IN
+		if _, err := p.expectKeyword("ORDER"); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// parseCollatingPhrase parses the optional COLLATING SEQUENCE [IS] alphabet-name
+// phrase shared by SORT and MERGE, returning the alphabet-name (nil when absent).
+func parseCollatingPhrase(p *parser) (*Word, error) {
+	coll, err := p.peekKeyword("COLLATING")
+	if err != nil {
+		return nil, err
+	}
+	if !coll {
+		return nil, nil
+	}
+	p.consume() // COLLATING
+	if _, err := p.expectKeyword("SEQUENCE"); err != nil {
+		return nil, err
+	}
+	if err := p.skipOptionalKeyword("IS"); err != nil {
+		return nil, err
+	}
+	return parseFileName(p) // alphabet-name is a user-defined word.
+}
+
+// parseSortInput parses a SORT input source: either USING file-list or INPUT
+// PROCEDURE proc [THROUGH proc]. Exactly one is returned non-nil.
+func parseSortInput(p *parser) ([]*Word, *SortProcedure, error) {
+	if _, ok, err := p.acceptKeyword("USING"); err != nil {
+		return nil, nil, err
+	} else if ok {
+		names, err := parseSortFileList(p, "GIVING", "OUTPUT")
+		if err != nil {
+			return nil, nil, err
+		}
+		return names, nil, nil
+	}
+	inTok, ok, err := p.acceptKeyword("INPUT")
+	if err != nil {
+		return nil, nil, err
+	}
+	if !ok {
+		tok, _, _ := p.peek()
+		return nil, nil, UnexpectedKeywordError{Expected: []string{"USING", "INPUT"}, Actual: tok}
+	}
+	proc, err := parseSortProcedure(p, inTok.Pos)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, proc, nil
+}
+
+// parseSortOutput parses a SORT/MERGE output sink: either GIVING file-list or
+// OUTPUT PROCEDURE proc [THROUGH proc]. Exactly one is returned non-nil.
+func parseSortOutput(p *parser) ([]*Word, *SortProcedure, error) {
+	if _, ok, err := p.acceptKeyword("GIVING"); err != nil {
+		return nil, nil, err
+	} else if ok {
+		names, err := parseSortFileList(p)
+		if err != nil {
+			return nil, nil, err
+		}
+		return names, nil, nil
+	}
+	outTok, ok, err := p.acceptKeyword("OUTPUT")
+	if err != nil {
+		return nil, nil, err
+	}
+	if !ok {
+		tok, _, _ := p.peek()
+		return nil, nil, UnexpectedKeywordError{Expected: []string{"GIVING", "OUTPUT"}, Actual: tok}
+	}
+	proc, err := parseSortProcedure(p, outTok.Pos)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, proc, nil
+}
+
+// parseSortProcedure parses an INPUT/OUTPUT PROCEDURE phrase after its INPUT/OUTPUT
+// lead (at leadPos) has been consumed: the PROCEDURE keyword, an optional IS, the
+// procedure-name, and an optional THROUGH/THRU range-end procedure-name (the
+// PERFORM procedure-range shape).
+func parseSortProcedure(p *parser, leadPos Pos) (*SortProcedure, error) {
+	if _, err := p.expectKeyword("PROCEDURE"); err != nil {
+		return nil, err
+	}
+	if err := p.skipOptionalKeyword("IS"); err != nil {
+		return nil, err
+	}
+	target, err := parseFileName(p)
+	if err != nil {
+		return nil, err
+	}
+	proc := &SortProcedure{Pos: leadPos, Target: target}
+	if through, err := p.peekKeyword("THROUGH", "THRU"); err != nil {
+		return nil, err
+	} else if through {
+		p.consume()
+		end, err := parseFileName(p)
+		if err != nil {
+			return nil, err
+		}
+		proc.Through = end
+	}
+	return proc, nil
+}
+
+// parseSortFileList reads one or more file-names for a USING/GIVING list or a key
+// data-name list, stopping before any stop keyword (and at any reserved verb,
+// scope terminator, phrase keyword, or non-identifier). At least one name is
+// required.
+func parseSortFileList(p *parser, stop ...string) ([]*Word, error) {
+	var names []*Word
+	for {
+		isName, err := p.peekFileName(stop...)
+		if err != nil {
+			return nil, err
+		}
+		if !isName {
+			break
+		}
+		name, err := parseFileName(p)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		tok, _, _ := p.peek()
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+	}
+	return names, nil
+}
+
+// parseReleaseStatement parses a RELEASE statement whose verb kw has already been
+// read: the sort-file record-name and an optional FROM source area.
+func parseReleaseStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &ReleaseStatement{Pos: kw.Pos}
+	record, err := parseFileName(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.Record = record
+
+	if from, err := p.peekKeyword("FROM"); err != nil {
+		return nil, err
+	} else if from {
+		p.consume()
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.From = id
+	}
+	return stmt, nil
+}
+
+// parseReturnStatement parses a RETURN statement whose verb kw has already been
+// read, mirroring parseReadStatement: the sort-merge file-name, an optional RECORD
+// noise word, an optional INTO receiving area, the AT END handler, and an optional
+// END-RETURN scope terminator.
+func parseReturnStatement(p *parser, kw Token) (Statement, error) {
+	stmt := &ReturnStatement{Pos: kw.Pos}
+	file, err := parseFileName(p)
+	if err != nil {
+		return nil, err
+	}
+	stmt.File = file
+
+	if rec, err := p.peekKeyword("RECORD"); err != nil {
+		return nil, err
+	} else if rec {
+		p.consume()
+		stmt.Record = true
+	}
+	if into, err := p.peekKeyword("INTO"); err != nil {
+		return nil, err
+	} else if into {
+		p.consume()
+		id, err := parseIdentifierToken(p)
+		if err != nil {
+			return nil, err
+		}
+		stmt.Into = id
+	}
+
+	handler, err := parseExceptionPhrases(p, "AT END")
+	if err != nil {
+		return nil, err
+	}
+	stmt.Handler = handler
+
+	if end, err := p.peekKeyword("END-RETURN"); err != nil {
+		return nil, err
+	} else if end {
+		p.consume()
+		stmt.EndReturn = true
 	}
 	return stmt, nil
 }
