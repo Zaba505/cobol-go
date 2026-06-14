@@ -23,10 +23,11 @@ tokenize, parse, and round-trip realistic programs; the detailed grammar of
 individual PROCEDURE statements and rarely-used clauses is left to the story
 that implements each one.
 
-> **Implementation status (deferred):** Free format is implemented first; the
-> fixed-format batch follows. The fixed format is **fully specified here**, but
-> its *tokenization* (#21), *source-format detection / configuration* (#22), and
-> *round-trip fixtures* (#23) are deferred to later stories. Also out of scope:
+> **Implementation status:** Free format is implemented first; the fixed-format
+> batch follows. The fixed format is **fully specified here**; its *tokenization*
+> (#21) is **implemented** — opt in with `WithFixedFormat()` — while
+> *source-format detection / configuration* (#22) and *round-trip fixtures* (#23)
+> are deferred to later stories. Also out of scope:
 > the COPY/REPLACE text-manipulation facility (copybooks), the REPORT and SCREEN
 > sections beyond their headers, object-oriented (class/method) and
 > user-defined-function compilation units, and the full ~1130-word reserved word
@@ -136,8 +137,9 @@ The **indicator area** (column 7) holds one of:
   > is implementation-defined; GnuCOBOL expands tabs to a configurable tab width
   > before applying the column rules. GnuCOBOL is also lenient by default about
   > *enforcing* Area A vs Area B placement (a relaxation, not a hard error). The
-  > tokenizer should **record** column positions; how strictly to enforce them
-  > is decided by the fixed-format tokenizer story (#21).
+  > tokenizer (#21) **records** column positions in each token's `Pos` but does
+  > **not** enforce Area A vs Area B placement, matching GnuCOBOL's lenient
+  > default; any such enforcement is left to the parser.
 
 The **separators** of COBOL (a string of one or more of these characters) are
 the same in both reference formats:
@@ -233,6 +235,14 @@ continues the last non-blank character of the preceding non-comment line **with
 no intervening space**. Area A of a continuation line must be blank, and any
 intervening comment or blank lines are skipped when finding the line being
 continued (*GnuCOBOL §2.1.19.2*).
+
+> **Implementation note (#21):** When searching forward for the `-` line, the
+> tokenizer skips blank lines and full-line comment lines (`*`/`/`); a skipped
+> comment is **consumed**, not emitted as a `Comment` token. A `D`/`d` debugging
+> line, by contrast, **breaks** continuation (the literal/word is reported
+> unterminated), because whether it is source depends on `WITH DEBUGGING MODE`,
+> which the tokenizer cannot see. Both cases are vanishingly rare between
+> continuation lines.
 
 - **Words and numeric literals.** Run the word or numeric literal up to (at most)
   column 72, put `-` in column 7 of the next line, and resume at the first
@@ -1148,11 +1158,12 @@ round-trip fixtures are added in #23; this snippet is illustrative.)
 
 ### Out-of-Scope / Deferred
 
-- **Fixed-format reference format** — the column-oriented layout is now
+- **Fixed-format reference format** — the column-oriented layout is
   **specified above** (see
   [Whitespace and Delimiters](#whitespace-and-delimiters) and
-  [Line Continuation](#line-continuation)); its *tokenization* (#21) and
-  *round-trip fixtures* (#23) are deferred to later stories.
+  [Line Continuation](#line-continuation)) and its *tokenization* (#21) is
+  **implemented** (opt in with `WithFixedFormat()`); only the *round-trip
+  fixtures* (#23) remain deferred.
 - **Source-format detection / configuration** (honoring `>>SOURCE FORMAT`,
   defaulting) — beyond recognizing the directive token, deferred (#22).
 - **COPY / REPLACE** text manipulation (copybooks), **REPLACE** statement, and
