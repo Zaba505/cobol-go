@@ -62,6 +62,27 @@ func TestTokenizer(t *testing.T) {
 			},
 		},
 		{
+			name: "separator period followed by a space",
+			src:  ". ",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			name: "separator period followed by a newline",
+			src:  ".\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			name: "separator period followed by CRLF",
+			src:  ".\r\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
 			name: "alphanumeric literal",
 			src:  `"Hello, world!"`,
 			expected: []Token{
@@ -173,16 +194,6 @@ func TestTokenizer(t *testing.T) {
 			opts: []TokenizeOption{WithDecimalComma()},
 			expected: []Token{
 				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("3,14")},
-			},
-		},
-		{
-			name: "decimal comma mode treats period as a separator",
-			src:  "3.14",
-			opts: []TokenizeOption{WithDecimalComma()},
-			expected: []Token{
-				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("3")},
-				{Pos: Pos{Line: 1, Column: 2}, Type: TokenSymbol, Value: []byte(".")},
-				{Pos: Pos{Line: 1, Column: 3}, Type: TokenNumber, Value: []byte("14")},
 			},
 		},
 		{
@@ -740,6 +751,37 @@ func TestTokenizerErrors(t *testing.T) {
 				var target UnexpectedCharacterError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, ',', target.R)
+				require.Equal(t, Pos{Line: 1, Column: 2}, target.Pos)
+			},
+		},
+		{
+			name: "period not followed by a delimiter",
+			src:  "A.B",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedCharacterError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, '.', target.R)
+				require.Equal(t, Pos{Line: 1, Column: 2}, target.Pos)
+			},
+		},
+		{
+			name: "period after a number not followed by a delimiter",
+			src:  "5.X",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedCharacterError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, '.', target.R)
+				require.Equal(t, Pos{Line: 1, Column: 2}, target.Pos)
+			},
+		},
+		{
+			name: "period in decimal-comma mode is rejected",
+			src:  "3.14",
+			opts: []TokenizeOption{WithDecimalComma()},
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedCharacterError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, '.', target.R)
 				require.Equal(t, Pos{Line: 1, Column: 2}, target.Pos)
 			},
 		},
