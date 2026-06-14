@@ -457,6 +457,242 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "function reference as operand and arithmetic primary",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE FUNCTION CURRENT-DATE TO WS-NOW.\n" +
+				"    COMPUTE WS-X = FUNCTION NUMVAL-C(WS-A).\n" +
+				"    STOP RUN.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&MoveStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														// FUNCTION reference in operand (MOVE source) position.
+														Source: &FunctionReference{
+															Pos:  Pos{Line: 4, Column: 10},
+															Name: &Word{Pos: Pos{Line: 4, Column: 19}, Value: "CURRENT-DATE"},
+														},
+														Targets: []*Identifier{
+															{Pos: Pos{Line: 4, Column: 35}, Name: &Word{Pos: Pos{Line: 4, Column: 35}, Value: "WS-NOW"}},
+														},
+													},
+												},
+											},
+											{
+												Pos: Pos{Line: 5, Column: 5},
+												Statements: []Statement{
+													&ComputeStatement{
+														Pos: Pos{Line: 5, Column: 5},
+														Targets: []ComputeTarget{
+															{
+																Pos:  Pos{Line: 5, Column: 13},
+																Name: &Identifier{Pos: Pos{Line: 5, Column: 13}, Name: &Word{Pos: Pos{Line: 5, Column: 13}, Value: "WS-X"}},
+															},
+														},
+														// FUNCTION reference in arithmetic-primary position.
+														Expr: &FunctionReference{
+															Pos:  Pos{Line: 5, Column: 20},
+															Name: &Word{Pos: Pos{Line: 5, Column: 29}, Value: "NUMVAL-C"},
+															Arguments: []Expr{
+																&Identifier{Pos: Pos{Line: 5, Column: 38}, Name: &Word{Pos: Pos{Line: 5, Column: 38}, Value: "WS-A"}},
+															},
+														},
+													},
+												},
+											},
+											{
+												Pos: Pos{Line: 6, Column: 5},
+												Statements: []Statement{
+													&StopStatement{Pos: Pos{Line: 6, Column: 5}, Run: true},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "function reference with reference modification",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE FUNCTION UPPER-CASE(WS-NAME)(1:1) TO WS-INITIAL.\n" +
+				"    DISPLAY FUNCTION CURRENT-DATE(1:8).\n" +
+				"    STOP RUN.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&MoveStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														// Reference modification applied after the argument list.
+														Source: &FunctionReference{
+															Pos:  Pos{Line: 4, Column: 10},
+															Name: &Word{Pos: Pos{Line: 4, Column: 19}, Value: "UPPER-CASE"},
+															Arguments: []Expr{
+																&Identifier{Pos: Pos{Line: 4, Column: 30}, Name: &Word{Pos: Pos{Line: 4, Column: 30}, Value: "WS-NAME"}},
+															},
+															RefMod: &ReferenceModifier{
+																Pos:    Pos{Line: 4, Column: 38},
+																Start:  &NumericLiteral{Pos: Pos{Line: 4, Column: 39}, Value: "1"},
+																Length: &NumericLiteral{Pos: Pos{Line: 4, Column: 41}, Value: "1"},
+															},
+														},
+														Targets: []*Identifier{
+															{Pos: Pos{Line: 4, Column: 47}, Name: &Word{Pos: Pos{Line: 4, Column: 47}, Value: "WS-INITIAL"}},
+														},
+													},
+												},
+											},
+											{
+												Pos: Pos{Line: 5, Column: 5},
+												Statements: []Statement{
+													&DisplayStatement{
+														Pos: Pos{Line: 5, Column: 5},
+														// No-argument function with a reference modifier applied directly;
+														// the colon distinguishes it from an argument list.
+														Operands: []Type{
+															&FunctionReference{
+																Pos:  Pos{Line: 5, Column: 13},
+																Name: &Word{Pos: Pos{Line: 5, Column: 22}, Value: "CURRENT-DATE"},
+																RefMod: &ReferenceModifier{
+																	Pos:    Pos{Line: 5, Column: 34},
+																	Start:  &NumericLiteral{Pos: Pos{Line: 5, Column: 35}, Value: "1"},
+																	Length: &NumericLiteral{Pos: Pos{Line: 5, Column: 37}, Value: "8"},
+																},
+															},
+														},
+													},
+												},
+											},
+											{
+												Pos: Pos{Line: 6, Column: 5},
+												Statements: []Statement{
+													&StopStatement{Pos: Pos{Line: 6, Column: 5}, Run: true},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "nested function reference with multiple arguments",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    COMPUTE WS-Z = FUNCTION MEAN(FUNCTION MAX(WS-A WS-B) WS-C).\n" +
+				"    STOP RUN.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ComputeStatement{
+														Pos: Pos{Line: 4, Column: 5},
+														Targets: []ComputeTarget{
+															{
+																Pos:  Pos{Line: 4, Column: 13},
+																Name: &Identifier{Pos: Pos{Line: 4, Column: 13}, Name: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "WS-Z"}},
+															},
+														},
+														// FUNCTION MEAN(FUNCTION MAX(WS-A WS-B) WS-C): a nested
+														// function reference as the first of two arguments.
+														Expr: &FunctionReference{
+															Pos:  Pos{Line: 4, Column: 20},
+															Name: &Word{Pos: Pos{Line: 4, Column: 29}, Value: "MEAN"},
+															Arguments: []Expr{
+																&FunctionReference{
+																	Pos:  Pos{Line: 4, Column: 34},
+																	Name: &Word{Pos: Pos{Line: 4, Column: 43}, Value: "MAX"},
+																	Arguments: []Expr{
+																		&Identifier{Pos: Pos{Line: 4, Column: 47}, Name: &Word{Pos: Pos{Line: 4, Column: 47}, Value: "WS-A"}},
+																		&Identifier{Pos: Pos{Line: 4, Column: 52}, Name: &Word{Pos: Pos{Line: 4, Column: 52}, Value: "WS-B"}},
+																	},
+																},
+																&Identifier{Pos: Pos{Line: 4, Column: 58}, Name: &Word{Pos: Pos{Line: 4, Column: 58}, Value: "WS-C"}},
+															},
+														},
+													},
+												},
+											},
+											{
+												Pos: Pos{Line: 5, Column: 5},
+												Statements: []Statement{
+													&StopStatement{Pos: Pos{Line: 5, Column: 5}, Run: true},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "if statement with end-if",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +
@@ -2691,6 +2927,20 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedTokenError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 1, Column: 15}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "function reference missing function-name",
+			// After the FUNCTION keyword a function-name (identifier) is required; the
+			// separator period is not one.
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    DISPLAY FUNCTION.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 21}, target.Actual.Pos)
 			},
 		},
 		{

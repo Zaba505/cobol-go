@@ -2627,6 +2627,8 @@ func valueText(v Type) (string, bool) {
 		return n.Value, true
 	case *Identifier:
 		return identifierText(n)
+	case *FunctionReference:
+		return functionReferenceText(n)
 	case *AddressOf:
 		if n == nil || n.Of == nil {
 			return "", false
@@ -2649,6 +2651,8 @@ func exprText(e Expr) (string, bool) {
 	switch n := e.(type) {
 	case *Identifier:
 		return identifierText(n)
+	case *FunctionReference:
+		return functionReferenceText(n)
 	case *NumericLiteral:
 		if n == nil {
 			return "", false
@@ -2725,19 +2729,67 @@ func identifierText(id *Identifier) (string, bool) {
 		s += ")"
 	}
 	if id.RefMod != nil {
-		start, ok := exprText(id.RefMod.Start)
+		rm, ok := refModText(id.RefMod)
 		if !ok {
 			return "", false
 		}
-		s += "(" + start + ":"
-		if id.RefMod.Length != nil {
-			l, ok := exprText(id.RefMod.Length)
+		s += rm
+	}
+	return s, true
+}
+
+// refModText returns the canonical "(start:length)" text of a reference-modifier,
+// with the length omitted when nil. It is shared by the identifier and
+// function-reference renderers.
+func refModText(rm *ReferenceModifier) (string, bool) {
+	if rm == nil {
+		return "", false
+	}
+	start, ok := exprText(rm.Start)
+	if !ok {
+		return "", false
+	}
+	s := "(" + start + ":"
+	if rm.Length != nil {
+		l, ok := exprText(rm.Length)
+		if !ok {
+			return "", false
+		}
+		s += l
+	}
+	return s + ")", true
+}
+
+// functionReferenceText returns the canonical source text of an intrinsic-function
+// reference: the FUNCTION keyword, the function-name, an optional space-separated
+// argument list, and an optional reference-modifier. The argument parentheses are
+// emitted only when the function has arguments, so a no-argument function prints as
+// "FUNCTION CURRENT-DATE" (with any reference-modifier applied directly).
+func functionReferenceText(fn *FunctionReference) (string, bool) {
+	if fn == nil || fn.Name == nil {
+		return "", false
+	}
+	s := "FUNCTION " + fn.Name.Value
+	if len(fn.Arguments) > 0 {
+		s += "("
+		for i, arg := range fn.Arguments {
+			t, ok := exprText(arg)
 			if !ok {
 				return "", false
 			}
-			s += l
+			if i > 0 {
+				s += " "
+			}
+			s += t
 		}
 		s += ")"
+	}
+	if fn.RefMod != nil {
+		rm, ok := refModText(fn.RefMod)
+		if !ok {
+			return "", false
+		}
+		s += rm
 	}
 	return s, true
 }

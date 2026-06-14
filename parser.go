@@ -913,8 +913,8 @@ func (*NumericLiteral) expr()  {}
 
 // Expr is implemented by the arithmetic-expression AST nodes (SPEC.md
 // "arithmetic-expression"): the operator nodes [BinaryExpr], [UnaryExpr], and
-// [ParenExpr], plus the value-leaf nodes [Identifier], [NumericLiteral], and
-// [StringLiteral].
+// [ParenExpr], plus the value-leaf nodes [Identifier], [NumericLiteral],
+// [StringLiteral], and [FunctionReference].
 type Expr interface {
 	expr()
 }
@@ -942,6 +942,25 @@ type ReferenceModifier struct {
 	Start  Expr
 	Length Expr
 }
+
+// FunctionReference is an intrinsic-function reference (SPEC.md
+// "function-reference"): the FUNCTION keyword, a function-name, an optional
+// parenthesized argument list, and an optional reference-modifier. Pos is the
+// position of the FUNCTION keyword. Arguments is nil for a no-argument function
+// (e.g. FUNCTION CURRENT-DATE); each argument is an arithmetic expression, so
+// nested function references are permitted. This is the intrinsic-function
+// reference form, distinct from the out-of-scope user-defined FUNCTION-ID
+// compilation unit. A FunctionReference is both a value [Type] and an expression
+// [Expr], so it may appear wherever an operand or an arithmetic primary is allowed.
+type FunctionReference struct {
+	Pos       Pos
+	Name      *Word
+	Arguments []Expr             // argument list; nil when the function takes none
+	RefMod    *ReferenceModifier // optional reference-modifier on the result
+}
+
+func (*FunctionReference) cobol() {}
+func (*FunctionReference) expr()  {}
 
 // BinaryExpr is a binary arithmetic expression. Pos is the position of its left
 // operand; Op is one of "+", "-", "*", "/", "**". All binary operators are
@@ -6792,6 +6811,12 @@ func stopAtSearchBranch(p *parser) (bool, error) {
 // A figurative constant (ZERO, SPACES, …) tokenizes as an identifier and so parses
 // as a single-name [Identifier]; its identity is its spelling.
 func parseOperand(p *parser) (Type, error) {
+	if isFn, err := p.peekKeyword("FUNCTION"); err != nil {
+		return nil, err
+	} else if isFn {
+		kw, _ := p.expectKeyword("FUNCTION")
+		return parseFunctionReference(p, kw)
+	}
 	tok, err := p.expect(TokenIdentifier, TokenString, TokenNumber)
 	if err != nil {
 		return nil, err
@@ -6842,104 +6867,135 @@ func parseIdentifier(p *parser, name Token) (*Identifier, error) {
 	// An identifier may carry a subscript and/or a reference-modifier, in that
 	// order (SPEC.md: identifier = qualified-name [ subscript ] [ reference-modifier ]),
 	// e.g. A(I)(1:3).
-	open, err := p.peekSymbol("(")
+	subs, rm, err := parseParenSuffix(p)
 	if err != nil {
 		return nil, err
 	}
-	if open {
-		isRefMod, err := parseSubscriptOrRefMod(p, id)
-		if err != nil {
-			return nil, err
-		}
-		// A reference-modifier may follow a subscript; a second parenthesized group
-		// after a subscript must be the reference-modifier (it requires a colon).
-		if !isRefMod {
-			open2, err := p.peekSymbol("(")
-			if err != nil {
-				return nil, err
-			}
-			if open2 {
-				if err := parseReferenceModifier(p, id); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
+	id.Subscripts, id.RefMod = subs, rm
 	return id, nil
 }
 
-// parseSubscriptOrRefMod parses the first parenthesized suffix of an identifier. A
-// top-level ":" marks a reference-modifier "(start:length)"; otherwise it is a
-// subscript list "(sub {sub})". It reports whether the suffix was a
-// reference-modifier. The opening parenthesis has not yet been consumed.
-func parseSubscriptOrRefMod(p *parser, id *Identifier) (bool, error) {
+// parseFunctionReference parses an intrinsic-function reference whose FUNCTION
+// keyword token (kw) has already been read (SPEC.md "function-reference"): a
+// function-name, an optional parenthesized argument list, and an optional
+// reference-modifier. A no-argument function may carry a reference-modifier
+// directly, e.g. FUNCTION CURRENT-DATE(1:8); the colon disambiguates that modifier
+// from an argument list, exactly as for an identifier's subscript.
+func parseFunctionReference(p *parser, kw Token) (*FunctionReference, error) {
+	name, err := p.expect(TokenIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	fn := &FunctionReference{Pos: kw.Pos, Name: &Word{Pos: name.Pos, Value: string(name.Value)}}
+	args, rm, err := parseParenSuffix(p)
+	if err != nil {
+		return nil, err
+	}
+	fn.Arguments, fn.RefMod = args, rm
+	return fn, nil
+}
+
+// parseParenSuffix parses the optional parenthesized suffix shared by identifiers
+// (subscript + reference-modifier) and function references (argument list +
+// reference-modifier), as in A(I)(1:3) or FUNCTION UPPER-CASE(X)(1:1). A leading
+// group containing a top-level ":" is the reference-modifier; otherwise it is the
+// operand list, optionally followed by a reference-modifier group (which requires a
+// colon). Either result may be nil; when the leading group is itself the
+// reference-modifier, no further group may follow.
+func parseParenSuffix(p *parser) ([]Expr, *ReferenceModifier, error) {
+	open, err := p.peekSymbol("(")
+	if err != nil {
+		return nil, nil, err
+	}
+	if !open {
+		return nil, nil, nil
+	}
+	list, rm, err := parseListOrRefMod(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	if rm != nil {
+		return nil, rm, nil
+	}
+	open2, err := p.peekSymbol("(")
+	if err != nil {
+		return nil, nil, err
+	}
+	if open2 {
+		rm, err = parseRefMod(p)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return list, rm, nil
+}
+
+// parseListOrRefMod parses the first parenthesized group of a subscript/argument
+// suffix. A top-level ":" marks a reference-modifier "(start:length)", returned as
+// the second result; otherwise it is an operand list "(op {op})", returned as the
+// first. Exactly one result is non-nil. The opening parenthesis has not yet been
+// consumed.
+func parseListOrRefMod(p *parser) ([]Expr, *ReferenceModifier, error) {
 	open, err := p.expectSymbol("(")
 	if err != nil {
-		return false, err
+		return nil, nil, err
 	}
 	first, err := parseExpr(p)
 	if err != nil {
-		return false, err
+		return nil, nil, err
 	}
 
 	isColon, err := p.peekSymbol(":")
 	if err != nil {
-		return false, err
+		return nil, nil, err
 	}
 	if isColon {
 		p.consume() // ":"
 		rm, err := finishReferenceModifier(p, open, first)
 		if err != nil {
-			return false, err
+			return nil, nil, err
 		}
-		id.RefMod = rm
-		return true, nil
+		return nil, rm, nil
 	}
 
-	subs := []Expr{first}
+	list := []Expr{first}
 	for {
 		closing, err := p.peekSymbol(")")
 		if err != nil {
-			return false, err
+			return nil, nil, err
 		}
 		if closing {
 			break
 		}
-		sub, err := parseExpr(p)
+		item, err := parseExpr(p)
 		if err != nil {
-			return false, err
+			return nil, nil, err
 		}
-		subs = append(subs, sub)
+		list = append(list, item)
 	}
 	if _, err := p.expectSymbol(")"); err != nil {
-		return false, err
+		return nil, nil, err
 	}
-	id.Subscripts = subs
-	return false, nil
+	return list, nil, nil
 }
 
-// parseReferenceModifier parses a "(start:length)" reference-modifier, requiring
-// the colon. It is used for the optional reference-modifier that may follow a
-// subscript; a parenthesized group there without a colon (a second subscript list)
-// is invalid and reported via the missing-colon error.
-func parseReferenceModifier(p *parser, id *Identifier) error {
+// parseRefMod parses a "(start:length)" reference-modifier, requiring the colon. It
+// is used for the optional reference-modifier that may follow a subscript or a
+// function argument list; a parenthesized group there without a colon (a second
+// operand list) is invalid and reported via the missing-colon error.
+func parseRefMod(p *parser) (*ReferenceModifier, error) {
 	open, err := p.expectSymbol("(")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	start, err := parseExpr(p)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := p.expectSymbol(":"); err != nil {
-		return err
+		return nil, err
 	}
-	rm, err := finishReferenceModifier(p, open, start)
-	if err != nil {
-		return err
-	}
-	id.RefMod = rm
-	return nil
+	return finishReferenceModifier(p, open, start)
 }
 
 // finishReferenceModifier parses the optional length and closing ")" of a
@@ -7055,6 +7111,12 @@ func parseFactor(p *parser) (Expr, error) {
 
 // parsePrimary parses a primary: a parenthesized expression or an operand.
 func parsePrimary(p *parser) (Expr, error) {
+	if isFn, err := p.peekKeyword("FUNCTION"); err != nil {
+		return nil, err
+	} else if isFn {
+		kw, _ := p.expectKeyword("FUNCTION")
+		return parseFunctionReference(p, kw)
+	}
 	open, err := p.peekSymbol("(")
 	if err != nil {
 		return nil, err
@@ -7116,6 +7178,8 @@ func exprPos(e Expr) Pos {
 	case *UnaryExpr:
 		return n.Pos
 	case *ParenExpr:
+		return n.Pos
+	case *FunctionReference:
 		return n.Pos
 	default:
 		return Pos{}
