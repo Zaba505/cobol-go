@@ -1018,6 +1018,92 @@ func TestPrinter(t *testing.T) {
 				"    END-START.\n",
 		},
 		{
+			name: "procedure division sort merge",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "P"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										{Statements: []Statement{&SortStatement{
+											File:       &Word{Value: "WORK-FILE"},
+											Keys:       []SortKey{{Ascending: true, Names: []*Word{{Value: "K1"}, {Value: "K2"}}}},
+											Duplicates: true,
+											InOrder:    true,
+											Collating:  &Word{Value: "NS"},
+											Using:      []*Word{{Value: "IN-FILE"}},
+											Giving:     []*Word{{Value: "OUT-FILE"}},
+										}}},
+										{Statements: []Statement{&SortStatement{
+											File:   &Word{Value: "WORK-FILE"},
+											Keys:   []SortKey{{Ascending: false, Names: []*Word{{Value: "K1"}}}},
+											Input:  &SortProcedure{Target: &Word{Value: "A"}, Through: &Word{Value: "B"}},
+											Output: &SortProcedure{Target: &Word{Value: "C"}},
+										}}},
+										{Statements: []Statement{&MergeStatement{
+											File:   &Word{Value: "M-F"},
+											Keys:   []SortKey{{Ascending: true, Names: []*Word{{Value: "MK"}}}},
+											Using:  []*Word{{Value: "M-A"}, {Value: "M-B"}},
+											Giving: []*Word{{Value: "OUT-FILE"}},
+										}}},
+										{Statements: []Statement{&ReleaseStatement{
+											Record: &Word{Value: "WORK-REC"},
+											From:   &Identifier{Name: &Word{Value: "WS-REC"}},
+										}}},
+										{Statements: []Statement{&ReleaseStatement{
+											Record: &Word{Value: "WORK-REC"},
+										}}},
+										{Statements: []Statement{&ReturnStatement{
+											File:   &Word{Value: "WORK-FILE"},
+											Record: true,
+											Into:   &Identifier{Name: &Word{Value: "WS-REC"}},
+											Handler: ExceptionPhrases{
+												Kind:     "AT END",
+												HasOn:    true,
+												On:       []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"y"`}}}},
+												HasNotOn: true,
+												NotOn:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"n"`}}}},
+											},
+											EndReturn: true,
+										}}},
+										{Statements: []Statement{&ReturnStatement{
+											File: &Word{Value: "M-F"},
+											Handler: ExceptionPhrases{
+												Kind:  "AT END",
+												HasOn: true,
+												On:    []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"z"`}}}},
+											},
+										}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SORT WORK-FILE ON ASCENDING KEY K1 K2 WITH DUPLICATES IN ORDER COLLATING SEQUENCE NS USING IN-FILE GIVING OUT-FILE.\n" +
+				"    SORT WORK-FILE ON DESCENDING KEY K1 INPUT PROCEDURE A THROUGH B OUTPUT PROCEDURE C.\n" +
+				"    MERGE M-F ON ASCENDING KEY MK USING M-A M-B GIVING OUT-FILE.\n" +
+				"    RELEASE WORK-REC FROM WS-REC.\n" +
+				"    RELEASE WORK-REC.\n" +
+				"    RETURN WORK-FILE RECORD INTO WS-REC\n" +
+				"    AT END\n" +
+				"        DISPLAY \"y\"\n" +
+				"    NOT AT END\n" +
+				"        DISPLAY \"n\"\n" +
+				"    END-RETURN.\n" +
+				"    RETURN M-F\n" +
+				"    AT END\n" +
+				"        DISPLAY \"z\".\n",
+		},
+		{
 			name: "procedure header using and returning",
 			input: &File{
 				Programs: []*Program{
@@ -1644,6 +1730,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_control_flow_cob", fixture: "procedure_control_flow.cob"},
 		{name: "procedure_call_cob", fixture: "procedure_call.cob"},
 		{name: "procedure_file_io_cob", fixture: "procedure_file_io.cob"},
+		{name: "procedure_sort_merge_cob", fixture: "procedure_sort_merge.cob"},
 		{name: "procedure_data_manipulation_cob", fixture: "procedure_data_manipulation.cob"},
 		{name: "procedure_function_cob", fixture: "procedure_function.cob"},
 		{name: "procedure_sections_cob", fixture: "procedure_sections.cob"},
@@ -1874,6 +1961,27 @@ func clearParagraphPos(para *Paragraph) {
 
 // clearStatementPos zeroes the Pos of a statement and all of its nested operands,
 // identifiers, and expressions.
+// clearSortKeysPos zeroes the Pos of each SORT/MERGE key phrase and its data-names.
+func clearSortKeysPos(keys []SortKey) {
+	for i := range keys {
+		keys[i].Pos = Pos{}
+		for _, n := range keys[i].Names {
+			clearWordPos(n)
+		}
+	}
+}
+
+// clearSortProcedurePos zeroes the Pos of an INPUT/OUTPUT PROCEDURE phrase (a no-op
+// when nil).
+func clearSortProcedurePos(proc *SortProcedure) {
+	if proc == nil {
+		return
+	}
+	proc.Pos = Pos{}
+	clearWordPos(proc.Target)
+	clearWordPos(proc.Through)
+}
+
 func clearStatementPos(stmt Statement) {
 	switch s := stmt.(type) {
 	case *DisplayStatement:
@@ -2040,6 +2148,40 @@ func clearStatementPos(stmt Statement) {
 			s.Key.Pos = Pos{}
 			clearIdentifierPos(s.Key.Name)
 		}
+		clearExceptionPos(s.Handler)
+	case *SortStatement:
+		s.Pos = Pos{}
+		clearWordPos(s.File)
+		clearSortKeysPos(s.Keys)
+		clearWordPos(s.Collating)
+		for _, w := range s.Using {
+			clearWordPos(w)
+		}
+		clearSortProcedurePos(s.Input)
+		for _, w := range s.Giving {
+			clearWordPos(w)
+		}
+		clearSortProcedurePos(s.Output)
+	case *MergeStatement:
+		s.Pos = Pos{}
+		clearWordPos(s.File)
+		clearSortKeysPos(s.Keys)
+		clearWordPos(s.Collating)
+		for _, w := range s.Using {
+			clearWordPos(w)
+		}
+		for _, w := range s.Giving {
+			clearWordPos(w)
+		}
+		clearSortProcedurePos(s.Output)
+	case *ReleaseStatement:
+		s.Pos = Pos{}
+		clearWordPos(s.Record)
+		clearIdentifierPos(s.From)
+	case *ReturnStatement:
+		s.Pos = Pos{}
+		clearWordPos(s.File)
+		clearIdentifierPos(s.Into)
 		clearExceptionPos(s.Handler)
 	case *InitializeStatement:
 		s.Pos = Pos{}

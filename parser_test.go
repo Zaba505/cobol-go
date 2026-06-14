@@ -2143,6 +2143,274 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name: "sort statement with keys duplicates collating using giving",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SORT WORK-FILE ON ASCENDING KEY K1 K2 WITH DUPLICATES IN ORDER COLLATING SEQUENCE NS USING IN-FILE GIVING OUT-FILE.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&SortStatement{
+														Pos:  Pos{Line: 4, Column: 5},
+														File: &Word{Pos: Pos{Line: 4, Column: 10}, Value: "WORK-FILE"},
+														Keys: []SortKey{
+															{
+																Pos:       Pos{Line: 4, Column: 20},
+																Ascending: true,
+																Names: []*Word{
+																	{Pos: Pos{Line: 4, Column: 37}, Value: "K1"},
+																	{Pos: Pos{Line: 4, Column: 40}, Value: "K2"},
+																},
+															},
+														},
+														Duplicates: true,
+														InOrder:    true,
+														Collating:  &Word{Pos: Pos{Line: 4, Column: 87}, Value: "NS"},
+														Using:      []*Word{{Pos: Pos{Line: 4, Column: 96}, Value: "IN-FILE"}},
+														Giving:     []*Word{{Pos: Pos{Line: 4, Column: 111}, Value: "OUT-FILE"}},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "sort statement with input and output procedures",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SORT WORK-FILE DESCENDING KEY K1 INPUT PROCEDURE A THRU B OUTPUT PROCEDURE C.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&SortStatement{
+														Pos:  Pos{Line: 4, Column: 5},
+														File: &Word{Pos: Pos{Line: 4, Column: 10}, Value: "WORK-FILE"},
+														Keys: []SortKey{
+															{
+																Pos:       Pos{Line: 4, Column: 20},
+																Ascending: false,
+																Names:     []*Word{{Pos: Pos{Line: 4, Column: 35}, Value: "K1"}},
+															},
+														},
+														Input: &SortProcedure{
+															Pos:     Pos{Line: 4, Column: 38},
+															Target:  &Word{Pos: Pos{Line: 4, Column: 54}, Value: "A"},
+															Through: &Word{Pos: Pos{Line: 4, Column: 61}, Value: "B"},
+														},
+														Output: &SortProcedure{
+															Pos:    Pos{Line: 4, Column: 63},
+															Target: &Word{Pos: Pos{Line: 4, Column: 80}, Value: "C"},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "merge statement with multi-file using and giving",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MERGE M-F ON ASCENDING KEY MK USING M-A M-B GIVING OUT-FILE.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&MergeStatement{
+														Pos:  Pos{Line: 4, Column: 5},
+														File: &Word{Pos: Pos{Line: 4, Column: 11}, Value: "M-F"},
+														Keys: []SortKey{
+															{
+																Pos:       Pos{Line: 4, Column: 15},
+																Ascending: true,
+																Names:     []*Word{{Pos: Pos{Line: 4, Column: 32}, Value: "MK"}},
+															},
+														},
+														Using: []*Word{
+															{Pos: Pos{Line: 4, Column: 41}, Value: "M-A"},
+															{Pos: Pos{Line: 4, Column: 45}, Value: "M-B"},
+														},
+														Giving: []*Word{{Pos: Pos{Line: 4, Column: 56}, Value: "OUT-FILE"}},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "release statement with from",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    RELEASE WORK-REC FROM WS-REC.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ReleaseStatement{
+														Pos:    Pos{Line: 4, Column: 5},
+														Record: &Word{Pos: Pos{Line: 4, Column: 13}, Value: "WORK-REC"},
+														From:   &Identifier{Pos: Pos{Line: 4, Column: 27}, Name: &Word{Pos: Pos{Line: 4, Column: 27}, Value: "WS-REC"}},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "return statement with record into and at end handlers",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    RETURN W-F RECORD INTO WS-REC AT END DISPLAY \"e\" NOT AT END DISPLAY \"n\" END-RETURN.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							&IdentificationDivision{
+								Pos: Pos{Line: 1, Column: 1},
+								ProgramID: &ProgramID{
+									Pos:  Pos{Line: 2, Column: 1},
+									Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+								},
+							},
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos: Pos{Line: 4, Column: 5},
+										Sentences: []*Sentence{
+											{
+												Pos: Pos{Line: 4, Column: 5},
+												Statements: []Statement{
+													&ReturnStatement{
+														Pos:    Pos{Line: 4, Column: 5},
+														File:   &Word{Pos: Pos{Line: 4, Column: 12}, Value: "W-F"},
+														Record: true,
+														Into:   &Identifier{Pos: Pos{Line: 4, Column: 28}, Name: &Word{Pos: Pos{Line: 4, Column: 28}, Value: "WS-REC"}},
+														Handler: ExceptionPhrases{
+															Kind:  "AT END",
+															HasOn: true,
+															On: []Statement{
+																&DisplayStatement{Pos: Pos{Line: 4, Column: 42}, Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 50}, Value: "\"e\""}}},
+															},
+															HasNotOn: true,
+															NotOn: []Statement{
+																&DisplayStatement{Pos: Pos{Line: 4, Column: 65}, Operands: []Type{&StringLiteral{Pos: Pos{Line: 4, Column: 73}, Value: "\"n\""}}},
+															},
+														},
+														EndReturn: true,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "procedure division using and returning phrases",
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. LINK.\n" +
@@ -3549,6 +3817,54 @@ func TestParserErrors(t *testing.T) {
 				var target UnexpectedTokenError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, Pos{Line: 4, Column: 19}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "SORT without a USING or INPUT source",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SORT W-F ON ASCENDING KEY K.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 32}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "SORT INPUT not followed by PROCEDURE",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SORT W-F ON ASCENDING KEY K INPUT FOO.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 39}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "MERGE without the required USING",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MERGE M-F ON ASCENDING KEY K GIVING OUT.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 34}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "RETURN file-name position holds a reserved verb",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    RETURN DISPLAY \"x\".\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 12}, target.Actual.Pos)
 			},
 		},
 		{

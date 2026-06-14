@@ -1017,6 +1017,14 @@ func printStatement(stmt Statement, depth int, next printerAction) printerAction
 		return printDeleteStatement(s, depth, next)
 	case *StartStatement:
 		return printStartStatement(s, depth, next)
+	case *SortStatement:
+		return printSortStatement(s, depth, next)
+	case *MergeStatement:
+		return printMergeStatement(s, depth, next)
+	case *ReleaseStatement:
+		return printReleaseStatement(s, depth, next)
+	case *ReturnStatement:
+		return printReturnStatement(s, depth, next)
 	case *InitializeStatement:
 		return printInitializeStatement(s, depth, next)
 	case *SetStatement:
@@ -1558,6 +1566,193 @@ func printStartStatement(stmt *StartStatement, depth int, next printerAction) pr
 			pr.write(" KEY " + stmt.Key.Op + " " + text)
 		}
 		end := fileIOEndScope(stmt.EndStart, "END-START", stmt.Handler, depth, next)
+		return printExceptionPhrases(stmt.Handler, depth, end)
+	}
+}
+
+// printSortStatement prints a SORT statement on one line: the verb, the sort file,
+// each ON ASCENDING/DESCENDING KEY phrase, the optional WITH DUPLICATES and
+// COLLATING SEQUENCE phrases, the input source (USING or INPUT PROCEDURE), and the
+// output sink (GIVING or OUTPUT PROCEDURE). A typed-nil statement, a missing file,
+// or a malformed key/source/sink is rejected with an [UnsupportedNodeError].
+func printSortStatement(stmt *SortStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.File == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "SORT " + stmt.File.Value)
+		if !printSortKeys(pr, stmt.Keys) {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		if stmt.Duplicates {
+			pr.write(" WITH DUPLICATES")
+			if stmt.InOrder {
+				pr.write(" IN ORDER")
+			}
+		}
+		if stmt.Collating != nil {
+			pr.write(" COLLATING SEQUENCE " + stmt.Collating.Value)
+		}
+		if !printSortInput(pr, stmt.Using, stmt.Input) {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		if !printSortOutput(pr, stmt.Giving, stmt.Output) {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		return next
+	}
+}
+
+// printMergeStatement prints a MERGE statement on one line: the verb, the
+// sort-merge file, each key phrase, the optional COLLATING SEQUENCE, the required
+// USING input files, and the output sink (GIVING or OUTPUT PROCEDURE). A typed-nil
+// statement, a missing file, no USING files, or a malformed key/sink is rejected
+// with an [UnsupportedNodeError].
+func printMergeStatement(stmt *MergeStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.File == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "MERGE " + stmt.File.Value)
+		if !printSortKeys(pr, stmt.Keys) {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		if stmt.Collating != nil {
+			pr.write(" COLLATING SEQUENCE " + stmt.Collating.Value)
+		}
+		if !printSortFileList(pr, "USING", stmt.Using) {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		if !printSortOutput(pr, stmt.Giving, stmt.Output) {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		return next
+	}
+}
+
+// printSortKeys writes the ON ASCENDING/DESCENDING KEY phrases of a SORT or MERGE,
+// each as " ON ASCENDING|DESCENDING KEY name {name}". It returns false for a key
+// phrase with no names or a nil name.
+func printSortKeys(pr *printer, keys []SortKey) bool {
+	for _, k := range keys {
+		if len(k.Names) == 0 {
+			return false
+		}
+		if k.Ascending {
+			pr.write(" ON ASCENDING KEY")
+		} else {
+			pr.write(" ON DESCENDING KEY")
+		}
+		for _, n := range k.Names {
+			if n == nil {
+				return false
+			}
+			pr.write(" " + n.Value)
+		}
+	}
+	return true
+}
+
+// printSortFileList writes a leading-space USING/GIVING file list (the keyword then
+// each file-name). It returns false for an empty list or a nil file-name.
+func printSortFileList(pr *printer, keyword string, files []*Word) bool {
+	if len(files) == 0 {
+		return false
+	}
+	pr.write(" " + keyword)
+	for _, fl := range files {
+		if fl == nil {
+			return false
+		}
+		pr.write(" " + fl.Value)
+	}
+	return true
+}
+
+// printSortProcedure writes a leading-space INPUT/OUTPUT PROCEDURE phrase: the lead
+// keyword, the procedure-name, and an optional THROUGH range-end (canonical
+// "THROUGH", as PERFORM prints). It returns false for a nil phrase or missing
+// procedure-name.
+func printSortProcedure(pr *printer, lead string, proc *SortProcedure) bool {
+	if proc == nil || proc.Target == nil {
+		return false
+	}
+	pr.write(" " + lead + " PROCEDURE " + proc.Target.Value)
+	if proc.Through != nil {
+		pr.write(" THROUGH " + proc.Through.Value)
+	}
+	return true
+}
+
+// printSortInput writes a SORT input source — exactly one of a USING file list or
+// an INPUT PROCEDURE — returning false when neither or both are present.
+func printSortInput(pr *printer, using []*Word, input *SortProcedure) bool {
+	switch {
+	case len(using) > 0 && input == nil:
+		return printSortFileList(pr, "USING", using)
+	case input != nil && len(using) == 0:
+		return printSortProcedure(pr, "INPUT", input)
+	default:
+		return false
+	}
+}
+
+// printSortOutput writes a SORT/MERGE output sink — exactly one of a GIVING file
+// list or an OUTPUT PROCEDURE — returning false when neither or both are present.
+func printSortOutput(pr *printer, giving []*Word, output *SortProcedure) bool {
+	switch {
+	case len(giving) > 0 && output == nil:
+		return printSortFileList(pr, "GIVING", giving)
+	case output != nil && len(giving) == 0:
+		return printSortProcedure(pr, "OUTPUT", output)
+	default:
+		return false
+	}
+}
+
+// printReleaseStatement prints a RELEASE statement on one line: the verb, the
+// record-name, and an optional FROM source. A typed-nil statement, a missing
+// record-name, or an unprintable identifier is rejected with an
+// [UnsupportedNodeError].
+func printReleaseStatement(stmt *ReleaseStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.Record == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "RELEASE " + stmt.Record.Value)
+		if stmt.From != nil {
+			text, ok := identifierText(stmt.From)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.From})
+			}
+			pr.write(" FROM " + text)
+		}
+		return next
+	}
+}
+
+// printReturnStatement prints a RETURN statement, mirroring [printReadStatement]:
+// the verb, file-name, optional RECORD and INTO phrases, the AT END handler (each
+// phrase on its own line), and an optional END-RETURN (below the handler when one
+// is present, else on the statement line). A typed-nil statement, a missing
+// file-name, or an unprintable identifier is rejected with an [UnsupportedNodeError].
+func printReturnStatement(stmt *ReturnStatement, depth int, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if stmt == nil || stmt.File == nil {
+			return failPrint(UnsupportedNodeError{Node: stmt})
+		}
+		pr.write(indent(depth) + "RETURN " + stmt.File.Value)
+		if stmt.Record {
+			pr.write(" RECORD")
+		}
+		if stmt.Into != nil {
+			text, ok := identifierText(stmt.Into)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Into})
+			}
+			pr.write(" INTO " + text)
+		}
+		end := fileIOEndScope(stmt.EndReturn, "END-RETURN", stmt.Handler, depth, next)
 		return printExceptionPhrases(stmt.Handler, depth, end)
 	}
 }
