@@ -1034,6 +1034,49 @@ func TestTokenizerFixedFormat(t *testing.T) {
 				{Pos: Pos{Line: 3, Column: 15}, Type: TokenSymbol, Value: []byte(".")},
 			},
 		},
+		{
+			// Lookahead must not peek past column 72: a '*' at column 72 with '>'
+			// in the ignored identification area is a bare multiply operator, not
+			// the start of a *> comment.
+			name: "asterisk at column 72 is not a comment introducer",
+			src:  "       " + strings.Repeat("A", 64) + "*>\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte(strings.Repeat("A", 64))},
+				{Pos: Pos{Line: 1, Column: 72}, Type: TokenSymbol, Value: []byte("*")},
+			},
+		},
+		{
+			// A '.' at column 72 is a separator period: the non-space character in
+			// column 73 is ignored, so it does not turn the period into an error.
+			name: "period at column 72 is a separator period",
+			src:  "       " + strings.Repeat("A", 64) + ".X\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte(strings.Repeat("A", 64))},
+				{Pos: Pos{Line: 1, Column: 72}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// A '.' at column 72 terminates a numeric literal rather than being a
+			// decimal point, because the digit in column 73 is ignored.
+			name: "period at column 72 ends a numeric literal",
+			src:  "       " + strings.Repeat("9", 64) + ".5\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenNumber, Value: []byte(strings.Repeat("9", 64))},
+				{Pos: Pos{Line: 1, Column: 72}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// A '.' at column 72 ends a PICTURE clause as a separator period; the
+			// non-space character in column 73 must not make it a PICTURE decimal
+			// point.
+			name: "period at column 72 ends a picture clause",
+			src:  "       PIC " + strings.Repeat("9", 60) + ".X\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 12}, Type: TokenPicture, Value: []byte(strings.Repeat("9", 60))},
+				{Pos: Pos{Line: 1, Column: 72}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
 	}
 
 	for _, tc := range testCases {

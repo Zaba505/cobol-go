@@ -152,13 +152,28 @@ func (t *tokenizer) backup(previousPos Pos) error {
 	return nil
 }
 
+// fixedColumnInArea reports whether a lookahead byte at the given 0-based offset
+// from the next unread position still falls within Area B (column ≤ 72) in fixed
+// format. The peek helpers consult it so no lookahead considers a character in
+// the ignored identification area (columns 73+) — e.g. a token at column 72 must
+// not let "*>" / "**" / "<=" / a sign-digit / a decimal point / an exponent /
+// a PICTURE decimal point be recognized using a character past column 72. In free
+// format it is always true.
+func (t *tokenizer) fixedColumnInArea(offset int) bool {
+	return !t.fixed || t.pos.Column+offset <= fixedAreaBEndColumn
+}
+
 // peekByte returns the next unread byte without consuming it (so position is
-// unchanged), reporting false at end of input or on any read error. Numeric
-// punctuation and literal delimiters are all ASCII, so byte-level lookahead is
-// enough to decide them. The number tokenizer peeks before consuming so it never
-// has to put back a rune — [bufio.Reader.Peek] invalidates a later UnreadRune, so
-// peeking and then [tokenizer.backup]-ing the same rune is not allowed.
+// unchanged), reporting false at end of input or on any read error, and (in fixed
+// format) when the next byte lies past column 72. Numeric punctuation and literal
+// delimiters are all ASCII, so byte-level lookahead is enough to decide them. The
+// number tokenizer peeks before consuming so it never has to put back a rune —
+// [bufio.Reader.Peek] invalidates a later UnreadRune, so peeking and then
+// [tokenizer.backup]-ing the same rune is not allowed.
 func (t *tokenizer) peekByte() (byte, bool) {
+	if !t.fixedColumnInArea(0) {
+		return 0, false
+	}
 	b, _ := t.buf.Peek(1)
 	if len(b) == 0 {
 		return 0, false
@@ -167,11 +182,15 @@ func (t *tokenizer) peekByte() (byte, bool) {
 }
 
 // peekRune returns the next unread rune without consuming it (so position is
-// unchanged), reporting false at end of input. Unlike [tokenizer.peekByte] it
-// decodes a full UTF-8 rune, so multi-byte Unicode whitespace is recognized the
-// same way [skipWhitespace] recognizes it. As with peekByte, peeking and then
+// unchanged), reporting false at end of input and (in fixed format) when the next
+// rune lies past column 72. Unlike [tokenizer.peekByte] it decodes a full UTF-8
+// rune, so multi-byte Unicode whitespace is recognized the same way
+// [skipWhitespace] recognizes it. As with peekByte, peeking and then
 // [tokenizer.backup]-ing the same rune is not allowed.
 func (t *tokenizer) peekRune() (rune, bool) {
+	if !t.fixedColumnInArea(0) {
+		return 0, false
+	}
 	b, _ := t.buf.Peek(utf8.UTFMax)
 	if len(b) == 0 {
 		return 0, false
@@ -191,7 +210,7 @@ func (t *tokenizer) peekIsDigit() bool {
 // separator period.
 func (t *tokenizer) peekDecimalPointDigit() bool {
 	b, _ := t.buf.Peek(2)
-	return len(b) >= 2 && '0' <= b[1] && b[1] <= '9'
+	return len(b) >= 2 && '0' <= b[1] && b[1] <= '9' && t.fixedColumnInArea(1)
 }
 
 // peekExponentDigits reports whether an unconsumed exponent marker (the next
@@ -199,10 +218,10 @@ func (t *tokenizer) peekDecimalPointDigit() bool {
 // optionally preceded by a single '+'/'-' sign.
 func (t *tokenizer) peekExponentDigits() bool {
 	b, _ := t.buf.Peek(3)
-	if len(b) >= 2 && '0' <= b[1] && b[1] <= '9' {
+	if len(b) >= 2 && '0' <= b[1] && b[1] <= '9' && t.fixedColumnInArea(1) {
 		return true
 	}
-	if len(b) >= 3 && (b[1] == '+' || b[1] == '-') && '0' <= b[2] && b[2] <= '9' {
+	if len(b) >= 3 && (b[1] == '+' || b[1] == '-') && '0' <= b[2] && b[2] <= '9' && t.fixedColumnInArea(2) {
 		return true
 	}
 	return false
@@ -219,6 +238,9 @@ func (t *tokenizer) peekIS() bool {
 	if len(b) < 2 || (b[0] != 'I' && b[0] != 'i') || (b[1] != 'S' && b[1] != 's') {
 		return false
 	}
+	if !t.fixedColumnInArea(1) {
+		return false // the 'S' would fall in the ignored identification area
+	}
 	return len(b) < 3 || !isWordContinue(rune(b[2]))
 }
 
@@ -227,8 +249,12 @@ func (t *tokenizer) peekIS() bool {
 // the actual decimal point inside a PICTURE string (a '.' followed by another
 // PICTURE character, e.g. the '.' in ZZ9.99). It decodes the rune after the '.'
 // so multi-byte Unicode whitespace is recognized the same way [skipWhitespace]
-// recognizes it.
+// recognizes it. In fixed format a '.' at column 72 is always a separator period,
+// since the character after it (column 73+) is ignored.
 func (t *tokenizer) peekPictureSeparatorPeriod() bool {
+	if !t.fixedColumnInArea(1) {
+		return true // '.' at column 72: the rune after it is in the ignored area
+	}
 	b, _ := t.buf.Peek(1 + utf8.UTFMax)
 	if len(b) < 2 {
 		return true // '.' at end of input
