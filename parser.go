@@ -1452,8 +1452,13 @@ func Parse(r io.Reader, opts ...ParseOption) (*File, error) {
 	}
 
 	var topts []TokenizeOption
-	if cfg.format == FixedFormat {
+	switch cfg.format {
+	case FreeFormat:
+		// no column significance; the tokenizer's default
+	case FixedFormat:
 		topts = append(topts, WithFixedFormat())
+	default:
+		panic(fmt.Sprintf("unknown source format: %d", cfg.format))
 	}
 
 	next, stop := iter.Pull2(Tokenize(r, topts...))
