@@ -986,15 +986,15 @@ func TestTokenizerFixedFormat(t *testing.T) {
 		},
 		{
 			// An alphanumeric literal filled exactly to column 72 (no closing
-			// quote) is continued by a '-' line; it resumes after the matching
-			// re-opening quote in the continuation line's Area B, and the joined
-			// lexeme is emitted as one token.
+			// quote) is continued by a '-' line; Area A (cols 8–11) of the
+			// continuation line is blank and it resumes after the matching
+			// re-opening quote in Area B (col 12+), emitting one joined token.
 			name: "alphanumeric literal continuation filled to column 72",
 			src: "       \"" + strings.Repeat("A", 64) + "\n" +
-				"      -\"BC\".\n",
+				"      -    \"BC\".\n",
 			expected: []Token{
 				{Pos: Pos{Line: 1, Column: 8}, Type: TokenString, Value: []byte(`"` + strings.Repeat("A", 64) + `BC"`)},
-				{Pos: Pos{Line: 2, Column: 12}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 2, Column: 16}, Type: TokenSymbol, Value: []byte(".")},
 			},
 		},
 		{
@@ -1003,21 +1003,35 @@ func TestTokenizerFixedFormat(t *testing.T) {
 			// the literal.
 			name: "alphanumeric literal continuation pads short line to column 72",
 			src: "       \"XY\n" +
-				"      -\"Z\".\n",
+				"      -    \"Z\".\n",
 			expected: []Token{
 				{Pos: Pos{Line: 1, Column: 8}, Type: TokenString, Value: []byte(`"XY` + strings.Repeat(" ", 62) + `Z"`)},
-				{Pos: Pos{Line: 2, Column: 11}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 2, Column: 15}, Type: TokenSymbol, Value: []byte(".")},
 			},
 		},
 		{
 			// A word run to column 72 continues on a '-' line, resuming at the
-			// first non-blank character of Area B with no intervening space.
+			// first non-blank character of Area B (col 12+, Area A blank) with no
+			// intervening space.
 			name: "word continuation",
 			src: "       " + strings.Repeat("A", 65) + "\n" +
-				"      -   BCD.\n",
+				"      -    BCD.\n",
 			expected: []Token{
 				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte(strings.Repeat("A", 65) + "BCD")},
-				{Pos: Pos{Line: 2, Column: 14}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 2, Column: 15}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// An intervening full-line comment between a continued line and its
+			// '-' continuation is skipped (consumed, not emitted) when finding the
+			// line being continued (SPEC §"Line Continuation").
+			name: "continuation skips an intervening comment line",
+			src: "       \"" + strings.Repeat("A", 64) + "\n" +
+				"      * intervening comment\n" +
+				"      -    \"X\".\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenString, Value: []byte(`"` + strings.Repeat("A", 64) + `X"`)},
+				{Pos: Pos{Line: 3, Column: 15}, Type: TokenSymbol, Value: []byte(".")},
 			},
 		},
 	}

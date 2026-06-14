@@ -369,7 +369,8 @@ func dispatchRune(t *tokenizer, yield func(Token, error) bool, pos Pos, r rune) 
 // Delimiters" → Fixed format.
 const (
 	fixedIndicatorColumn = 7  // the indicator area
-	fixedAreaBEndColumn  = 72 // last column scanned; columns 73+ are ignored
+	fixedAreaBStartColumn = 12 // first column of Area B (Area A is 8–11)
+	fixedAreaBEndColumn   = 72 // last column scanned; columns 73+ are ignored
 )
 
 // tokenizeFixed is the fixed-format entry-point action. It advances past the
@@ -462,22 +463,21 @@ func (t *tokenizer) peekIsLineEnd() bool {
 
 // fixedAdvanceToContinuation handles a fixed-format token still open at the end of
 // a content line. It consumes the rest of the current physical line (through its
-// terminator), skips any wholly blank lines, then inspects the next line's
-// indicator (column 7): a '-' marks a continuation line, which it consumes —
-// leaving the reader at column 8 of the continuation line's Area B — and reports
-// true (SPEC §"Line Continuation" → Fixed format). Any other indicator is not a
+// terminator), then searches subsequent lines for the continuation line, skipping
+// any intervening blank lines and full-line comment lines ('*'/'/' in column 7),
+// as SPEC §"Line Continuation" requires. A '-' in column 7 marks the continuation
+// line, which it consumes — leaving the reader at column 8 — and reports true. Any
+// other indicator (a normal line, or a 'D'/'d' debugging line) is not a
 // continuation: it reports false, leaving the reader at column 7 so [tokenizeFixed]
 // handles that line normally. End of input also reports false.
+//
+// A skipped intervening comment line is consumed here, not emitted as a
+// [TokenComment]; a debugging line breaks continuation rather than being skipped,
+// because whether it is source depends on WITH DEBUGGING MODE, which the tokenizer
+// cannot see. Both are vanishingly rare between continuation lines.
 func (t *tokenizer) fixedAdvanceToContinuation() bool {
-	// Consume the rest of the current line, through its terminator.
-	for {
-		r, err := t.next()
-		if err != nil {
-			return false
-		}
-		if r == '\n' {
-			break
-		}
+	if !t.fixedConsumeToLineEnd() {
+		return false
 	}
 	for {
 		// Skip the sequence area (columns 1–6). A terminator here marks a blank
@@ -501,24 +501,45 @@ func (t *tokenizer) fixedAdvanceToContinuation() bool {
 		if !ok {
 			return false
 		}
-		if r == '\n' || r == '\r' {
-			_, _ = t.next()
-			continue
-		}
-		if r == '-' {
+		switch r {
+		case '\n', '\r':
+			_, _ = t.next() // blank line through the indicator column
+		case '-':
 			_, _ = t.next() // consume the hyphen; the reader is now at column 8.
 			return true
+		case '*', '/':
+			// Intervening full-line comment: skipped when finding the
+			// continuation line (consumed, not emitted as a token).
+			if !t.fixedConsumeToLineEnd() {
+				return false
+			}
+		default:
+			return false
 		}
-		return false
+	}
+}
+
+// fixedConsumeToLineEnd consumes runes through the next line terminator ('\n'),
+// reporting false at end of input before one is found.
+func (t *tokenizer) fixedConsumeToLineEnd() bool {
+	for {
+		r, err := t.next()
+		if err != nil {
+			return false
+		}
+		if r == '\n' {
+			return true
+		}
 	}
 }
 
 // fixedSkipToReopenDelim positions a continued alphanumeric literal at the
 // character immediately after the matching re-opening delimiter on a continuation
-// line. The reader is at column 8; it scans the continuation line's Area B for the
-// first delim rune, consuming up to and including it, and reports true. It reports
-// false — the literal is unterminated — if Area B ends (terminator or column 73)
-// before a matching delimiter appears.
+// line. The reader is at column 8; Area A (columns 8–11) of a continuation line
+// must be blank, so it is skipped, and the matching delimiter is sought in Area B
+// (columns 12–72) — per SPEC §"Line Continuation". It consumes up to and including
+// the first delim rune in Area B and reports true; it reports false — the literal
+// is unterminated — if the line ends (terminator or column 73) before one appears.
 func (t *tokenizer) fixedSkipToReopenDelim(delim rune) bool {
 	for {
 		if t.pos.Column > fixedAreaBEndColumn {
@@ -532,17 +553,20 @@ func (t *tokenizer) fixedSkipToReopenDelim(delim rune) bool {
 			return false
 		}
 		_, _ = t.next()
-		if r == delim {
+		// Area A is skipped; only an Area B delimiter re-opens the literal.
+		if r == delim && t.pos.Column > fixedAreaBStartColumn {
 			return true
 		}
 	}
 }
 
-// fixedSkipAreaBBlanks skips leading blanks in the Area B of a continuation line
-// (the reader is at column 8), positioning a continued word or numeric literal at
-// the first non-blank character at which it resumes. It stops at the first
-// non-blank, at the line terminator, or at column 73.
-func (t *tokenizer) fixedSkipAreaBBlanks() {
+// fixedSkipToAreaBContent positions a continued word or numeric literal at the
+// character at which it resumes. The reader is at column 8; Area A (columns 8–11)
+// of a continuation line must be blank, so it is skipped, and resumption is at the
+// first non-blank character of Area B (columns 12–72) — per SPEC §"Line
+// Continuation". It stops at that character, at the line terminator, or at
+// column 73.
+func (t *tokenizer) fixedSkipToAreaBContent() {
 	for {
 		if t.pos.Column > fixedAreaBEndColumn {
 			return
@@ -551,7 +575,10 @@ func (t *tokenizer) fixedSkipAreaBBlanks() {
 		if !ok {
 			return
 		}
-		if r == '\n' || r == '\r' || !unicode.IsSpace(r) {
+		if r == '\n' || r == '\r' {
+			return
+		}
+		if t.pos.Column >= fixedAreaBStartColumn && !unicode.IsSpace(r) {
 			return
 		}
 		_, _ = t.next()
@@ -676,7 +703,7 @@ func tokenizeWord(start Pos, first rune) tokenizerAction {
 		for {
 			if t.fixed && t.pos.Column > fixedAreaBEndColumn {
 				if t.fixedAdvanceToContinuation() {
-					t.fixedSkipAreaBBlanks()
+					t.fixedSkipToAreaBContent()
 					continue
 				}
 				tok := Token{Pos: start, Type: TokenIdentifier, Value: value}
@@ -807,7 +834,7 @@ func tokenizeNumber(start Pos, value []byte) tokenizerAction {
 				// boundary either ends there or resumes on a continuation line,
 				// like a word (SPEC §"Line Continuation").
 				if t.fixedAdvanceToContinuation() {
-					t.fixedSkipAreaBBlanks()
+					t.fixedSkipToAreaBContent()
 					continue
 				}
 				return emit(tokenizeCOBOL)

@@ -236,6 +236,14 @@ no intervening space**. Area A of a continuation line must be blank, and any
 intervening comment or blank lines are skipped when finding the line being
 continued (*GnuCOBOL §2.1.19.2*).
 
+> **Implementation note (#21):** When searching forward for the `-` line, the
+> tokenizer skips blank lines and full-line comment lines (`*`/`/`); a skipped
+> comment is **consumed**, not emitted as a `Comment` token. A `D`/`d` debugging
+> line, by contrast, **breaks** continuation (the literal/word is reported
+> unterminated), because whether it is source depends on `WITH DEBUGGING MODE`,
+> which the tokenizer cannot see. Both cases are vanishingly rare between
+> continuation lines.
+
 - **Words and numeric literals.** Run the word or numeric literal up to (at most)
   column 72, put `-` in column 7 of the next line, and resume at the first
   non-blank character of Area B. No quotation mark is involved. (Rarely needed —
