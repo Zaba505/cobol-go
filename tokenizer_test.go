@@ -1052,6 +1052,20 @@ func TestTokenizerFixedFormat(t *testing.T) {
 			},
 		},
 		{
+			// An all-blank record (spaces through Area B — the common 80-column
+			// form of a blank line) between a continued line and its '-'
+			// continuation is skipped, like any blank line, when finding the line
+			// being continued (SPEC §"Line Continuation").
+			name: "continuation skips an all-blank record",
+			src: "       \"" + strings.Repeat("A", 64) + "\n" +
+				strings.Repeat(" ", 40) + "\n" +
+				"      -    \"X\".\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenString, Value: []byte(`"` + strings.Repeat("A", 64) + `X"`)},
+				{Pos: Pos{Line: 3, Column: 15}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
 			// An intervening full-line comment between a continued line and its
 			// '-' continuation is skipped (consumed, not emitted) when finding the
 			// line being continued (SPEC §"Line Continuation").
@@ -1105,6 +1119,18 @@ func TestTokenizerFixedFormat(t *testing.T) {
 				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte("PIC")},
 				{Pos: Pos{Line: 1, Column: 12}, Type: TokenPicture, Value: []byte(strings.Repeat("9", 60))},
 				{Pos: Pos{Line: 1, Column: 72}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// The optional IS after PIC, with its 'S' at column 72: the word
+			// boundary after "IS" is the column-72 edge, so a non-space character
+			// in the ignored identification area (column 73) must not stop "IS"
+			// from being recognized as the keyword (emitted as its own token).
+			name: "PIC IS with IS ending at column 72",
+			src:  "000100 PIC" + strings.Repeat(" ", 60) + "ISX\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 1, Column: 71}, Type: TokenIdentifier, Value: []byte("IS")},
 			},
 		},
 	}

@@ -241,6 +241,9 @@ func (t *tokenizer) peekIS() bool {
 	if !t.fixedColumnInArea(1) {
 		return false // the 'S' would fall in the ignored identification area
 	}
+	if !t.fixedColumnInArea(2) {
+		return true // the character after "IS" is in the ignored area: a word boundary
+	}
 	return len(b) < 3 || !isWordContinue(rune(b[2]))
 }
 
@@ -548,9 +551,55 @@ func (t *tokenizer) fixedAdvanceToContinuation() bool {
 				return false
 			}
 		default:
+			// A space indicator with no non-blank Area A/B content is an
+			// all-blank record (the common 80-column form of a blank line):
+			// skip it like any other blank line. A normal content line, a
+			// 'D'/'d' debugging line, or any other indicator breaks
+			// continuation — report false, leaving the reader at column 7.
+			if unicode.IsSpace(r) && t.fixedRestOfLineBlank() {
+				if !t.fixedConsumeToLineEnd() {
+					return false
+				}
+				continue
+			}
 			return false
 		}
 	}
+}
+
+// fixedRestOfLineBlank reports whether the remainder of the current physical
+// line — from the next unread rune through its terminator, considering only the
+// Area A/B columns (≤ 72) — holds no non-whitespace character. It only peeks, so
+// the reader stays put for a caller that must otherwise fall back to normal
+// tokenization. Bytes in the ignored identification area (columns 73+) never
+// count as content, so a record blank through column 72 is blank regardless of
+// what follows. Used to tell an all-blank record (a skippable blank line) from a
+// real content line when searching for a continuation line.
+func (t *tokenizer) fixedRestOfLineBlank() bool {
+	// From column 7 (the indicator) at most columns 7–72 matter: 66 columns,
+	// each one ASCII byte in the common case. Peek generously so a multi-byte
+	// rune near the boundary is still seen whole; the column guard below stops
+	// the scan once it passes column 72.
+	b, _ := t.buf.Peek((fixedAreaBEndColumn - fixedIndicatorColumn + 2) * utf8.UTFMax)
+	col := t.pos.Column
+	for i := 0; i < len(b); {
+		if col > fixedAreaBEndColumn {
+			return true // only the ignored identification area remains
+		}
+		r, size := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && size <= 1 {
+			break // an incomplete rune at the end of the peek window
+		}
+		if r == '\n' || r == '\r' {
+			return true // terminator reached with no content
+		}
+		if !unicode.IsSpace(r) {
+			return false
+		}
+		i += size
+		col++
+	}
+	return true // end of input (or peek window) reached with no content
 }
 
 // fixedConsumeToLineEnd consumes runes through the next line terminator ('\n'),
