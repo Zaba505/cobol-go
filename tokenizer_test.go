@@ -964,6 +964,36 @@ func TestTokenizerFixedFormat(t *testing.T) {
 			},
 		},
 		{
+			// Regression: a comment line whose record extends into the ignored
+			// identification area (columns 73+) — common in 80-column fixed
+			// records — must not end the token stream. peekRune is column-bounded
+			// (ok=false past column 72), so the column-72 boundary is checked
+			// before peeking; otherwise the comment would take the genuine-EOF
+			// path and the following line would never tokenize.
+			name: "comment line with identification-area bytes still resumes",
+			src: "000100*" + strings.Repeat("C", 65) + "SEQ12345\n" +
+				"       DISPLAY \"x\".\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 7}, Type: TokenComment, Value: []byte("*" + strings.Repeat("C", 65))},
+				{Pos: Pos{Line: 2, Column: 8}, Type: TokenIdentifier, Value: []byte("DISPLAY")},
+				{Pos: Pos{Line: 2, Column: 16}, Type: TokenString, Value: []byte(`"x"`)},
+				{Pos: Pos{Line: 2, Column: 19}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// Same regression for a debugging line: identification-area bytes do
+			// not truncate the stream.
+			name: "debug line with identification-area bytes still resumes",
+			src: "      D" + strings.Repeat("X", 65) + "SEQ12345\n" +
+				"       DISPLAY \"x\".\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 7}, Type: TokenDebug, Value: []byte("D" + strings.Repeat("X", 65))},
+				{Pos: Pos{Line: 2, Column: 8}, Type: TokenIdentifier, Value: []byte("DISPLAY")},
+				{Pos: Pos{Line: 2, Column: 16}, Type: TokenString, Value: []byte(`"x"`)},
+				{Pos: Pos{Line: 2, Column: 19}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
 			// Blank lines are permitted anywhere and produce no tokens.
 			name: "blank lines are skipped",
 			src:  "\n       DISPLAY \"x\".\n\n",

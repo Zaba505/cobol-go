@@ -463,6 +463,14 @@ func tokenizeFixedLineRest(start Pos, indicator rune, typ TokenType) tokenizerAc
 			return yieldTokenThen(Token{Pos: start, Type: typ, Value: value}, next)
 		}
 		for {
+			// Check the column-72 boundary before peeking: peekRune is
+			// column-bounded (ok=false past column 72), so any bytes in the
+			// ignored identification area (columns 73+) must resume tokenizeFixed
+			// — which skips them and the terminator — rather than fall into the
+			// genuine-EOF branch below and terminate the stream early.
+			if t.pos.Column > fixedAreaBEndColumn {
+				return emit(tokenizeFixed)
+			}
 			r, ok := t.peekRune()
 			if !ok {
 				return emit(func(t *tokenizer, _ func(Token, error) bool) tokenizerAction {
@@ -470,7 +478,7 @@ func tokenizeFixedLineRest(start Pos, indicator rune, typ TokenType) tokenizerAc
 					return yieldErrorOr(err, nil)
 				})
 			}
-			if r == '\n' || r == '\r' || t.pos.Column > fixedAreaBEndColumn {
+			if r == '\n' || r == '\r' {
 				return emit(tokenizeFixed)
 			}
 			r, _ = t.next()
