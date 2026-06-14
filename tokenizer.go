@@ -43,6 +43,7 @@ const (
 	TokenString                      // e.g. "literal"
 	TokenNumber                      // e.g. 123, 45.67
 	TokenPicture                     // e.g. S9(4)V99, X(10) (the SPEC's PictureString)
+	TokenDebug                       // a fixed-format column-7 'D'/'d' debugging line
 )
 
 func (tt TokenType) String() string {
@@ -59,6 +60,8 @@ func (tt TokenType) String() string {
 		return "Number"
 	case TokenPicture:
 		return "Picture"
+	case TokenDebug:
+		return "Debug"
 	default:
 		panic(fmt.Sprintf("unknown token type: %d", tt))
 	}
@@ -74,6 +77,20 @@ type TokenizeOption func(*tokenizer)
 // directly.
 func WithDecimalComma() TokenizeOption {
 	return func(t *tokenizer) { t.decimalPoint = ',' }
+}
+
+// WithFixedFormat selects fixed-format ("reference format") source: each physical
+// line is divided into column areas (sequence 1–6, indicator 7, Area A 8–11,
+// Area B 12–72, identification 73–80) and the tokenizer becomes column-aware
+// (SPEC §"Whitespace and Delimiters" → Fixed format). The default is free format,
+// which has no column significance.
+//
+// The clause/directive that selects the source format (the >>SOURCE FORMAT
+// directive, a command-line option, or a dialect default) is recognized by a
+// later story; until then callers that know the dialect can request fixed format
+// directly, the same way [WithDecimalComma] exposes DECIMAL-POINT IS COMMA.
+func WithFixedFormat() TokenizeOption {
+	return func(t *tokenizer) { t.fixed = true }
 }
 
 // Tokenize the COBOL source defined in the given reader.
@@ -106,6 +123,11 @@ type tokenizer struct {
 	// decimalPoint is the rune that acts as the decimal point inside numeric
 	// literals: '.' normally, or ',' under DECIMAL-POINT IS COMMA.
 	decimalPoint rune
+
+	// fixed selects fixed-format ("reference format") tokenization: column areas
+	// carry meaning (see [WithFixedFormat]). When false the tokenizer is
+	// free-format and ignores column positions beyond tracking them for errors.
+	fixed bool
 }
 
 func (t *tokenizer) next() (rune, error) {
@@ -278,6 +300,9 @@ func skipWhitespace(next tokenizerAction) tokenizerAction {
 // introducer *>. The compiler-directive introducer >> is tokenized by a later
 // story; until then >> lexes as two > operators.
 func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+	if t.fixed {
+		return tokenizeFixed
+	}
 	return skipWhitespace(
 		func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
 			pos := t.pos
@@ -285,42 +310,269 @@ func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction 
 			if err != nil {
 				return yieldErrorOr(err, nil)
 			}
-
-			switch {
-			case r == '.':
-				return tokenizeSeparatorPeriod(pos)
-			case r == '(' || r == ')' || r == ':' || r == '=' || r == '/' || r == '&':
-				return yieldSymbol(pos, utf8.AppendRune(nil, r))
-			case r == ',' || r == ';':
-				return tokenizeSeparatorPunct(pos, r)
-			case r == '"' || r == '\'':
-				return tokenizeString(pos, r)
-			case isDigit(r):
-				return tokenizeNumber(pos, utf8.AppendRune(nil, r))
-			case (r == '+' || r == '-') && t.peekIsDigit():
-				// A sign begins a numeric literal only when contiguous with a
-				// digit; otherwise it is an arithmetic operator (handled below).
-				return tokenizeNumber(pos, utf8.AppendRune(nil, r))
-			case r == '+' || r == '-':
-				return yieldSymbol(pos, utf8.AppendRune(nil, r))
-			case r == '*':
-				// *> introduces a comment; a bare * is multiply and ** is
-				// exponentiation, both handled by tokenizeOperator.
-				if b, ok := t.peekByte(); ok && b == '>' {
-					gt, _ := t.next()
-					return tokenizeComment(pos, []byte{byte(r), byte(gt)})
-				}
-				return tokenizeOperator(pos, r)
-			case r == '<' || r == '>':
-				return tokenizeOperator(pos, r)
-			case isWordStart(r):
-				return tokenizeWord(pos, r)
-			default:
-				yield(Token{}, UnexpectedCharacterError{Pos: pos, R: r})
-				return nil
-			}
+			return dispatchRune(t, yield, pos, r)
 		},
 	)
+}
+
+// dispatchRune selects the sub-tokenizer for a content rune r already consumed at
+// pos. It is the shared core of both reference formats' dispatch: the free-format
+// entry point ([tokenizeCOBOL]) reaches it after skipping whitespace, and the
+// fixed-format entry point ([tokenizeFixed]) reaches it after skipping the
+// column areas. A rune that begins no known token class yields an
+// [UnexpectedCharacterError].
+//
+// This recognizes COBOL words, alphanumeric literals, numeric literals, the
+// separator period, the readability separators comma and semicolon, the
+// parenthesis and colon separators, the special-character operators
+// (+ - * / ** = < > <= >= <>), the concatenation operator & (the free-format
+// literal-continuation mechanism), and the inline/full-line comment introducer
+// *>. The compiler-directive introducer >> is tokenized by a later story; until
+// then >> lexes as two > operators.
+func dispatchRune(t *tokenizer, yield func(Token, error) bool, pos Pos, r rune) tokenizerAction {
+	switch {
+	case r == '.':
+		return tokenizeSeparatorPeriod(pos)
+	case r == '(' || r == ')' || r == ':' || r == '=' || r == '/' || r == '&':
+		return yieldSymbol(pos, utf8.AppendRune(nil, r))
+	case r == ',' || r == ';':
+		return tokenizeSeparatorPunct(pos, r)
+	case r == '"' || r == '\'':
+		return tokenizeString(pos, r)
+	case isDigit(r):
+		return tokenizeNumber(pos, utf8.AppendRune(nil, r))
+	case (r == '+' || r == '-') && t.peekIsDigit():
+		// A sign begins a numeric literal only when contiguous with a
+		// digit; otherwise it is an arithmetic operator (handled below).
+		return tokenizeNumber(pos, utf8.AppendRune(nil, r))
+	case r == '+' || r == '-':
+		return yieldSymbol(pos, utf8.AppendRune(nil, r))
+	case r == '*':
+		// *> introduces a comment; a bare * is multiply and ** is
+		// exponentiation, both handled by tokenizeOperator.
+		if b, ok := t.peekByte(); ok && b == '>' {
+			gt, _ := t.next()
+			return tokenizeComment(pos, []byte{byte(r), byte(gt)})
+		}
+		return tokenizeOperator(pos, r)
+	case r == '<' || r == '>':
+		return tokenizeOperator(pos, r)
+	case isWordStart(r):
+		return tokenizeWord(pos, r)
+	default:
+		yield(Token{}, UnexpectedCharacterError{Pos: pos, R: r})
+		return nil
+	}
+}
+
+// Fixed-format column boundaries (1-based), per SPEC §"Whitespace and
+// Delimiters" → Fixed format.
+const (
+	fixedIndicatorColumn = 7  // the indicator area
+	fixedAreaBEndColumn  = 72 // last column scanned; columns 73+ are ignored
+)
+
+// tokenizeFixed is the fixed-format entry-point action. It advances past the
+// non-content column areas — the sequence area (columns 1–6), the identification
+// area (columns 73+), and ordinary whitespace within Area A/B — acting on the
+// column-7 indicator of each physical line, then dispatches the next content rune
+// through [dispatchRune] exactly as free format does.
+//
+// The indicator area (column 7) selects the line kind: '*' or '/' makes the whole
+// line (columns 8–72) a [TokenComment]; 'D'/'d' makes it a [TokenDebug]; '-' is a
+// continuation line whose join semantics live in the recognizers (they call
+// [tokenizer.fixedAdvanceToContinuation] when a token reaches the column-72
+// boundary), so at a token boundary it scans like a normal line; space (or any
+// other character) is a normal line. A line shorter than 7 columns has no
+// indicator and is likewise normal.
+func tokenizeFixed(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+	for {
+		pos := t.pos
+		r, err := t.next()
+		if err != nil {
+			return yieldErrorOr(err, nil)
+		}
+		switch {
+		case pos.Column < fixedIndicatorColumn:
+			// Sequence area (columns 1–6): ignored; any character (including a
+			// terminator ending a blank or short line) carries no meaning.
+			continue
+		case pos.Column == fixedIndicatorColumn:
+			switch r {
+			case '*', '/':
+				return tokenizeFixedLineRest(pos, r, TokenComment)
+			case 'D', 'd':
+				return tokenizeFixedLineRest(pos, r, TokenDebug)
+			default:
+				// space, '-' (continuation at a token boundary — nothing to
+				// join), or anything else: a normal line. Scan Area A/B content.
+				continue
+			}
+		case pos.Column > fixedAreaBEndColumn:
+			// Identification area (columns 73+): ignored.
+			continue
+		default:
+			// Area A / Area B (columns 8–72).
+			if unicode.IsSpace(r) {
+				continue
+			}
+			return dispatchRune(t, yield, pos, r)
+		}
+	}
+}
+
+// tokenizeFixedLineRest captures the rest of a fixed-format indicator line as a
+// single token of typ — a full-line comment ('*'/'/') or a debugging line
+// ('D'/'d'). The indicator was already consumed at start (column 7); the token's
+// value is that indicator followed by the line's columns 8–72, and its position
+// is the indicator's (column 7), mirroring how free format keeps the *> marker in
+// a comment's value so a fixed-format printer can later reconstruct it. Reading
+// stops at the line terminator or column 73, whichever comes first (columns 73+
+// are ignored). Fixed dispatch resumes on the next line.
+func tokenizeFixedLineRest(start Pos, indicator rune, typ TokenType) tokenizerAction {
+	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		value := utf8.AppendRune(nil, indicator)
+		emit := func(next tokenizerAction) tokenizerAction {
+			return yieldTokenThen(Token{Pos: start, Type: typ, Value: value}, next)
+		}
+		for {
+			r, ok := t.peekRune()
+			if !ok {
+				return emit(func(t *tokenizer, _ func(Token, error) bool) tokenizerAction {
+					_, err := t.next()
+					return yieldErrorOr(err, nil)
+				})
+			}
+			if r == '\n' || r == '\r' || t.pos.Column > fixedAreaBEndColumn {
+				return emit(tokenizeFixed)
+			}
+			r, _ = t.next()
+			value = utf8.AppendRune(value, r)
+		}
+	}
+}
+
+// peekIsLineEnd reports whether the next unread rune is a physical line
+// terminator ('\n' or '\r'). The fixed-format recognizers use it to detect a
+// content line that ends short of column 72 with a token still open.
+func (t *tokenizer) peekIsLineEnd() bool {
+	r, ok := t.peekRune()
+	return ok && (r == '\n' || r == '\r')
+}
+
+// fixedAdvanceToContinuation handles a fixed-format token still open at the end of
+// a content line. It consumes the rest of the current physical line (through its
+// terminator), skips any wholly blank lines, then inspects the next line's
+// indicator (column 7): a '-' marks a continuation line, which it consumes —
+// leaving the reader at column 8 of the continuation line's Area B — and reports
+// true (SPEC §"Line Continuation" → Fixed format). Any other indicator is not a
+// continuation: it reports false, leaving the reader at column 7 so [tokenizeFixed]
+// handles that line normally. End of input also reports false.
+func (t *tokenizer) fixedAdvanceToContinuation() bool {
+	// Consume the rest of the current line, through its terminator.
+	for {
+		r, err := t.next()
+		if err != nil {
+			return false
+		}
+		if r == '\n' {
+			break
+		}
+	}
+	for {
+		// Skip the sequence area (columns 1–6). A terminator here marks a blank
+		// or short line, which is skipped when finding the continuation line.
+		blank := false
+		for t.pos.Column < fixedIndicatorColumn {
+			r, err := t.next()
+			if err != nil {
+				return false
+			}
+			if r == '\n' {
+				blank = true
+				break
+			}
+		}
+		if blank {
+			continue
+		}
+		// At the indicator column (7).
+		r, ok := t.peekRune()
+		if !ok {
+			return false
+		}
+		if r == '\n' || r == '\r' {
+			_, _ = t.next()
+			continue
+		}
+		if r == '-' {
+			_, _ = t.next() // consume the hyphen; the reader is now at column 8.
+			return true
+		}
+		return false
+	}
+}
+
+// fixedSkipToReopenDelim positions a continued alphanumeric literal at the
+// character immediately after the matching re-opening delimiter on a continuation
+// line. The reader is at column 8; it scans the continuation line's Area B for the
+// first delim rune, consuming up to and including it, and reports true. It reports
+// false — the literal is unterminated — if Area B ends (terminator or column 73)
+// before a matching delimiter appears.
+func (t *tokenizer) fixedSkipToReopenDelim(delim rune) bool {
+	for {
+		if t.pos.Column > fixedAreaBEndColumn {
+			return false
+		}
+		r, ok := t.peekRune()
+		if !ok {
+			return false
+		}
+		if r == '\n' || r == '\r' {
+			return false
+		}
+		_, _ = t.next()
+		if r == delim {
+			return true
+		}
+	}
+}
+
+// fixedSkipAreaBBlanks skips leading blanks in the Area B of a continuation line
+// (the reader is at column 8), positioning a continued word or numeric literal at
+// the first non-blank character at which it resumes. It stops at the first
+// non-blank, at the line terminator, or at column 73.
+func (t *tokenizer) fixedSkipAreaBBlanks() {
+	for {
+		if t.pos.Column > fixedAreaBEndColumn {
+			return
+		}
+		r, ok := t.peekRune()
+		if !ok {
+			return
+		}
+		if r == '\n' || r == '\r' || !unicode.IsSpace(r) {
+			return
+		}
+		_, _ = t.next()
+	}
+}
+
+// fixedContinueLiteral handles a fixed-format alphanumeric literal that reached
+// the end of a content line without its closing delimiter. Per SPEC every column
+// through 72 belongs to the literal, so it first pads value with spaces for any
+// columns missing on a short line; then it advances to the continuation line
+// (column 7 == '-') and skips to just after the matching re-opening delimiter in
+// its Area B, leaving the reader positioned to resume the literal. It reports
+// false when there is no valid continuation (the literal is unterminated).
+func (t *tokenizer) fixedContinueLiteral(value *[]byte, delim rune) bool {
+	for c := t.pos.Column; c <= fixedAreaBEndColumn; c++ {
+		*value = append(*value, ' ')
+	}
+	if !t.fixedAdvanceToContinuation() {
+		return false
+	}
+	return t.fixedSkipToReopenDelim(delim)
 }
 
 // yieldSymbol emits a [TokenSymbol] carrying value at pos, then continues at the
@@ -413,10 +665,23 @@ func tokenizeSeparatorPeriod(start Pos) tokenizerAction {
 // action re-reads it; end of input simply ends the word. All COBOL words emit as
 // [TokenIdentifier] — the parser's keyword table distinguishes reserved words
 // from user-defined names.
+//
+// In fixed format a word that runs to the column-72 boundary either ends there or,
+// when the next line is a continuation line (column 7 == '-'), resumes at the
+// first non-blank character of that line's Area B with no intervening space (SPEC
+// §"Line Continuation" → Words and numeric literals).
 func tokenizeWord(start Pos, first rune) tokenizerAction {
 	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
 		value := utf8.AppendRune(nil, first)
 		for {
+			if t.fixed && t.pos.Column > fixedAreaBEndColumn {
+				if t.fixedAdvanceToContinuation() {
+					t.fixedSkipAreaBBlanks()
+					continue
+				}
+				tok := Token{Pos: start, Type: TokenIdentifier, Value: value}
+				return yieldTokenThen(tok, nextAfterWord(value))
+			}
 			pos := t.pos
 			r, err := t.next()
 			if err != nil {
@@ -487,6 +752,13 @@ func tokenizePictureString(start Pos) tokenizerAction {
 			return yieldTokenThen(Token{Pos: start, Type: TokenPicture, Value: value}, next)
 		}
 		for {
+			if t.fixed && t.pos.Column > fixedAreaBEndColumn {
+				// Fixed format: the PICTURE string ends at the column-72 boundary
+				// (columns 73+ are ignored). PICTURE strings are short and fit on
+				// one line, so column-7 continuation of a PICTURE string is not
+				// supported.
+				return emit(tokenizeCOBOL)
+			}
 			r, ok := t.peekRune()
 			if !ok {
 				// End of input or a read error follows the string: emit it, then
@@ -530,6 +802,16 @@ func tokenizeNumber(start Pos, value []byte) tokenizerAction {
 			return yieldTokenThen(Token{Pos: start, Type: TokenNumber, Value: value}, next)
 		}
 		for {
+			if t.fixed && t.pos.Column > fixedAreaBEndColumn {
+				// Fixed format: a numeric literal that runs to the column-72
+				// boundary either ends there or resumes on a continuation line,
+				// like a word (SPEC §"Line Continuation").
+				if t.fixedAdvanceToContinuation() {
+					t.fixedSkipAreaBBlanks()
+					continue
+				}
+				return emit(tokenizeCOBOL)
+			}
 			b, ok := t.peekByte()
 			if !ok {
 				// End of input or a read error follows the number: emit it, then
@@ -573,10 +855,27 @@ func tokenizeNumber(start Pos, value []byte) tokenizerAction {
 // not the close. End of input before the matching delimiter is an
 // [UnterminatedStringError]; any other read error propagates unchanged. Decoding
 // the escapes is deferred to a later story.
+//
+// In fixed format a literal that reaches the column-72 boundary (or the end of a
+// short content line) without its closing delimiter is continued on the next line
+// (column 7 == '-'): every column through 72 — including trailing spaces —
+// belongs to the literal, and it resumes at the character after the matching
+// re-opening delimiter in the continuation line's Area B (SPEC §"Line
+// Continuation" → Alphanumeric literals). The emitted value is the joined lexeme:
+// the opening delimiter, all content, and the closing delimiter, as if the
+// literal were written on one line. Missing the continuation is an
+// [UnterminatedStringError].
 func tokenizeString(start Pos, delim rune) tokenizerAction {
 	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
 		value := utf8.AppendRune(nil, delim)
 		for {
+			if t.fixed && (t.pos.Column > fixedAreaBEndColumn || t.peekIsLineEnd()) {
+				if !t.fixedContinueLiteral(&value, delim) {
+					yield(Token{}, UnterminatedStringError{Pos: start})
+					return nil
+				}
+				continue
+			}
 			r, err := t.next()
 			if err != nil {
 				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -587,8 +886,12 @@ func tokenizeString(start Pos, delim rune) tokenizerAction {
 			}
 			value = utf8.AppendRune(value, r)
 			if r == delim {
-				if b, ok := t.peekByte(); ok && rune(b) == delim {
-					// Doubled delimiter: an escaped delimiter, not the close.
+				// A doubled delimiter is an escaped delimiter, not the close. In
+				// fixed format the second delimiter must still be within Area B; a
+				// delimiter spilling into column 73+ is ignored, so the literal
+				// closes here.
+				if b, ok := t.peekByte(); ok && rune(b) == delim &&
+					(!t.fixed || t.pos.Column <= fixedAreaBEndColumn) {
 					escaped, _ := t.next()
 					value = utf8.AppendRune(value, escaped)
 					continue
@@ -620,6 +923,11 @@ func tokenizeComment(start Pos, value []byte) tokenizerAction {
 			return yieldTokenThen(Token{Pos: start, Type: TokenComment, Value: value}, next)
 		}
 		for {
+			if t.fixed && t.pos.Column > fixedAreaBEndColumn {
+				// Fixed format: an inline *> comment ends at the column-72
+				// boundary; columns 73+ are the ignored identification area.
+				return emit(tokenizeCOBOL)
+			}
 			r, ok := t.peekRune()
 			if !ok {
 				return emit(func(t *tokenizer, _ func(Token, error) bool) tokenizerAction {

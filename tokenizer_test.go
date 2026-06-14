@@ -834,3 +834,223 @@ func TestTokenizerPropagatesReadError(t *testing.T) {
 	var unterminated UnterminatedStringError
 	require.NotErrorAs(t, got, &unterminated)
 }
+
+// Fixed-format ("reference format") tokenization is column-aware: content lives in
+// Area A (columns 8–11) and Area B (columns 12–72); the sequence area (1–6) and
+// identification area (73–80) are ignored; the column-7 indicator marks comment
+// ('*', '/'), debugging ('D'/'d'), and continuation ('-') lines. The ruler in the
+// comments shows column numbers and is not part of the source.
+//
+//	----+----1----+----2----+----3----+----4----+----5----+----6----+----7--
+func TestTokenizerFixedFormat(t *testing.T) {
+	t.Parallel()
+
+	collect := func(seq iter.Seq2[Token, error]) ([]Token, error) {
+		var tokens []Token
+		for tok, err := range seq {
+			if err != nil {
+				return tokens, err
+			}
+			t.Log(tok)
+			tokens = append(tokens, tok)
+		}
+		return tokens, nil
+	}
+
+	testCases := []struct {
+		name     string
+		src      string
+		expected []Token
+	}{
+		{
+			// Headers and the level/paragraph names begin in Area A (column 8);
+			// statements sit in Area B (column 12 onward).
+			name: "minimal program with Area A and Area B",
+			src: "       IDENTIFICATION DIVISION.\n" +
+				"       PROGRAM-ID. HELLO.\n" +
+				"       PROCEDURE DIVISION.\n" +
+				"           DISPLAY \"Hello, world!\".\n" +
+				"           STOP RUN.\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte("IDENTIFICATION")},
+				{Pos: Pos{Line: 1, Column: 23}, Type: TokenIdentifier, Value: []byte("DIVISION")},
+				{Pos: Pos{Line: 1, Column: 31}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 2, Column: 8}, Type: TokenIdentifier, Value: []byte("PROGRAM-ID")},
+				{Pos: Pos{Line: 2, Column: 18}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 2, Column: 20}, Type: TokenIdentifier, Value: []byte("HELLO")},
+				{Pos: Pos{Line: 2, Column: 25}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 3, Column: 8}, Type: TokenIdentifier, Value: []byte("PROCEDURE")},
+				{Pos: Pos{Line: 3, Column: 18}, Type: TokenIdentifier, Value: []byte("DIVISION")},
+				{Pos: Pos{Line: 3, Column: 26}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 4, Column: 12}, Type: TokenIdentifier, Value: []byte("DISPLAY")},
+				{Pos: Pos{Line: 4, Column: 20}, Type: TokenString, Value: []byte(`"Hello, world!"`)},
+				{Pos: Pos{Line: 4, Column: 35}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 5, Column: 12}, Type: TokenIdentifier, Value: []byte("STOP")},
+				{Pos: Pos{Line: 5, Column: 17}, Type: TokenIdentifier, Value: []byte("RUN")},
+				{Pos: Pos{Line: 5, Column: 20}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// A 6-digit card sequence number in columns 1–6 is ignored.
+			name: "sequence area is ignored",
+			src:  "000100 DISPLAY \"hi\".\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte("DISPLAY")},
+				{Pos: Pos{Line: 1, Column: 16}, Type: TokenString, Value: []byte(`"hi"`)},
+				{Pos: Pos{Line: 1, Column: 20}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// Anything at or past column 73 (the identification area) is discarded.
+			name: "identification area is ignored",
+			src:  "       DISPLAY \"hi\"." + strings.Repeat(" ", 52) + "IGNORED!\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte("DISPLAY")},
+				{Pos: Pos{Line: 1, Column: 16}, Type: TokenString, Value: []byte(`"hi"`)},
+				{Pos: Pos{Line: 1, Column: 20}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// '*' in column 7 makes the whole line (columns 8–72) a comment; the
+			// indicator is kept in the value and the position is column 7.
+			name: "asterisk comment line",
+			src:  "000100* THIS IS A COMMENT\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 7}, Type: TokenComment, Value: []byte("* THIS IS A COMMENT")},
+			},
+		},
+		{
+			// '/' in column 7 is a comment that also forces a page eject.
+			name: "slash comment line",
+			src:  "      / PAGE EJECT\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 7}, Type: TokenComment, Value: []byte("/ PAGE EJECT")},
+			},
+		},
+		{
+			// 'D' in column 7 is a debugging line: one TokenDebug spanning the
+			// line, deferring the comment-vs-source decision to the parser.
+			name: "uppercase debugging line",
+			src:  "      D    DISPLAY \"X\".\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 7}, Type: TokenDebug, Value: []byte(`D    DISPLAY "X".`)},
+			},
+		},
+		{
+			name: "lowercase debugging line",
+			src:  "      d DISPLAY DBG\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 7}, Type: TokenDebug, Value: []byte("d DISPLAY DBG")},
+			},
+		},
+		{
+			// The floating *> comment still works inside Area B.
+			name: "inline floating comment in Area B",
+			src:  "       DISPLAY \"hi\".  *> note\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte("DISPLAY")},
+				{Pos: Pos{Line: 1, Column: 16}, Type: TokenString, Value: []byte(`"hi"`)},
+				{Pos: Pos{Line: 1, Column: 20}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 1, Column: 23}, Type: TokenComment, Value: []byte("*> note")},
+			},
+		},
+		{
+			// A token that runs to the column-72 boundary ends there; the
+			// characters spilling into columns 73+ are ignored.
+			name: "token ends at the column-72 boundary",
+			src:  "       " + strings.Repeat("A", 65) + "IGNORE\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte(strings.Repeat("A", 65))},
+			},
+		},
+		{
+			// Blank lines are permitted anywhere and produce no tokens.
+			name: "blank lines are skipped",
+			src:  "\n       DISPLAY \"x\".\n\n",
+			expected: []Token{
+				{Pos: Pos{Line: 2, Column: 8}, Type: TokenIdentifier, Value: []byte("DISPLAY")},
+				{Pos: Pos{Line: 2, Column: 16}, Type: TokenString, Value: []byte(`"x"`)},
+				{Pos: Pos{Line: 2, Column: 19}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// A line shorter than 7 columns has no indicator; its characters fall
+			// in the ignored sequence area.
+			name: "short line falls in the sequence area",
+			src:  "AB\n       DISPLAY \"x\".\n",
+			expected: []Token{
+				{Pos: Pos{Line: 2, Column: 8}, Type: TokenIdentifier, Value: []byte("DISPLAY")},
+				{Pos: Pos{Line: 2, Column: 16}, Type: TokenString, Value: []byte(`"x"`)},
+				{Pos: Pos{Line: 2, Column: 19}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// An alphanumeric literal filled exactly to column 72 (no closing
+			// quote) is continued by a '-' line; it resumes after the matching
+			// re-opening quote in the continuation line's Area B, and the joined
+			// lexeme is emitted as one token.
+			name: "alphanumeric literal continuation filled to column 72",
+			src: "       \"" + strings.Repeat("A", 64) + "\n" +
+				"      -\"BC\".\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenString, Value: []byte(`"` + strings.Repeat("A", 64) + `BC"`)},
+				{Pos: Pos{Line: 2, Column: 12}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// A continued literal on a short physical line: every column through
+			// 72 — including the trailing spaces the short line omits — is part of
+			// the literal.
+			name: "alphanumeric literal continuation pads short line to column 72",
+			src: "       \"XY\n" +
+				"      -\"Z\".\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenString, Value: []byte(`"XY` + strings.Repeat(" ", 62) + `Z"`)},
+				{Pos: Pos{Line: 2, Column: 11}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// A word run to column 72 continues on a '-' line, resuming at the
+			// first non-blank character of Area B with no intervening space.
+			name: "word continuation",
+			src: "       " + strings.Repeat("A", 65) + "\n" +
+				"      -   BCD.\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte(strings.Repeat("A", 65) + "BCD")},
+				{Pos: Pos{Line: 2, Column: 14}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tokens, err := collect(Tokenize(strings.NewReader(tc.src), WithFixedFormat()))
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, tokens)
+		})
+	}
+}
+
+// A fixed-format alphanumeric literal left open at the column-72 boundary with no
+// following continuation line is unterminated.
+func TestTokenizerFixedFormatUnterminatedContinuation(t *testing.T) {
+	t.Parallel()
+
+	src := "       \"" + strings.Repeat("A", 64) + "\n" +
+		"       X.\n"
+
+	var got error
+	for _, err := range Tokenize(strings.NewReader(src), WithFixedFormat()) {
+		if err != nil {
+			got = err
+			break
+		}
+	}
+
+	var unterminated UnterminatedStringError
+	require.ErrorAs(t, got, &unterminated)
+	require.Equal(t, Pos{Line: 1, Column: 8}, unterminated.Pos)
+}
