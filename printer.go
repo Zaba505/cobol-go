@@ -1586,6 +1586,9 @@ func printSortStatement(stmt *SortStatement, depth int, next printerAction) prin
 		}
 		if stmt.Duplicates {
 			pr.write(" WITH DUPLICATES")
+			if stmt.InOrder {
+				pr.write(" IN ORDER")
+			}
 		}
 		if stmt.Collating != nil {
 			pr.write(" COLLATING SEQUENCE " + stmt.Collating.Value)

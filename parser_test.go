@@ -2147,7 +2147,7 @@ func TestParser(t *testing.T) {
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +
 				"PROCEDURE DIVISION.\n" +
-				"    SORT WORK-FILE ON ASCENDING KEY K1 K2 WITH DUPLICATES COLLATING SEQUENCE NS USING IN-FILE GIVING OUT-FILE.\n",
+				"    SORT WORK-FILE ON ASCENDING KEY K1 K2 WITH DUPLICATES IN ORDER COLLATING SEQUENCE NS USING IN-FILE GIVING OUT-FILE.\n",
 			expected: &File{
 				Programs: []*Program{
 					{
@@ -2183,9 +2183,10 @@ func TestParser(t *testing.T) {
 															},
 														},
 														Duplicates: true,
-														Collating:  &Word{Pos: Pos{Line: 4, Column: 78}, Value: "NS"},
-														Using:      []*Word{{Pos: Pos{Line: 4, Column: 87}, Value: "IN-FILE"}},
-														Giving:     []*Word{{Pos: Pos{Line: 4, Column: 102}, Value: "OUT-FILE"}},
+														InOrder:    true,
+														Collating:  &Word{Pos: Pos{Line: 4, Column: 87}, Value: "NS"},
+														Using:      []*Word{{Pos: Pos{Line: 4, Column: 96}, Value: "IN-FILE"}},
+														Giving:     []*Word{{Pos: Pos{Line: 4, Column: 111}, Value: "OUT-FILE"}},
 													},
 												},
 											},

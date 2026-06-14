@@ -610,7 +610,8 @@ type StartKey struct {
 // SortStatement is a SORT statement (SPEC.md "sort-statement"): it orders the
 // records of an SD sort-merge file. Pos is the position of the SORT keyword; File
 // is the sort file (an SD description). Keys are the ON ASCENDING/DESCENDING KEY
-// phrases in source order; Duplicates reports WITH DUPLICATES [IN ORDER];
+// phrases in source order; Duplicates reports WITH DUPLICATES and InOrder its
+// optional IN ORDER suffix (InOrder is only meaningful when Duplicates is true);
 // Collating is the COLLATING SEQUENCE alphabet-name, nil when absent. The input
 // is exactly one of Using (USING file-list) or Input (INPUT PROCEDURE); the
 // output is exactly one of Giving (GIVING file-list) or Output (OUTPUT PROCEDURE).
@@ -619,6 +620,7 @@ type SortStatement struct {
 	File       *Word
 	Keys       []SortKey
 	Duplicates bool
+	InOrder    bool
 	Collating  *Word
 	Using      []*Word
 	Input      *SortProcedure
@@ -5804,11 +5806,11 @@ func parseSortStatement(p *parser, kw Token) (Statement, error) {
 	}
 	stmt.Keys = keys
 
-	dup, err := parseDuplicatesPhrase(p)
+	dup, inOrder, err := parseDuplicatesPhrase(p)
 	if err != nil {
 		return nil, err
 	}
-	stmt.Duplicates = dup
+	stmt.Duplicates, stmt.InOrder = dup, inOrder
 
 	coll, err := parseCollatingPhrase(p)
 	if err != nil {
@@ -5909,32 +5911,34 @@ func parseSortKeys(p *parser) ([]SortKey, error) {
 }
 
 // parseDuplicatesPhrase parses the optional [WITH] DUPLICATES [IN ORDER] phrase of
-// a SORT, reporting whether it was present. A present WITH must introduce
-// DUPLICATES (the OPEN/CLOSE WITH-option style).
-func parseDuplicatesPhrase(p *parser) (bool, error) {
+// a SORT, reporting whether DUPLICATES was present and, separately, whether its
+// optional IN ORDER suffix followed (so the printer can round-trip it). A present
+// WITH must introduce DUPLICATES (the OPEN/CLOSE WITH-option style).
+func parseDuplicatesPhrase(p *parser) (dup, inOrder bool, err error) {
 	if with, err := p.peekKeyword("WITH"); err != nil {
-		return false, err
+		return false, false, err
 	} else if with {
 		p.consume() // WITH — only introduces DUPLICATES here.
 		if _, err := p.expectKeyword("DUPLICATES"); err != nil {
-			return false, err
+			return false, false, err
 		}
 	} else if dup, err := p.peekKeyword("DUPLICATES"); err != nil {
-		return false, err
+		return false, false, err
 	} else if dup {
 		p.consume() // DUPLICATES
 	} else {
-		return false, nil
+		return false, false, nil
 	}
 	if in, err := p.peekKeyword("IN"); err != nil {
-		return false, err
+		return false, false, err
 	} else if in {
 		p.consume() // IN
 		if _, err := p.expectKeyword("ORDER"); err != nil {
-			return false, err
+			return false, false, err
 		}
+		inOrder = true
 	}
-	return true, nil
+	return true, inOrder, nil
 }
 
 // parseCollatingPhrase parses the optional COLLATING SEQUENCE [IS] alphabet-name

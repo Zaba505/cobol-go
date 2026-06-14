@@ -1033,6 +1033,7 @@ func TestPrinter(t *testing.T) {
 											File:       &Word{Value: "WORK-FILE"},
 											Keys:       []SortKey{{Ascending: true, Names: []*Word{{Value: "K1"}, {Value: "K2"}}}},
 											Duplicates: true,
+											InOrder:    true,
 											Collating:  &Word{Value: "NS"},
 											Using:      []*Word{{Value: "IN-FILE"}},
 											Giving:     []*Word{{Value: "OUT-FILE"}},
@@ -1087,7 +1088,7 @@ func TestPrinter(t *testing.T) {
 			expected: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +
 				"PROCEDURE DIVISION.\n" +
-				"    SORT WORK-FILE ON ASCENDING KEY K1 K2 WITH DUPLICATES COLLATING SEQUENCE NS USING IN-FILE GIVING OUT-FILE.\n" +
+				"    SORT WORK-FILE ON ASCENDING KEY K1 K2 WITH DUPLICATES IN ORDER COLLATING SEQUENCE NS USING IN-FILE GIVING OUT-FILE.\n" +
 				"    SORT WORK-FILE ON DESCENDING KEY K1 INPUT PROCEDURE A THROUGH B OUTPUT PROCEDURE C.\n" +
 				"    MERGE M-F ON ASCENDING KEY MK USING M-A M-B GIVING OUT-FILE.\n" +
 				"    RELEASE WORK-REC FROM WS-REC.\n" +
