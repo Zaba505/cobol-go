@@ -28,10 +28,11 @@ type File struct {
 // free-format "*>" or the fixed-format column-7 "*"/"/"), one following space,
 // and any trailing spaces removed — a normalized form so the same comment
 // round-trips identically across reference formats (fixed "* note" and free
-// "*> note" both yield "note"). The tokenizer keeps a comment's raw lexeme "so a
-// fixed-format printer can later reconstruct it"; the parser attaches comments as
-// the leading Comments of the structural node they precede, and the printer
-// re-emits each as a free-format "*>" line.
+// "*> note" both yield "note"). Only this normalized Text is retained; the
+// original lexeme and source format are not, so comments re-emit canonically and
+// fixed-format comment lines are not reconstructed verbatim. The parser attaches
+// comments as the leading Comments of the structural node they precede, and the
+// printer re-emits each as a free-format "*>" line.
 type Comment struct {
 	Pos  Pos
 	Text string
