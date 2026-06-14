@@ -1174,6 +1174,91 @@ func TestPrinter(t *testing.T) {
 				"        NEXT SENTENCE\n" +
 				"    END-SEARCH.\n",
 		},
+		{
+			name: "inspect converting statement",
+			input: dataManipFile([]*Sentence{
+				{Statements: []Statement{&InspectStatement{
+					Target: &Identifier{Name: &Word{Value: "WS-T"}},
+					Converting: &InspectConvert{
+						From:   &StringLiteral{Value: "\"ab\""},
+						To:     &StringLiteral{Value: "\"AB\""},
+						Region: &InspectRegion{Kind: "AFTER", Initial: true, Operand: &StringLiteral{Value: "\" \""}},
+					},
+				}}},
+			}),
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INSPECT WS-T CONVERTING \"ab\" TO \"AB\" AFTER INITIAL \" \".\n",
+		},
+		{
+			name: "set pointer and switch forms",
+			input: dataManipFile([]*Sentence{
+				{Statements: []Statement{&SetStatement{Targets: []*Identifier{{Name: &Word{Value: "P"}}}, Mode: "TO", Value: &AddressOf{Of: &Identifier{Name: &Word{Value: "R"}}}}}},
+				{Statements: []Statement{&SetStatement{TargetIsAddr: true, Targets: []*Identifier{{Name: &Word{Value: "R"}}}, Mode: "TO", Value: &Identifier{Name: &Word{Value: "P"}}}}},
+				{Statements: []Statement{&SetStatement{Targets: []*Identifier{{Name: &Word{Value: "S"}}}, Mode: "TO", Value: &Word{Value: "ON"}}}},
+				{Statements: []Statement{&SetStatement{Targets: []*Identifier{{Name: &Word{Value: "S"}}}, Mode: "TO", Value: &Word{Value: "OFF"}}}},
+			}),
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SET P TO ADDRESS OF R.\n" +
+				"    SET ADDRESS OF R TO P.\n" +
+				"    SET S TO ON.\n" +
+				"    SET S TO OFF.\n",
+		},
+		{
+			name: "initialize replacing filler value and default",
+			input: dataManipFile([]*Sentence{
+				{Statements: []Statement{&InitializeStatement{
+					Targets:   []*Identifier{{Name: &Word{Value: "A"}}},
+					Replacing: []*InitializeReplace{{Category: &Word{Value: "NUMERIC"}, By: &NumericLiteral{Value: "0"}}},
+				}}},
+				{Statements: []Statement{&InitializeStatement{
+					Targets: []*Identifier{{Name: &Word{Value: "B"}}},
+					Filler:  true,
+					ToValue: []*Word{{Value: "ALL"}},
+				}}},
+				{Statements: []Statement{&InitializeStatement{
+					Targets:   []*Identifier{{Name: &Word{Value: "C"}}},
+					Replacing: []*InitializeReplace{{Category: &Word{Value: "ALPHANUMERIC"}, Data: true, By: &Identifier{Name: &Word{Value: "SPACE"}}}},
+					Default:   true,
+				}}},
+			}),
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INITIALIZE A REPLACING NUMERIC BY 0.\n" +
+				"    INITIALIZE B WITH FILLER ALL TO VALUE.\n" +
+				"    INITIALIZE C REPLACING ALPHANUMERIC DATA BY SPACE DEFAULT.\n",
+		},
+		{
+			name: "search all statement with conjunction",
+			input: dataManipFile([]*Sentence{
+				{Statements: []Statement{&SearchStatement{
+					All:    true,
+					Target: &Identifier{Name: &Word{Value: "T"}},
+					Whens: []*SearchWhen{
+						{
+							Cond: &LogicalCondition{
+								Op:    "AND",
+								Left:  &RelationCondition{Left: &Identifier{Name: &Word{Value: "K"}}, Op: "=", Right: &NumericLiteral{Value: "1"}},
+								Right: &ConditionNameCondition{Name: &Identifier{Name: &Word{Value: "V"}}},
+							},
+							Body: []Statement{&DisplayStatement{Operands: []Type{&StringLiteral{Value: "\"f\""}}}},
+						},
+					},
+					EndSearch: true,
+				}}},
+			}),
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SEARCH ALL T\n" +
+				"    WHEN K = 1 AND V\n" +
+				"        DISPLAY \"f\"\n" +
+				"    END-SEARCH.\n",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1352,6 +1437,39 @@ func TestPrinterRoundTrip(t *testing.T) {
 				"        STOP RUN.\n" +
 				"    END PROGRAM INNER.\n" +
 				"END PROGRAM OUTER.\n",
+		},
+		{
+			name: "inspect converting statement",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INSPECT WS-T CONVERTING \"ab\" TO \"AB\" AFTER INITIAL \" \".\n",
+		},
+		{
+			name: "set pointer and switch forms",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SET P TO ADDRESS OF R.\n" +
+				"    SET ADDRESS OF R TO P.\n" +
+				"    SET S TO ON.\n" +
+				"    SET S TO OFF.\n",
+		},
+		{
+			name: "initialize replacing filler value and default",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INITIALIZE A REPLACING NUMERIC BY 0.\n" +
+				"    INITIALIZE B WITH FILLER ALL TO VALUE.\n" +
+				"    INITIALIZE C REPLACING ALPHANUMERIC DATA BY SPACE DEFAULT.\n",
+		},
+		{
+			name: "search all with conjunction",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SEARCH ALL T WHEN K = 1 AND V DISPLAY \"f\" END-SEARCH.\n",
 		},
 	}
 
@@ -1537,6 +1655,9 @@ func clearTypePos(v Type) {
 		n.Pos = Pos{}
 	case *Identifier:
 		clearIdentifierPos(n)
+	case *AddressOf:
+		n.Pos = Pos{}
+		clearIdentifierPos(n.Of)
 	}
 }
 
@@ -1788,6 +1909,14 @@ func clearStatementPos(stmt Statement) {
 		for _, t := range s.Targets {
 			clearIdentifierPos(t)
 		}
+		for _, w := range s.ToValue {
+			clearWordPos(w)
+		}
+		for _, rep := range s.Replacing {
+			rep.Pos = Pos{}
+			clearWordPos(rep.Category)
+			clearTypePos(rep.By)
+		}
 	case *SetStatement:
 		s.Pos = Pos{}
 		for _, t := range s.Targets {
@@ -1837,6 +1966,12 @@ func clearStatementPos(stmt Statement) {
 			clearTypePos(r.Item)
 			clearTypePos(r.By)
 			clearInspectRegionPos(r.Region)
+		}
+		if s.Converting != nil {
+			s.Converting.Pos = Pos{}
+			clearTypePos(s.Converting.From)
+			clearTypePos(s.Converting.To)
+			clearInspectRegionPos(s.Converting.Region)
 		}
 	case *SearchStatement:
 		s.Pos = Pos{}
