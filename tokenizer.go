@@ -287,7 +287,9 @@ func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction 
 			}
 
 			switch {
-			case r == '.' || r == '(' || r == ')' || r == ':' || r == '=' || r == '/' || r == '&':
+			case r == '.':
+				return tokenizeSeparatorPeriod(pos)
+			case r == '(' || r == ')' || r == ':' || r == '=' || r == '/' || r == '&':
 				return yieldSymbol(pos, utf8.AppendRune(nil, r))
 			case r == ',' || r == ';':
 				return tokenizeSeparatorPunct(pos, r)
@@ -382,6 +384,27 @@ func tokenizeSeparatorPunct(start Pos, r rune) tokenizerAction {
 		// A valid separator carries no meaning beyond word separation: emit
 		// nothing and let the next dispatch skip the following whitespace.
 		return tokenizeCOBOL
+	}
+}
+
+// tokenizeSeparatorPeriod handles a '.' already consumed at start. Per SPEC
+// (§"Whitespace and Delimiters") a period is a separator period — the sentence
+// and entry terminator, emitted as a [TokenSymbol] — only when immediately
+// followed by whitespace or end of input. A '.' inside a numeric literal (3.14)
+// or a PICTURE string (ZZ9.99) is consumed by [tokenizeNumber] /
+// [tokenizePictureString] before it can reach here; a '.' followed by anything
+// else (A.B, 5.X) is malformed and yields an [UnexpectedCharacterError]. Under
+// DECIMAL-POINT IS COMMA a '.' is never a decimal point, so 3.14 reaches here as
+// a stray period after the number 3 and is likewise rejected.
+func tokenizeSeparatorPeriod(start Pos) tokenizerAction {
+	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		// A full rune is decoded so multi-byte Unicode whitespace counts as a
+		// boundary, consistent with skipWhitespace.
+		if next, ok := t.peekRune(); ok && !unicode.IsSpace(next) {
+			yield(Token{}, UnexpectedCharacterError{Pos: start, R: '.'})
+			return nil
+		}
+		return yieldSymbol(start, []byte("."))
 	}
 }
 
