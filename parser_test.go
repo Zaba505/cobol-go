@@ -3195,6 +3195,78 @@ func TestParserFixedFormat(t *testing.T) {
 	}
 }
 
+// TestParserComments pins how comments are attached to the AST: a comment is the
+// leading comment of the structural node it precedes. The fixed-format column-7
+// "*" lines here attach to the program (the banner), the PROCEDURE DIVISION, and
+// the first sentence respectively, and their Text is normalized (the "*"
+// introducer and one following space removed) so it matches a free-format "*>"
+// re-emission on round-trip.
+func TestParserComments(t *testing.T) {
+	t.Parallel()
+
+	src := "000100* program banner\n" +
+		"000200 IDENTIFICATION DIVISION.\n" +
+		"000300 PROGRAM-ID. C.\n" +
+		"000400* before procedure\n" +
+		"000500 PROCEDURE DIVISION.\n" +
+		"000600 P.\n" +
+		"000700* before sentence\n" +
+		"000800     DISPLAY \"x\".\n" +
+		"000900     STOP RUN.\n"
+
+	expected := &File{
+		Programs: []*Program{
+			{
+				Pos:      Pos{Line: 2, Column: 8},
+				Comments: []*Comment{{Pos: Pos{Line: 1, Column: 7}, Text: "program banner"}},
+				Divisions: []Division{
+					&IdentificationDivision{
+						Pos: Pos{Line: 2, Column: 8},
+						ProgramID: &ProgramID{
+							Pos:  Pos{Line: 3, Column: 8},
+							Name: &Word{Pos: Pos{Line: 3, Column: 20}, Value: "C"},
+						},
+					},
+					&ProcedureDivision{
+						Pos:      Pos{Line: 5, Column: 8},
+						Comments: []*Comment{{Pos: Pos{Line: 4, Column: 7}, Text: "before procedure"}},
+						Paragraphs: []*Paragraph{
+							{
+								Pos:  Pos{Line: 6, Column: 8},
+								Name: &Word{Pos: Pos{Line: 6, Column: 8}, Value: "P"},
+								Sentences: []*Sentence{
+									{
+										Pos:      Pos{Line: 8, Column: 12},
+										Comments: []*Comment{{Pos: Pos{Line: 7, Column: 7}, Text: "before sentence"}},
+										Statements: []Statement{
+											&DisplayStatement{
+												Pos: Pos{Line: 8, Column: 12},
+												Operands: []Type{
+													&StringLiteral{Pos: Pos{Line: 8, Column: 20}, Value: `"x"`},
+												},
+											},
+										},
+									},
+									{
+										Pos: Pos{Line: 9, Column: 12},
+										Statements: []Statement{
+											&StopStatement{Pos: Pos{Line: 9, Column: 12}, Run: true},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	f, err := Parse(strings.NewReader(src), WithSourceFormat(FixedFormat))
+	require.NoError(t, err)
+	require.Equal(t, expected, f)
+}
+
 // TestParserDefaultSourceFormat pins the documented default: parsing with no
 // options is free format, and WithSourceFormat(FreeFormat) is equivalent.
 func TestParserDefaultSourceFormat(t *testing.T) {

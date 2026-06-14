@@ -1717,6 +1717,11 @@ func TestRoundTripFromTestdata(t *testing.T) {
 	testCases := []struct {
 		name    string
 		fixture string
+		// format is the reference format the fixture is written in. The zero
+		// value (FreeFormat) leaves the free-format fixtures unchanged; fixed-format
+		// fixtures set it to FixedFormat so the first parse reads the column-oriented
+		// layout. The printer always emits free format, so the re-parse stays free.
+		format SourceFormat
 	}{
 		{name: "hello_cob", fixture: "hello.cob"},
 		{name: "environment_cob", fixture: "environment.cob"},
@@ -1736,6 +1741,14 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_sections_cob", fixture: "procedure_sections.cob"},
 		{name: "program_linkage_cob", fixture: "program_linkage.cob"},
 		{name: "full_program_cob", fixture: "full_program.cob"},
+
+		// Fixed-format (reference format) fixtures with comments, parsed with
+		// WithSourceFormat(FixedFormat). They harden fixed-format support against
+		// realistic source — sequence area, column-7 comment indicators, and
+		// comments preserved through the round-trip (issue #23).
+		{name: "fixed_hello_cob", fixture: "fixed_hello.cob", format: FixedFormat},
+		{name: "fixed_report_cob", fixture: "fixed_report.cob", format: FixedFormat},
+		{name: "fixed_continuation_cob", fixture: "fixed_continuation.cob", format: FixedFormat},
 	}
 
 	for _, tc := range testCases {
@@ -1745,12 +1758,14 @@ func TestRoundTripFromTestdata(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join("testdata", tc.fixture))
 			require.NoError(t, err)
 
-			first, err := Parse(bytes.NewReader(data))
+			first, err := Parse(bytes.NewReader(data), WithSourceFormat(tc.format))
 			require.NoError(t, err)
 
 			var buf bytes.Buffer
 			require.NoError(t, Print(&buf, first))
 
+			// The printer always emits free format, so the re-parse uses the
+			// default (free) format regardless of the fixture's source format.
 			second, err := Parse(&buf)
 			require.NoError(t, err)
 
@@ -1819,6 +1834,61 @@ MAIN-PARAGRAPH.
 	require.Equal(t, expected, buf.String())
 }
 
+// TestPrintComments pins the canonical free-format rendering of preserved
+// comments — the formatting the Pos-ignoring round-trip cannot observe. Every
+// comment, whatever reference format it came from, prints as a free-format "*>"
+// line: a node's leading comments print on their own lines, at the node's indent,
+// before the node (program banner and division banner at column 1; a sentence's
+// comment indented one level with its statements).
+func TestPrintComments(t *testing.T) {
+	t.Parallel()
+
+	f := &File{
+		Programs: []*Program{
+			{
+				Comments: []*Comment{{Text: "banner"}, {Text: ""}},
+				Divisions: []Division{
+					&IdentificationDivision{
+						ProgramID: &ProgramID{Name: &Word{Value: "C"}},
+					},
+					&ProcedureDivision{
+						Comments: []*Comment{{Text: "before proc"}},
+						Paragraphs: []*Paragraph{
+							{
+								Name: &Word{Value: "P"},
+								Sentences: []*Sentence{
+									{
+										Comments: []*Comment{{Text: "note"}},
+										Statements: []Statement{
+											&DisplayStatement{Operands: []Type{&StringLiteral{Value: `"x"`}}},
+										},
+									},
+									{Statements: []Statement{&StopStatement{Run: true}}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	const expected = `*> banner
+*>
+IDENTIFICATION DIVISION.
+PROGRAM-ID. C.
+*> before proc
+PROCEDURE DIVISION.
+P.
+    *> note
+    DISPLAY "x".
+    STOP RUN.
+`
+	var buf bytes.Buffer
+	require.NoError(t, Print(&buf, f))
+	require.Equal(t, expected, buf.String())
+}
+
 // withoutPos zeroes every Pos in f and returns it, so round-trip comparisons
 // assert AST structure while ignoring the line/column positions the printer is
 // free to choose (SPEC.md "Reference format independence").
@@ -1834,10 +1904,12 @@ func withoutPos(f *File) *File {
 // ignore the positions the printer is free to choose.
 func clearProgramPos(prog *Program) {
 	prog.Pos = Pos{}
+	clearCommentsPos(prog.Comments)
 	for _, div := range prog.Divisions {
 		switch d := div.(type) {
 		case *IdentificationDivision:
 			d.Pos = Pos{}
+			clearCommentsPos(d.Comments)
 			if d.ProgramID != nil {
 				d.ProgramID.Pos = Pos{}
 				clearTypePos(d.ProgramID.Name)
@@ -1885,6 +1957,17 @@ func clearWordPos(w *Word) {
 	}
 }
 
+// clearCommentsPos zeroes the Pos of every leading comment on a node, so
+// round-trip comparisons assert the comments' normalized Text while ignoring the
+// positions the printer is free to choose.
+func clearCommentsPos(comments []*Comment) {
+	for _, c := range comments {
+		if c != nil {
+			c.Pos = Pos{}
+		}
+	}
+}
+
 // clearNumericPos zeroes the Pos of an optional *NumericLiteral child (a no-op
 // when nil).
 func clearNumericPos(n *NumericLiteral) {
@@ -1897,6 +1980,7 @@ func clearNumericPos(n *NumericLiteral) {
 // comparisons ignore the positions the printer is free to choose.
 func clearProcedurePos(div *ProcedureDivision) {
 	div.Pos = Pos{}
+	clearCommentsPos(div.Comments)
 	for _, param := range div.Using {
 		param.Pos = Pos{}
 		clearWordPos(param.Name)
@@ -1915,6 +1999,7 @@ func clearProcedurePos(div *ProcedureDivision) {
 	}
 	for _, sec := range div.Sections {
 		sec.Pos = Pos{}
+		clearCommentsPos(sec.Comments)
 		clearWordPos(sec.Name)
 		clearNumericPos(sec.Segment)
 		for _, para := range sec.Paragraphs {
@@ -1950,9 +2035,11 @@ func clearUseStatementPos(use *UseStatement) {
 // statement in its sentences.
 func clearParagraphPos(para *Paragraph) {
 	para.Pos = Pos{}
+	clearCommentsPos(para.Comments)
 	clearWordPos(para.Name)
 	for _, sent := range para.Sentences {
 		sent.Pos = Pos{}
+		clearCommentsPos(sent.Comments)
 		for _, stmt := range sent.Statements {
 			clearStatementPos(stmt)
 		}
@@ -2430,6 +2517,7 @@ func clearExprPos(e Expr) {
 // round-trip comparisons ignore the positions the printer is free to choose.
 func clearEnvironmentPos(div *EnvironmentDivision) {
 	div.Pos = Pos{}
+	clearCommentsPos(div.Comments)
 	if sec := div.Configuration; sec != nil {
 		sec.Pos = Pos{}
 		if p := sec.SourceComputer; p != nil {
@@ -2484,6 +2572,7 @@ func clearEnvironmentPos(div *EnvironmentDivision) {
 // comparisons ignore the positions the printer is free to choose.
 func clearDataDivisionPos(div *DataDivision) {
 	div.Pos = Pos{}
+	clearCommentsPos(div.Comments)
 	if sec := div.File; sec != nil {
 		sec.Pos = Pos{}
 		for _, entry := range sec.Entries {
@@ -2509,6 +2598,7 @@ func clearDataDivisionPos(div *DataDivision) {
 // beneath it (name and clauses).
 func clearDataEntryPos(entry *DataDescriptionEntry) {
 	entry.Pos = Pos{}
+	clearCommentsPos(entry.Comments)
 	clearWordPos(entry.Name)
 	for _, clause := range entry.Clauses {
 		switch c := clause.(type) {

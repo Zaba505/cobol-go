@@ -23,6 +23,21 @@ type File struct {
 	Programs []*Program
 }
 
+// Comment is a source comment preserved in the AST. Pos is the position of the
+// comment's introducer. Text is the comment's content with the introducer (the
+// free-format "*>" or the fixed-format column-7 "*"/"/"), one following space,
+// and any trailing spaces removed — a normalized form so the same comment
+// round-trips identically across reference formats (fixed "* note" and free
+// "*> note" both yield "note"). Only this normalized Text is retained; the
+// original lexeme and source format are not, so comments re-emit canonically and
+// fixed-format comment lines are not reconstructed verbatim. The parser attaches
+// comments as the leading Comments of the structural node they precede, and the
+// printer re-emits each as a free-format "*>" line.
+type Comment struct {
+	Pos  Pos
+	Text string
+}
+
 // Program is a single COBOL program: an ordered list of divisions. Pos is the
 // position of the program's first division header keyword. Nested holds the
 // contained (nested) programs declared at the end of this program's PROCEDURE
@@ -31,6 +46,7 @@ type File struct {
 // lone program may omit it).
 type Program struct {
 	Pos       Pos
+	Comments  []*Comment
 	Divisions []Division
 	Nested    []*Program
 	End       *EndProgram
@@ -66,6 +82,7 @@ type Statement interface {
 // position of the IDENTIFICATION/ID keyword.
 type IdentificationDivision struct {
 	Pos       Pos
+	Comments  []*Comment
 	ProgramID *ProgramID
 }
 
@@ -90,6 +107,7 @@ type ProgramID struct {
 // [Paragraph] with a nil Name).
 type ProcedureDivision struct {
 	Pos          Pos
+	Comments     []*Comment
 	Using        []*Parameter
 	Returning    *Word
 	Declaratives []*DeclarativeSection
@@ -182,6 +200,7 @@ func (*ReportingUse) useSpec() {}
 // the section's paragraphs in source order.
 type Section struct {
 	Pos        Pos
+	Comments   []*Comment
 	Name       *Word
 	Segment    *NumericLiteral
 	Paragraphs []*Paragraph
@@ -193,6 +212,7 @@ type Section struct {
 // paragraph's sentences in source order.
 type Paragraph struct {
 	Pos       Pos
+	Comments  []*Comment
 	Name      *Word
 	Sentences []*Sentence
 }
@@ -201,6 +221,7 @@ type Paragraph struct {
 // position of its first statement.
 type Sentence struct {
 	Pos        Pos
+	Comments   []*Comment
 	Statements []Statement
 }
 
@@ -1178,6 +1199,7 @@ func (*ParenCondition) condition() {}
 // was absent in the source.
 type EnvironmentDivision struct {
 	Pos           Pos
+	Comments      []*Comment
 	Configuration *ConfigurationSection
 	InputOutput   *InputOutputSection
 }
@@ -1325,6 +1347,7 @@ func (*FileStatusClause) selectClause() {}
 // [DataSection] body, the owning field identifying which section it is.
 type DataDivision struct {
 	Pos            Pos
+	Comments       []*Comment
 	File           *FileSection
 	WorkingStorage *DataSection
 	LocalStorage   *DataSection
@@ -1369,11 +1392,12 @@ type FileDescriptionEntry struct {
 // group item has subordinate entries (higher level numbers following) and no
 // PICTURE; an elementary item has a PICTURE — both share this one node type.
 type DataDescriptionEntry struct {
-	Pos     Pos
-	Level   int
-	Name    *Word
-	Filler  bool
-	Clauses []DataClause
+	Pos      Pos
+	Comments []*Comment
+	Level    int
+	Name     *Word
+	Filler   bool
+	Clauses  []DataClause
 }
 
 // DataClause is implemented by the concrete data-description clause AST nodes.
@@ -1585,7 +1609,7 @@ func Parse(r io.Reader, opts ...ParseOption) (*File, error) {
 	next, stop := iter.Pull2(Tokenize(r, topts...))
 	defer stop()
 
-	p := &parser{next: next}
+	p := &parser{pull: next}
 	f := &File{}
 
 	var err error
@@ -1599,9 +1623,11 @@ func Parse(r io.Reader, opts ...ParseOption) (*File, error) {
 }
 
 type parser struct {
-	// next pulls the next (Token, error) pair from the tokenizer; the final
-	// bool reports whether a value was produced (false once exhausted).
-	next func() (Token, error, bool)
+	// pull pulls the next (Token, error) pair from the tokenizer; the final
+	// bool reports whether a value was produced (false once exhausted). The
+	// comment-filtering next wraps it, so the parser body never calls pull
+	// directly.
+	pull func() (Token, error, bool)
 	// peeked and peeked2 hold up to two tokens read by peek/peekSecond but not yet
 	// consumed, giving the parser two-token lookahead. One token suffices almost
 	// everywhere (the go/parser current-token model this package mirrors); the
@@ -1609,6 +1635,65 @@ type parser struct {
 	// paragraph header (name .). advance drains them before pulling from next.
 	peeked  *peekedToken
 	peeked2 *peekedToken
+	// pendingComments holds comments pulled from the stream but not yet attached
+	// to an AST node. next diverts every TokenComment here (so comments never
+	// reach expect); a seam parser drains them with takeComments and attaches
+	// them as the leading Comments of the node it is about to build.
+	pendingComments []*Comment
+}
+
+// next returns the next non-comment (Token, error, ok) triple, diverting any
+// TokenComment it passes into pendingComments as a normalized [Comment]. A pull
+// error or end of stream is returned as-is. Every higher-level reader
+// (advance/peek/peekSecond) goes through here, so comments are captured exactly
+// once, in source order, wherever they appear.
+func (p *parser) next() (Token, error, bool) {
+	for {
+		tok, err, ok := p.pull()
+		if err != nil || !ok {
+			return tok, err, ok
+		}
+		if tok.Type != TokenComment {
+			return tok, err, ok
+		}
+		p.pendingComments = append(p.pendingComments, &Comment{
+			Pos:  tok.Pos,
+			Text: normalizeComment(tok.Value),
+		})
+	}
+}
+
+// takeComments returns the comments buffered since the last call and clears the
+// buffer. A seam parser calls it to claim the comments that precede the node it
+// is about to build; an empty result is returned as nil so a comment-free node
+// keeps a nil Comments slice.
+func (p *parser) takeComments() []*Comment {
+	if len(p.pendingComments) == 0 {
+		return nil
+	}
+	comments := p.pendingComments
+	p.pendingComments = nil
+	return comments
+}
+
+// normalizeComment strips a comment lexeme down to its content: the introducer
+// (free-format "*>" or fixed-format column-7 "*"/"/"), one following space, and
+// any trailing spaces are removed. Normalizing makes the same comment compare
+// equal across reference formats and survive the printer's free-format "*>"
+// re-emission, so Parse -> Print -> Parse is stable (SPEC "Reference format
+// independence").
+func normalizeComment(raw []byte) string {
+	s := string(raw)
+	switch {
+	case strings.HasPrefix(s, "*>"):
+		s = s[2:]
+	case strings.HasPrefix(s, "*"):
+		s = s[1:]
+	case strings.HasPrefix(s, "/"):
+		s = s[1:]
+	}
+	s = strings.TrimPrefix(s, " ")
+	return strings.TrimRight(s, " ")
 }
 
 // peekedToken is a single (Token, error, ok) triple buffered by peek.
@@ -1969,7 +2054,10 @@ func parseFile(p *parser, f *File) (parserAction[*File], error) {
 // It is shared by the top-level loop (parseFile) and nested-program parsing
 // (parseNestedProgram), so nesting recurses through it to any depth.
 func parseProgram(p *parser, firstKw Token) (*Program, error) {
-	prog := &Program{Pos: firstKw.Pos}
+	// Comments preceding the program's first division header (e.g. a banner or
+	// license block before IDENTIFICATION DIVISION) were pulled when the caller
+	// read firstKw; claim them as the program's leading comments.
+	prog := &Program{Pos: firstKw.Pos, Comments: p.takeComments()}
 	var err error
 	for action := dispatchDivision(firstKw); action != nil && err == nil; {
 		action, err = action(p, prog)
@@ -2057,7 +2145,7 @@ func parseNestedProgram(firstKw Token) parserAction[*Program] {
 // paragraphs (AUTHOR, …) are deferred to a later story.
 func parseIdentificationDivision(kw Token) parserAction[*Program] {
 	return func(p *parser, prog *Program) (parserAction[*Program], error) {
-		div := &IdentificationDivision{Pos: kw.Pos}
+		div := &IdentificationDivision{Pos: kw.Pos, Comments: p.takeComments()}
 
 		var err error
 		for action := parseIdentificationHeader; action != nil && err == nil; {
@@ -2122,7 +2210,7 @@ func parseProgramIDParagraph(p *parser, div *IdentificationDivision) (parserActi
 // the program at end of input).
 func parseEnvironmentDivision(kw Token) parserAction[*Program] {
 	return func(p *parser, prog *Program) (parserAction[*Program], error) {
-		div := &EnvironmentDivision{Pos: kw.Pos}
+		div := &EnvironmentDivision{Pos: kw.Pos, Comments: p.takeComments()}
 
 		var err error
 		for action := parseEnvironmentHeader; action != nil && err == nil; {
@@ -2613,7 +2701,7 @@ func parseFileStatusClause(p *parser, entry *FileControlEntry) (parserAction[*Fi
 // parseEnvironmentDivision.
 func parseDataDivision(kw Token) parserAction[*Program] {
 	return func(p *parser, prog *Program) (parserAction[*Program], error) {
-		div := &DataDivision{Pos: kw.Pos}
+		div := &DataDivision{Pos: kw.Pos, Comments: p.takeComments()}
 
 		var err error
 		for action := parseDataHeader; action != nil && err == nil; {
@@ -2790,7 +2878,7 @@ func parseDataEntryOpt(p *parser, entries *[]*DataDescriptionEntry) (parserActio
 	if err != nil || !validLevel(level) {
 		return nil, InvalidLevelNumberError{Pos: tok.Pos, Value: string(tok.Value)}
 	}
-	entry := &DataDescriptionEntry{Pos: tok.Pos, Level: level}
+	entry := &DataDescriptionEntry{Pos: tok.Pos, Comments: p.takeComments(), Level: level}
 
 	var aerr error
 	for action := parseEntryName; action != nil && aerr == nil; {
@@ -3263,7 +3351,7 @@ func parseRenamesClause(p *parser, entry *DataDescriptionEntry) (parserAction[*D
 // ends at end of input — mirroring how the other divisions hand off to the next.
 func parseProcedureDivision(kw Token) parserAction[*Program] {
 	return func(p *parser, prog *Program) (parserAction[*Program], error) {
-		div := &ProcedureDivision{Pos: kw.Pos}
+		div := &ProcedureDivision{Pos: kw.Pos, Comments: p.takeComments()}
 
 		var err error
 		for action := parseProcedureHeader; action != nil && err == nil; {
@@ -3785,7 +3873,7 @@ func parseSection(p *parser) (*Section, error) {
 	if _, err := p.expectKeyword("SECTION"); err != nil {
 		return nil, err
 	}
-	sec := &Section{Pos: name.Pos, Name: &Word{Pos: name.Pos, Value: string(name.Value)}}
+	sec := &Section{Pos: name.Pos, Comments: p.takeComments(), Name: &Word{Pos: name.Pos, Value: string(name.Value)}}
 
 	if seg, terr, ok := p.peek(); terr != nil {
 		return nil, terr
@@ -3863,6 +3951,11 @@ func parseParagraph(p *parser) (*Paragraph, error) {
 			return nil, err
 		}
 		para.Pos = name.Pos
+		// Comments preceding the paragraph-name (e.g. a banner) were pulled when
+		// atParagraphHeader peeked the name; claim them as the paragraph's leading
+		// comments. The anonymous paragraph has no header, so its leading comments
+		// fall through to its first sentence.
+		para.Comments = p.takeComments()
 		para.Name = &Word{Pos: name.Pos, Value: string(name.Value)}
 	} else {
 		tok, _, _ := p.peek()
@@ -3887,6 +3980,10 @@ func parseSentenceOpt(p *parser, para *Paragraph) (parserAction[*Paragraph], err
 		return nil, nil
 	}
 
+	// Claim comments preceding the sentence's first verb before parsing the body,
+	// so they attach to this sentence rather than mixing with any later comments.
+	comments := p.takeComments()
+
 	stmts, err := parseStatementList(p, stopAtSentenceEnd)
 	if err != nil {
 		return nil, err
@@ -3894,7 +3991,7 @@ func parseSentenceOpt(p *parser, para *Paragraph) (parserAction[*Paragraph], err
 	if _, err := p.expectPeriod(); err != nil {
 		return nil, err
 	}
-	para.Sentences = append(para.Sentences, &Sentence{Pos: tok.Pos, Statements: stmts})
+	para.Sentences = append(para.Sentences, &Sentence{Pos: tok.Pos, Comments: comments, Statements: stmts})
 	return parseSentenceOpt, nil
 }
 
