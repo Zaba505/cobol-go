@@ -368,7 +368,7 @@ func dispatchRune(t *tokenizer, yield func(Token, error) bool, pos Pos, r rune) 
 // Fixed-format column boundaries (1-based), per SPEC §"Whitespace and
 // Delimiters" → Fixed format.
 const (
-	fixedIndicatorColumn = 7  // the indicator area
+	fixedIndicatorColumn  = 7  // the indicator area
 	fixedAreaBStartColumn = 12 // first column of Area B (Area A is 8–11)
 	fixedAreaBEndColumn   = 72 // last column scanned; columns 73+ are ignored
 )
