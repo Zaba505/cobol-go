@@ -5811,6 +5811,14 @@ func parseInitializeStatement(p *parser, kw Token) (Statement, error) {
 // tokenize as plain identifiers (ALL, a category, VALUE, DEFAULT, FILLER) so they
 // open their phrase rather than being swallowed as targets.
 func parseInitializeTargets(p *parser) ([]*Identifier, error) {
+	// A clause keyword (ALL, a category, VALUE, DEFAULT, FILLER) tokenizes as an
+	// identifier, so it would otherwise be accepted as the first target; reject it
+	// here so INITIALIZE requires at least one real receiving item.
+	if tok, err, ok := p.peek(); err != nil {
+		return nil, err
+	} else if ok && isInitializeClauseStart(tok) {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier}, Actual: tok}
+	}
 	first, err := parseIdentifierToken(p)
 	if err != nil {
 		return nil, err
@@ -5847,23 +5855,26 @@ var initializeValueKeywords = append([]string{"ALL"}, initializeCategories...)
 // VALUE" phrase, returning the category/ALL keywords and whether the phrase was
 // present.
 func parseInitializeToValue(p *parser) ([]*Word, bool, error) {
-	tok, err, ok := p.peek()
+	first, ok, err := p.acceptKeyword(initializeValueKeywords...)
 	if err != nil {
 		return nil, false, err
 	}
-	if !ok || !keywordIs(tok, initializeValueKeywords...) {
+	if !ok {
 		return nil, false, nil
 	}
-	var cats []*Word
-	for {
-		w, ok, err := p.acceptKeyword(initializeValueKeywords...)
-		if err != nil {
-			return nil, false, err
+	cats := []*Word{{Pos: first.Pos, Value: strings.ToUpper(string(first.Value))}}
+	// ALL is mutually exclusive with the category list; only categories may repeat.
+	if !keywordIs(first, "ALL") {
+		for {
+			w, ok, err := p.acceptKeyword(initializeCategories...)
+			if err != nil {
+				return nil, false, err
+			}
+			if !ok {
+				break
+			}
+			cats = append(cats, &Word{Pos: w.Pos, Value: strings.ToUpper(string(w.Value))})
 		}
-		if !ok {
-			break
-		}
-		cats = append(cats, &Word{Pos: w.Pos, Value: strings.ToUpper(string(w.Value))})
 	}
 	if _, err := p.expectKeyword("TO"); err != nil {
 		return nil, false, err

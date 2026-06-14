@@ -3211,6 +3211,30 @@ func TestParserErrors(t *testing.T) {
 				require.Equal(t, Pos{Line: 4, Column: 21}, target.Pos)
 			},
 		},
+		{
+			name: "initialize with clause keyword as target",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INITIALIZE ALL TO VALUE.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 16}, target.Actual.Pos)
+			},
+		},
+		{
+			name: "initialize all mixed with category to value",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    INITIALIZE X ALL NUMERIC TO VALUE.\n",
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedKeywordError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 4, Column: 22}, target.Actual.Pos)
+			},
+		},
 	}
 
 	for _, tc := range testCases {
