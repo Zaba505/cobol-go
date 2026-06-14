@@ -27,8 +27,8 @@ that implements each one.
 > batch follows. The fixed format is **fully specified here**; its *tokenization*
 > (#21) is **implemented** — opt in with `WithFixedFormat()` — and
 > *source-format configuration* (#22) is **implemented**: `Parse` selects the
-> format via `WithSourceFormat(FreeFormat|FixedFormat)` (`Tokenize` via
-> `WithFixedFormat()`), defaulting to free format. Honoring an in-source
+> format via `WithSourceFormat` (passing `FreeFormat` or `FixedFormat`;
+> `Tokenize` via `WithFixedFormat()`), defaulting to free format. Honoring an in-source
 > `>>SOURCE FORMAT` directive and *round-trip fixtures* (#23) remain deferred.
 > Also out of scope:
 > the COPY/REPLACE text-manipulation facility (copybooks), the REPORT and SCREEN

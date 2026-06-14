@@ -1401,8 +1401,11 @@ func (*RenamesClause) dataClause() {}
 type SourceFormat int
 
 const (
-	FreeFormat  SourceFormat = iota // no column significance (the default)
-	FixedFormat                     // reference format; columns 1–72 carry meaning
+	FreeFormat SourceFormat = iota // no column significance (the default)
+	// FixedFormat is the column-oriented "reference format": column positions
+	// are significant — sequence area (1–6, ignored), indicator (7), Area A/B
+	// (8–72), and the identification area (73+, ignored).
+	FixedFormat
 )
 
 func (f SourceFormat) String() string {
