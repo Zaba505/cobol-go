@@ -2355,8 +2355,9 @@ func evaluateObjectText(o *EvaluateObject) (string, bool) {
 
 // performLoopText returns the canonical text of a PERFORM loop specification, with
 // a leading space when non-empty, and whether it could be rendered. WITH TEST
-// BEFORE/AFTER only qualifies an UNTIL loop, so TestAfter without an Until is an
-// inconsistent state that would silently drop the phrase and is rejected.
+// BEFORE/AFTER qualifies an UNTIL or VARYING loop, so TestAfter without either an
+// Until or a Varying is an inconsistent state that would silently drop the phrase
+// and is rejected.
 func performLoopText(stmt *PerformStatement) (string, bool) {
 	if stmt.TestAfter && stmt.Until == nil && stmt.Varying == nil {
 		return "", false

@@ -1435,7 +1435,7 @@ func TestParser(t *testing.T) {
 			src: "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +
 				"PROCEDURE DIVISION.\n" +
-				"    PERFORM VARYING I FROM 1 BY 1 UNTIL I > 10 AFTER J FROM 1 BY 1 UNTIL J > 5\n" +
+				"    PERFORM VARYING I FROM 1 BY 1 UNTIL I > 10 AFTER J FROM 1 BY 1 UNTIL J > 5 AFTER K FROM 1 BY 1 UNTIL K > 3\n" +
 				"        DISPLAY I\n" +
 				"    END-PERFORM.\n" +
 				"    PERFORM WITH TEST AFTER VARYING I FROM 1 BY 1 UNTIL I > 10 AFTER J FROM 1 BY 1 UNTIL J > 5\n" +
@@ -1479,6 +1479,12 @@ func TestParser(t *testing.T) {
 																From:  &NumericLiteral{Pos: Pos{Line: 4, Column: 61}, Value: "1"},
 																By:    &NumericLiteral{Pos: Pos{Line: 4, Column: 66}, Value: "1"},
 																Until: &RelationCondition{Pos: Pos{Line: 4, Column: 74}, Left: &Identifier{Pos: Pos{Line: 4, Column: 74}, Name: &Word{Pos: Pos{Line: 4, Column: 74}, Value: "J"}}, Op: ">", Right: &NumericLiteral{Pos: Pos{Line: 4, Column: 78}, Value: "5"}},
+															}, {
+																Pos:   Pos{Line: 4, Column: 80},
+																Name:  &Identifier{Pos: Pos{Line: 4, Column: 86}, Name: &Word{Pos: Pos{Line: 4, Column: 86}, Value: "K"}},
+																From:  &NumericLiteral{Pos: Pos{Line: 4, Column: 93}, Value: "1"},
+																By:    &NumericLiteral{Pos: Pos{Line: 4, Column: 98}, Value: "1"},
+																Until: &RelationCondition{Pos: Pos{Line: 4, Column: 106}, Left: &Identifier{Pos: Pos{Line: 4, Column: 106}, Name: &Word{Pos: Pos{Line: 4, Column: 106}, Value: "K"}}, Op: ">", Right: &NumericLiteral{Pos: Pos{Line: 4, Column: 110}, Value: "3"}},
 															}},
 														},
 														Body: []Statement{
