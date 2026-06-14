@@ -1,31 +1,36 @@
-# Free-Format COBOL Specification Reference
+# COBOL Specification Reference
 
 ## Overview
 
 This document is the single source of truth for the `cobol` package — a
-tokenizer / parser / printer pipeline for COBOL source. It distills the
-**free-format** (free-form reference format) lexical and syntactic rules of the
-ISO/IEC 1989 COBOL standard, as implemented by GnuCOBOL, into a form each
-pipeline stage can be built against.
+tokenizer / parser / printer pipeline for COBOL source. It distills the lexical
+and syntactic rules of the ISO/IEC 1989 COBOL standard, as implemented by
+GnuCOBOL, into a form each pipeline stage can be built against. It covers **both
+reference formats** COBOL source may be written in: **free format** (free-form)
+and **fixed format** (the historical, column-oriented "reference format").
+
+The lexical token classes and the grammar are **identical across the two
+formats**; they differ only in *source layout* — whether columns carry meaning,
+how comments are marked, and how a line is continued. Those differences are
+called out in per-format subsections (`#### Free format` / `#### Fixed format`)
+where they arise; everything else applies to both.
 
 The COBOL language is large; this reference is deliberately scoped to the
-*core* of a free-format source program: the lexical surface (character set,
-COBOL words, literals, separators, PICTURE character-strings) and the skeleton
-of all four divisions (IDENTIFICATION, ENVIRONMENT, DATA, PROCEDURE). It covers
-enough to tokenize, parse, and round-trip realistic free-format programs; the
-detailed grammar of individual PROCEDURE statements and rarely-used clauses is
-left to the story that implements each one.
+*core* of a source program: the lexical surface (character set, COBOL words,
+literals, separators, PICTURE character-strings) and the skeleton of all four
+divisions (IDENTIFICATION, ENVIRONMENT, DATA, PROCEDURE). It covers enough to
+tokenize, parse, and round-trip realistic programs; the detailed grammar of
+individual PROCEDURE statements and rarely-used clauses is left to the story
+that implements each one.
 
-> **Out of scope (deferred):** The **fixed-format reference format** (the
-> column-oriented layout: sequence area cols 1–6, indicator col 7, Area A cols
-> 8–11, Area B cols 12–72, identification area cols 73–80) is intentionally
-> **not** covered here. Source-format detection and fixed-format tokenization
-> are deferred to a later story. This reference assumes **free format**: source
-> lines have no column significance and may be up to 255 characters long. Also
-> out of scope: the COPY/REPLACE text-manipulation facility (copybooks), the
-> REPORT and SCREEN sections beyond their headers, object-oriented (class/method)
-> and user-defined-function compilation units, and the full ~1130-word reserved
-> word list.
+> **Implementation status (deferred):** Free format is implemented first; the
+> fixed-format batch follows. The fixed format is **fully specified here**, but
+> its *tokenization* (#21), *source-format detection / configuration* (#22), and
+> *round-trip fixtures* (#23) are deferred to later stories. Also out of scope:
+> the COPY/REPLACE text-manipulation facility (copybooks), the REPORT and SCREEN
+> sections beyond their headers, object-oriented (class/method) and
+> user-defined-function compilation units, and the full ~1130-word reserved word
+> list.
 
 **Governing sources**
 
@@ -46,10 +51,14 @@ left to the story that implements each one.
 
 ## Lexical Elements (Tokens)
 
-The tokenizer turns a byte stream into a lazy sequence of `Token` values. In
-free format there is **no column significance**: tokens are recognized purely by
-their content, separated by separators (below). Every byte of a well-formed
-free-format program belongs to exactly one of the token classes in this section.
+The tokenizer turns a byte stream into a lazy sequence of `Token` values. The
+token classes below are **identical in both reference formats**; what differs is
+the *source layout* — column significance, comment markers, and line
+continuation — covered in
+[Whitespace and Delimiters](#whitespace-and-delimiters), [Comments](#comments),
+and [Line Continuation](#line-continuation). Every byte of a well-formed program
+belongs to exactly one of the token classes in this section (in fixed format,
+once the column areas have been accounted for).
 
 The package's existing `TokenType` enum seeds these classes
 (`Comment`, `Identifier`, `Symbol`, `String`, `Number`); the names below are the
@@ -80,29 +89,58 @@ authoritative lexical classes and note the seed value each maps to.
   significant as a token boundary. One or more spaces separate adjacent COBOL
   words and literals; `MOVE A TO B` is three words, `MOVEATOB` is one.
 - **Ignorable whitespace:** Beyond their separating role, runs of spaces, tabs
-  (`U+0009`), and newlines (`\n`, `\r\n`) carry no meaning in free format and may
-  appear freely between tokens. Blank lines are permitted anywhere
-  (*GnuCOBOL §2.1.16*).
-- **No column rules:** In free format a statement "may be up to 255 characters
-  long, with no specific requirements as to what should appear in which columns"
-  (*GnuCOBOL §2.1.16*). Area A / Area B distinctions do **not** apply.
-- **Line continuation:** Free format has **no** fixed-format hyphen-in-column-7
-  continuation. A statement may simply span multiple physical lines; a token
-  (word, number, picture-string) may **not** be split across a newline. A long
-  alphanumeric literal is continued by splitting it into fragments joined with
-  the concatenation operator `&` (*GnuCOBOL §2.1.19.2*):
+  (`U+0009`), and newlines (`\n`, `\r\n`) carry no meaning between tokens and may
+  appear freely. Blank lines are permitted anywhere (*GnuCOBOL §2.1.16*).
 
-  ```cobol
-  01 MSG PIC X(40) VALUE "This is a long literal that "
-                       & "spans two source lines.".
-  ```
+Whether *columns* constrain where tokens may appear is the one lexical rule that
+differs between the two reference formats.
 
-  > **Ambiguity:** `&` literal concatenation is standard in COBOL 2014
-  > (concatenation expression) and supported by GnuCOBOL; treat it as the
-  > free-format continuation mechanism. The fixed-format hyphen-continuation
-  > belongs to the deferred fixed-format story.
+#### Free format
 
-The **separators** of COBOL (a string of one or more of these characters):
+A statement "may be up to 255 characters long, with no specific requirements as
+to what should appear in which columns" (*GnuCOBOL §2.1.16*). There is **no
+column significance**; the Area A / Area B distinctions below do **not** apply,
+and tokens are recognized purely by content.
+
+#### Fixed format
+
+Each physical source line is divided into fixed **column areas**, a legacy of
+the 80-column punched card (*GnuCOBOL §2.1.16*):
+
+| Columns | Area | Contents |
+|---|---|---|
+| 1–6 | Sequence (number) area | A historical 6-digit card sequence number. Ignored by the compiler; any characters may appear and carry no meaning. |
+| 7 | Indicator area | A single control character (see table below). |
+| 8–11 | Area A | Where DIVISION / SECTION / paragraph headers, the level numbers `01` and `77`, and the `FD` / `SD` description indicators must **begin**. |
+| 12–72 | Area B | Everything else: clauses, statements, and continued text. |
+| 73–80 | Identification (program-name) area | A historical program-id / commentary field. Ignored — GnuCOBOL discards anything past column 72. |
+
+The **indicator area** (column 7) holds one of:
+
+| Char | Meaning |
+|---|---|
+| space | Normal source line. |
+| `*` | The whole line (columns 8–72) is a comment. |
+| `/` | Comment line that also forces a page eject in the compiler listing. |
+| `-` | Continuation line — see [Line Continuation](#line-continuation). |
+| `D` / `d` | Debugging line: a valid statement normally treated as a comment, but compiled as ordinary Area B source when `WITH DEBUGGING MODE` is in effect. |
+
+- A line may be **shorter** than 72 columns; the missing columns are treated as
+  spaces. Characters at or past column 73 are **ignored**.
+- Which constructs must begin in Area A vs Area B is a *fixed-format-only*
+  constraint on the grammar — see
+  [Ordering and Optionality](#ordering-and-optionality). The token classes
+  themselves are unchanged.
+
+  > **Ambiguity (tabs, Area A/B strictness):** Tab handling in the column areas
+  > is implementation-defined; GnuCOBOL expands tabs to a configurable tab width
+  > before applying the column rules. GnuCOBOL is also lenient by default about
+  > *enforcing* Area A vs Area B placement (a relaxation, not a hard error). The
+  > tokenizer should **record** column positions; how strictly to enforce them
+  > is decided by the fixed-format tokenizer story (#21).
+
+The **separators** of COBOL (a string of one or more of these characters) are
+the same in both reference formats:
 
 | Separator | Characters | Notes |
 |---|---|---|
@@ -129,10 +167,13 @@ The **separators** of COBOL (a string of one or more of these characters):
 
 ### Comments
 
-- **Inline / full-line comment:** `*>` begins a comment that runs to the end of
-  the physical line. In free format `*>` may appear in any column: as the first
-  non-blank characters of a line (full-line comment) or after code on the same
-  line (inline comment) (*GnuCOBOL §2.1.16*).
+The floating `*>` comment works in **both** reference formats; fixed format adds
+two column-7 indicators.
+
+- **Inline / floating comment (`*>`, both formats):** `*>` begins a comment that
+  runs to the end of the physical line, and may appear in any column — as the
+  first non-blank characters of a line (full-line comment) or after code on the
+  same line (inline comment) (*GnuCOBOL §2.1.16*).
 
   ```cobol
   *> a full-line comment
@@ -141,12 +182,92 @@ The **separators** of COBOL (a string of one or more of these characters):
 
 - Comments do **not** nest and have no meaning inside an alphanumeric literal —
   `"a*>b"` is the five-character literal `a*>b`, not a comment.
-- The fixed-format comment indicators (`*` or `/` in column 7) are **out of
-  scope** (deferred fixed-format story). The `*>` form is the only free-format
-  comment.
 - **Comment-entry** (a different thing): the text following an IDENTIFICATION
   paragraph such as `AUTHOR.` is a free-text *comment-entry*, not a `*>` comment.
   See the ambiguity note in [Grammar Productions](#grammar-productions).
+
+#### Free format
+
+`*>` is the **only** comment form; there are no column-7 indicators.
+
+#### Fixed format
+
+In addition to `*>`, the [indicator area](#whitespace-and-delimiters) (column 7)
+marks whole-line comments (*GnuCOBOL §2.1.16*):
+
+- `*` in column 7 — the entire line (columns 8–72) is commentary.
+- `/` in column 7 — likewise a comment, and also forces a page eject in the
+  compiler listing.
+- `D` / `d` in column 7 — a **debugging line**: treated as a comment unless the
+  program is compiled `WITH DEBUGGING MODE` (the `SOURCE-COMPUTER … WITH
+  DEBUGGING MODE` clause), in which case columns 8–72 are ordinary Area B source.
+
+### Line Continuation
+
+How a long construct is spread across multiple physical lines is the other
+lexical rule that differs between the formats. The `&` literal-concatenation
+operator works in **both**; fixed format additionally has the column-7 hyphen.
+
+#### Free format
+
+There is **no** column-7 continuation. A statement may simply span multiple
+physical lines, but a single token (word, number, picture-string, or a complete
+quoted literal) may **not** be split across a newline. A long alphanumeric
+literal is continued by splitting it into fragments joined with the
+concatenation operator `&` (*GnuCOBOL §2.1.19.2*):
+
+```cobol
+01 MSG PIC X(40) VALUE "This is a long literal that "
+                     & "spans two source lines.".
+```
+
+> **Ambiguity:** `&` literal concatenation is standard in COBOL 2014
+> (concatenation expression) and supported by GnuCOBOL; treat it as the
+> free-format continuation mechanism.
+
+#### Fixed format
+
+A `-` (hyphen) in the [indicator area](#whitespace-and-delimiters) (column 7)
+marks a **continuation line**: the first non-blank character of its Area B
+continues the last non-blank character of the preceding non-comment line **with
+no intervening space**. Area A of a continuation line must be blank, and any
+intervening comment or blank lines are skipped when finding the line being
+continued (*GnuCOBOL §2.1.19.2*).
+
+- **Words and numeric literals.** Run the word or numeric literal up to (at most)
+  column 72, put `-` in column 7 of the next line, and resume at the first
+  non-blank character of Area B. No quotation mark is involved. (Rarely needed —
+  a word is at most 31 characters — but legal.)
+- **Alphanumeric (nonnumeric) literals.** The continued line carries the literal
+  up to and **including column 72 with no closing quotation mark**; the
+  continuation line has `-` in column 7 and a **matching quotation mark** (the
+  same `"` or `'` that opened the literal) somewhere in Area B, and the literal
+  resumes at the character **immediately after** that quotation mark. Because the
+  continued line has no closing quote, **every character position through column
+  72 — including trailing spaces — is part of the literal**.
+
+Worked example (the ruler shows column numbers and is not part of the source):
+
+```cobol
+----+----1----+----2----+----3----+----4----+----5----+----6----+----7--
+           DISPLAY "This long literal runs out to column 72, then resume
+      -    "d here.".
+```
+
+The first line's literal text fills exactly to column 72 (no closing quote); the
+continuation line, with `-` in column 7, resumes the literal at the character
+after its `"`, giving the value `This long literal runs out to column 72, then
+resumed here.`
+
+> **Ambiguity (trailing spaces):** The "everything through column 72 belongs to
+> the literal" rule is the subtle part — to avoid accidental trailing spaces, the
+> portable practice is to fill the literal exactly to column 72 on each continued
+> line. The tokenizer must honor the column-72 boundary precisely; getting it
+> wrong silently changes a literal's length. This is a central reason the
+> fixed-format tokenizer (#21) must be column-aware.
+
+The `&` concatenation operator (above) also works in fixed format and is the
+format-independent alternative.
 
 ### Literals
 
@@ -157,8 +278,9 @@ The **separators** of COBOL (a string of one or more of these characters):
   character.
 - **Embedding the delimiter:** double it inside the literal. `"He said ""hi"""`
   is the literal `He said "hi"`; `'it''s'` is `it's`.
-- A literal may **not** span physical lines on its own; long literals are split
-  and joined with `&` (see continuation above).
+- How a long literal spans physical lines depends on the source format; see
+  [Line Continuation](#line-continuation). In brief: free format joins fragments
+  with `&`, while fixed format also allows the column-7 hyphen continuation.
 - The empty literal (`""` / `''`) is valid.
 - **Hexadecimal alphanumeric literal:** `X"4142"` (or `X'…'`, `H"…"`) — an even
   number of hex digits, each pair one byte; `X"4142"` is `AB`
@@ -312,14 +434,18 @@ the standard's PICTURE-clause table:
 ### Compiler Directives
 
 A line whose first non-blank characters are `>>` is a **compiler-directing**
-line (CDF). It is a `CompilerDirective` token spanning to end of line. Relevant
-directives:
+line (CDF). It is a `CompilerDirective` token spanning to end of line. In fixed
+format a CDF line is written in Area A / Area B (columns 8–72) with a blank
+indicator area; in free format it may begin in any column. Relevant directives:
 
-- `>>SOURCE FORMAT IS FREE` / `>>SET SOURCEFORMAT "FREE"` / `>>FORMAT IS FREE` —
-  selects free format (*GnuCOBOL §2.1.16*). This package targets free format;
-  detecting and honoring this directive (vs. defaulting) is part of the
-  source-format story.
-- `>>PAGE` — page eject (replaces the fixed-format `/` indicator in free format).
+- **Source-format selection** — `>>SOURCE FORMAT IS FREE` | `FIXED`,
+  `>>SET SOURCEFORMAT "FREE"` | `"FIXED"`, or `>>FORMAT IS FREE` | `FIXED`
+  selects the reference format for the lines that follow (*GnuCOBOL §2.1.16*).
+  GnuCOBOL defaults to **fixed** when neither such a directive nor a command-line
+  `-free` / `-fixed` option is given. Detecting and honoring the format (vs.
+  defaulting) is the source-format story (#22).
+- `>>PAGE` — page eject; the free-format counterpart of the fixed-format `/`
+  column-7 indicator.
 - `>>SET`, `>>DEFINE`, `>>IF` / `>>ELSE` / `>>END-IF` — conditional compilation.
 
 > **Ambiguity:** Full CDF semantics (conditional compilation, `DEFINE`
@@ -828,6 +954,15 @@ primary    = operand | "(" arithmetic-expression ")"
 - **Clause order within a data description entry** is largely free; some
   combinations are mutually exclusive (e.g. an item with subordinate items has
   no `PICTURE`).
+- **Area A / Area B placement (fixed format only).** The grammar productions are
+  unchanged between formats, but in fixed format *where* a construct begins on
+  the line is constrained: DIVISION / SECTION / paragraph headers, the `FD` /
+  `SD` file and sort descriptions, `DECLARATIVES.` / `END DECLARATIVES.`,
+  `END PROGRAM`, and the level numbers `01` and `77` must **begin in Area A**
+  (columns 8–11); other level numbers (`02`–`49`, `66`, `88`), all clauses, and
+  all statements go in **Area B** (columns 12–72). Free format imposes no such
+  constraint. Either way the parsed AST is identical. See
+  [Whitespace and Delimiters](#whitespace-and-delimiters).
 
 ## Semantics
 
@@ -893,11 +1028,17 @@ parse).
   period. The AST should record scope explicitly so the printer can reproduce
   either style.
 
-- **Reference format independence.** In free format, line breaks and indentation
-  are insignificant beyond separating tokens; the AST carries no column
-  information, and the printer is free to choose layout. (This is the property
-  that makes free-format round-trips robust and is precisely what the deferred
-  fixed-format work must add back.)
+- **Reference format independence.** The parsed AST carries **no column
+  information** and is identical whichever reference format the source used — the
+  source format is a lexical property, not a syntactic one. In free format, line
+  breaks and indentation are insignificant beyond separating tokens, so the
+  printer is free to choose layout (this is what makes free-format round-trips
+  robust). Fixed format adds column significance (Area A / Area B, the indicator
+  area, column-7 continuation) on *input*; on *output* the printer must place
+  tokens in their required column areas. The source format is therefore detected
+  by the tokenizer (#22) and reproduced by the printer, so the round-trip
+  property holds **per format**: a fixed-format source prints back as fixed
+  format, a free-format source as free format.
 
 ## Examples
 
@@ -971,6 +1112,23 @@ MAIN-PARAGRAPH.
     STOP RUN.
 ```
 
+### Fixed-Format Example
+
+The hello-world program in **fixed format**: the sequence area and indicator
+(columns 1–7) are blank, the division / paragraph headers and any `01` level
+begin in Area A (column 8), and statements sit in Area B (column 12 onward). The
+ruler shows column numbers and is not part of the source. (Fixed-format
+round-trip fixtures are added in #23; this snippet is illustrative.)
+
+```cobol
+----+----1----+----2----+----3----+----4----+----5----+----6----+----7--
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. hello.
+       PROCEDURE DIVISION.
+           DISPLAY "Hello, world!".
+           STOP RUN.
+```
+
 ## Appendix
 
 ### Character Encoding
@@ -984,13 +1142,19 @@ MAIN-PARAGRAPH.
   literals introduce multi-byte (e.g. UTF-16) data. The package reads runes via
   a buffered reader, so UTF-8 source is handled; a BOM, if present, is not part
   of any token.
+- In **fixed format**, only columns 1–72 of each line are scanned; characters in
+  columns 73–80 (and any beyond) are discarded before tokenizing. In **free
+  format** the whole line is significant (up to 255 characters).
 
 ### Out-of-Scope / Deferred
 
-- **Fixed-format reference format** (column-oriented layout) — deferred to a
-  later story; this reference is free-format only.
+- **Fixed-format reference format** — the column-oriented layout is now
+  **specified above** (see
+  [Whitespace and Delimiters](#whitespace-and-delimiters) and
+  [Line Continuation](#line-continuation)); its *tokenization* (#21) and
+  *round-trip fixtures* (#23) are deferred to later stories.
 - **Source-format detection / configuration** (honoring `>>SOURCE FORMAT`,
-  defaulting) — beyond recognizing the directive token, deferred.
+  defaulting) — beyond recognizing the directive token, deferred (#22).
 - **COPY / REPLACE** text manipulation (copybooks), **REPLACE** statement, and
   pseudo-text (`== … ==`).
 - Full **statement grammar** for every verb; only the core verbs above are
@@ -1008,6 +1172,12 @@ MAIN-PARAGRAPH.
   clause; resolve with a tokenizer flag set when the clause is seen.
 - Greedy multi-character symbols (`**`, `>=`, `<=`, `<>`, `>>`, `*>`) must be
   matched before their single-character prefixes.
+- **Fixed format** makes the tokenizer column-aware: it must split each line into
+  the sequence / indicator / Area A / Area B / identification areas, act on the
+  column-7 indicator (`*` and `/` comment, `D` debug, `-` continuation), ignore
+  columns 73+, and apply the column-7 continuation rules. The column-72 boundary
+  and the "trailing spaces through column 72 belong to a continued nonnumeric
+  literal" rule are the easy things to get wrong. Free format skips all of this.
 
 ### Related Standards
 
