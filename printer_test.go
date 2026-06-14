@@ -225,6 +225,86 @@ func TestPrinter(t *testing.T) {
 				"    STOP \"DONE\".\n",
 		},
 		{
+			name: "function references as operands and primaries",
+			input: &File{
+				Programs: []*Program{
+					{
+						Divisions: []Division{
+							&IdentificationDivision{
+								ProgramID: &ProgramID{Name: &Word{Value: "P"}},
+							},
+							&ProcedureDivision{
+								Paragraphs: []*Paragraph{
+									{Sentences: []*Sentence{
+										// No-argument function as a MOVE source (operand position).
+										{Statements: []Statement{&MoveStatement{
+											Source:  &FunctionReference{Name: &Word{Value: "CURRENT-DATE"}},
+											Targets: []*Identifier{{Name: &Word{Value: "WS-NOW"}}},
+										}}},
+										// Single-argument function as a COMPUTE primary.
+										{Statements: []Statement{&ComputeStatement{
+											Targets: []ComputeTarget{{Name: &Identifier{Name: &Word{Value: "WS-X"}}}},
+											Expr: &FunctionReference{
+												Name:      &Word{Value: "NUMVAL-C"},
+												Arguments: []Expr{&Identifier{Name: &Word{Value: "WS-A"}}},
+											},
+										}}},
+										// Reference modification after the argument list.
+										{Statements: []Statement{&MoveStatement{
+											Source: &FunctionReference{
+												Name:      &Word{Value: "UPPER-CASE"},
+												Arguments: []Expr{&Identifier{Name: &Word{Value: "WS-NAME"}}},
+												RefMod: &ReferenceModifier{
+													Start:  &NumericLiteral{Value: "1"},
+													Length: &NumericLiteral{Value: "1"},
+												},
+											},
+											Targets: []*Identifier{{Name: &Word{Value: "WS-INITIAL"}}},
+										}}},
+										// No-argument function with a reference modifier applied directly.
+										{Statements: []Statement{&DisplayStatement{
+											Operands: []Type{&FunctionReference{
+												Name: &Word{Value: "CURRENT-DATE"},
+												RefMod: &ReferenceModifier{
+													Start:  &NumericLiteral{Value: "1"},
+													Length: &NumericLiteral{Value: "8"},
+												},
+											}},
+										}}},
+										// Nested function reference among multiple arguments.
+										{Statements: []Statement{&ComputeStatement{
+											Targets: []ComputeTarget{{Name: &Identifier{Name: &Word{Value: "WS-Z"}}}},
+											Expr: &FunctionReference{
+												Name: &Word{Value: "MEAN"},
+												Arguments: []Expr{
+													&FunctionReference{
+														Name: &Word{Value: "MAX"},
+														Arguments: []Expr{
+															&Identifier{Name: &Word{Value: "WS-A"}},
+															&Identifier{Name: &Word{Value: "WS-B"}},
+														},
+													},
+													&Identifier{Name: &Word{Value: "WS-C"}},
+												},
+											},
+										}}},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE FUNCTION CURRENT-DATE TO WS-NOW.\n" +
+				"    COMPUTE WS-X = FUNCTION NUMVAL-C(WS-A).\n" +
+				"    MOVE FUNCTION UPPER-CASE(WS-NAME)(1:1) TO WS-INITIAL.\n" +
+				"    DISPLAY FUNCTION CURRENT-DATE(1:8).\n" +
+				"    COMPUTE WS-Z = FUNCTION MEAN(FUNCTION MAX(WS-A WS-B) WS-C).\n",
+		},
+		{
 			name: "procedure division control flow",
 			input: &File{
 				Programs: []*Program{
@@ -1518,6 +1598,7 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "procedure_call_cob", fixture: "procedure_call.cob"},
 		{name: "procedure_file_io_cob", fixture: "procedure_file_io.cob"},
 		{name: "procedure_data_manipulation_cob", fixture: "procedure_data_manipulation.cob"},
+		{name: "procedure_function_cob", fixture: "procedure_function.cob"},
 		{name: "procedure_sections_cob", fixture: "procedure_sections.cob"},
 		{name: "program_linkage_cob", fixture: "program_linkage.cob"},
 		{name: "full_program_cob", fixture: "full_program.cob"},
@@ -1655,6 +1736,8 @@ func clearTypePos(v Type) {
 		n.Pos = Pos{}
 	case *Identifier:
 		clearIdentifierPos(n)
+	case *FunctionReference:
+		clearFunctionReferencePos(n)
 	case *AddressOf:
 		n.Pos = Pos{}
 		clearIdentifierPos(n.Of)
@@ -2065,6 +2148,24 @@ func clearIdentifierPos(id *Identifier) {
 	}
 }
 
+// clearFunctionReferencePos zeroes the Pos of a function-reference node and its
+// name, arguments, and reference-modifier (a no-op when nil).
+func clearFunctionReferencePos(fn *FunctionReference) {
+	if fn == nil {
+		return
+	}
+	fn.Pos = Pos{}
+	clearWordPos(fn.Name)
+	for _, arg := range fn.Arguments {
+		clearExprPos(arg)
+	}
+	if fn.RefMod != nil {
+		fn.RefMod.Pos = Pos{}
+		clearExprPos(fn.RefMod.Start)
+		clearExprPos(fn.RefMod.Length)
+	}
+}
+
 // clearConditionPos zeroes the Pos of a condition node and its nested operands and
 // sub-conditions.
 func clearConditionPos(c Condition) {
@@ -2100,6 +2201,8 @@ func clearExprPos(e Expr) {
 	switch n := e.(type) {
 	case *Identifier:
 		clearIdentifierPos(n)
+	case *FunctionReference:
+		clearFunctionReferencePos(n)
 	case *NumericLiteral:
 		if n != nil {
 			n.Pos = Pos{}

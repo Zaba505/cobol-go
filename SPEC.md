@@ -915,7 +915,8 @@ The data-manipulation verbs above now include the previously deferred sub-phrase
 condition-name tests).
 
 ```ebnf
-operand    = identifier | literal           « literal includes figurative-constant »
+operand    = identifier | literal | function-reference
+        « literal includes figurative-constant »
 identifier = qualified-name [ subscript ] [ reference-modifier ]
 qualified-name   = data-name { ( "IN" | "OF" ) data-name }
 subscript        = "(" operand { operand } ")"
@@ -923,6 +924,15 @@ subscript        = "(" operand { operand } ")"
           — each requiring a following space — may appear between them and is
           consumed by the tokenizer as a separator »
 reference-modifier = "(" arithmetic-expression ":" [ arithmetic-expression ] ")"
+function-reference = "FUNCTION" function-name [ "(" argument { argument } ")" ]
+        [ reference-modifier ]
+        « an intrinsic-function reference, distinct from the out-of-scope
+          user-defined FUNCTION-ID unit; a no-argument intrinsic
+          (FUNCTION CURRENT-DATE) omits the argument list, and a
+          reference-modifier may apply directly to it
+          (FUNCTION CURRENT-DATE(1:8)) »
+function-name = Word                        « an intrinsic-function name »
+argument      = arithmetic-expression
 
 condition =                                 « precedence: NOT > AND > OR »
         and-condition { "OR" and-condition }
