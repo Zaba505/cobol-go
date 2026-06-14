@@ -340,15 +340,23 @@ type PerformStatement struct {
 
 func (*PerformStatement) statement() {}
 
-// PerformVarying is the VARYING phrase of a PERFORM loop. Pos is the position of
-// the loop variable; From and By are its initial value and increment; Until is the
-// termination condition.
-type PerformVarying struct {
+// VaryingClause is one phrase of a PERFORM VARYING loop — a loop variable Name,
+// its From initial value and By increment, and the Until termination condition.
+// The VARYING phrase and each AFTER phrase share this shape. Pos is the position
+// of the introducing keyword (VARYING or AFTER).
+type VaryingClause struct {
 	Pos   Pos
 	Name  *Identifier
 	From  Type
 	By    Type
 	Until Condition
+}
+
+// PerformVarying is the VARYING clause of a PERFORM loop: the initial VARYING
+// phrase (the embedded VaryingClause) plus zero or more nested AFTER phrases.
+type PerformVarying struct {
+	VaryingClause
+	After []VaryingClause
 }
 
 // ArithmeticStatement is an ADD, SUBTRACT, MULTIPLY, or DIVIDE statement. Pos is
@@ -4405,6 +4413,20 @@ func parsePerformLoopSpec(p *parser, stmt *PerformStatement) error {
 			return err
 		}
 		stmt.TestAfter = keywordIs(ba, "AFTER")
+		// WITH TEST BEFORE|AFTER may qualify either an UNTIL or a VARYING loop.
+		varying, err := p.peekKeyword("VARYING")
+		if err != nil {
+			return err
+		}
+		if varying {
+			vtok, _, _ := p.advance()
+			v, err := parsePerformVarying(p, vtok)
+			if err != nil {
+				return err
+			}
+			stmt.Varying = v
+			return nil
+		}
 		if _, err := p.expectKeyword("UNTIL"); err != nil {
 			return err
 		}
@@ -4462,35 +4484,62 @@ func parsePerformLoopSpec(p *parser, stmt *PerformStatement) error {
 	return nil
 }
 
-// parsePerformVarying parses the VARYING phrase after its keyword vtok: the loop
-// variable, FROM initial value, BY increment, and UNTIL termination condition.
+// parsePerformVarying parses the VARYING phrase after its keyword vtok, plus any
+// trailing AFTER phrases (nested-loop table processing). Each phrase shares the
+// shape identifier FROM operand BY operand UNTIL condition.
 func parsePerformVarying(p *parser, vtok Token) (*PerformVarying, error) {
-	name, err := parseIdentifierToken(p)
+	head, err := parseVaryingClause(p, vtok.Pos)
 	if err != nil {
 		return nil, err
 	}
+	v := &PerformVarying{VaryingClause: head}
+	for {
+		after, err := p.peekKeyword("AFTER")
+		if err != nil {
+			return nil, err
+		}
+		if !after {
+			return v, nil
+		}
+		atok, _, _ := p.advance()
+		clause, err := parseVaryingClause(p, atok.Pos)
+		if err != nil {
+			return nil, err
+		}
+		v.After = append(v.After, clause)
+	}
+}
+
+// parseVaryingClause parses one VARYING/AFTER phrase: the loop variable, FROM
+// initial value, BY increment, and UNTIL termination condition. pos is the
+// position of the introducing keyword (VARYING or AFTER).
+func parseVaryingClause(p *parser, pos Pos) (VaryingClause, error) {
+	name, err := parseIdentifierToken(p)
+	if err != nil {
+		return VaryingClause{}, err
+	}
 	if _, err := p.expectKeyword("FROM"); err != nil {
-		return nil, err
+		return VaryingClause{}, err
 	}
 	from, err := parseOperand(p)
 	if err != nil {
-		return nil, err
+		return VaryingClause{}, err
 	}
 	if _, err := p.expectKeyword("BY"); err != nil {
-		return nil, err
+		return VaryingClause{}, err
 	}
 	by, err := parseOperand(p)
 	if err != nil {
-		return nil, err
+		return VaryingClause{}, err
 	}
 	if _, err := p.expectKeyword("UNTIL"); err != nil {
-		return nil, err
+		return VaryingClause{}, err
 	}
 	cond, err := parseCondition(p)
 	if err != nil {
-		return nil, err
+		return VaryingClause{}, err
 	}
-	return &PerformVarying{Pos: vtok.Pos, Name: name, From: from, By: by, Until: cond}, nil
+	return VaryingClause{Pos: pos, Name: name, From: from, By: by, Until: cond}, nil
 }
 
 // parsePerformInlineBody parses the inline body of a PERFORM and its required
