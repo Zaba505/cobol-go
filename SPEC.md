@@ -25,9 +25,12 @@ that implements each one.
 
 > **Implementation status:** Free format is implemented first; the fixed-format
 > batch follows. The fixed format is **fully specified here**; its *tokenization*
-> (#21) is **implemented** — opt in with `WithFixedFormat()` — while
-> *source-format detection / configuration* (#22) and *round-trip fixtures* (#23)
-> are deferred to later stories. Also out of scope:
+> (#21) is **implemented** — opt in with `WithFixedFormat()` — and
+> *source-format configuration* (#22) is **implemented**: `Parse` selects the
+> format via `WithSourceFormat(FreeFormat|FixedFormat)` (`Tokenize` via
+> `WithFixedFormat()`), defaulting to free format. Honoring an in-source
+> `>>SOURCE FORMAT` directive and *round-trip fixtures* (#23) remain deferred.
+> Also out of scope:
 > the COPY/REPLACE text-manipulation facility (copybooks), the REPORT and SCREEN
 > sections beyond their headers, object-oriented (class/method) and
 > user-defined-function compilation units, and the full ~1130-word reserved word
@@ -452,8 +455,11 @@ indicator area; in free format it may begin in any column. Relevant directives:
   `>>SET SOURCEFORMAT "FREE"` | `"FIXED"`, or `>>FORMAT IS FREE` | `FIXED`
   selects the reference format for the lines that follow (*GnuCOBOL §2.1.16*).
   GnuCOBOL defaults to **fixed** when neither such a directive nor a command-line
-  `-free` / `-fixed` option is given. Detecting and honoring the format (vs.
-  defaulting) is the source-format story (#22).
+  `-free` / `-fixed` option is given. **Explicit** format selection is
+  implemented (#22): callers choose via `Parse`'s `WithSourceFormat` or the
+  tokenizer's `WithFixedFormat`, defaulting to free format. *Honoring* an
+  in-source `>>SOURCE FORMAT` directive (vs. an explicit caller choice) remains
+  deferred — it needs the CDF directive token, which is not yet recognized.
 - `>>PAGE` — page eject; the free-format counterpart of the fixed-format `/`
   column-7 indicator.
 - `>>SET`, `>>DEFINE`, `>>IF` / `>>ELSE` / `>>END-IF` — conditional compilation.
@@ -1045,8 +1051,8 @@ parse).
   printer is free to choose layout (this is what makes free-format round-trips
   robust). Fixed format adds column significance (Area A / Area B, the indicator
   area, column-7 continuation) on *input*; on *output* the printer must place
-  tokens in their required column areas. The source format is therefore detected
-  by the tokenizer (#22) and reproduced by the printer, so the round-trip
+  tokens in their required column areas. The source format is therefore selected
+  by the caller (#22) and reproduced by the printer, so the round-trip
   property holds **per format**: a fixed-format source prints back as fixed
   format, a free-format source as free format.
 
@@ -1164,8 +1170,11 @@ round-trip fixtures are added in #23; this snippet is illustrative.)
   [Line Continuation](#line-continuation)) and its *tokenization* (#21) is
   **implemented** (opt in with `WithFixedFormat()`); only the *round-trip
   fixtures* (#23) remain deferred.
-- **Source-format detection / configuration** (honoring `>>SOURCE FORMAT`,
-  defaulting) — beyond recognizing the directive token, deferred (#22).
+- **Source-format configuration** (#22) is **implemented**: `Parse` selects the
+  reference format via `WithSourceFormat`, `Tokenize` via `WithFixedFormat`,
+  defaulting to free format. *Honoring* an in-source `>>SOURCE FORMAT` directive
+  (and content auto-detection) remains deferred — directive honoring needs the
+  CDF directive token, which is not yet recognized.
 - **COPY / REPLACE** text manipulation (copybooks), **REPLACE** statement, and
   pseudo-text (`== … ==`).
 - Full **statement grammar** for every verb; only the core verbs above are
