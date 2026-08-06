@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/z5labs/devex/main/plugins/backlog/assets/backlog.schema.json",
+  "select": {
+    "label": "story",
+    "milestone": null,
+    "limit": 200,
+    "project": {
+      "owner": "Zaba505",
+      "number": 6,
+      "field": "Area",
+      "value": null
+    }
+  },
+  "dependencies": {
+    "style": "native"
+  },
+  "verify": [
+    "go build ./...",
+    "gofmt -l .",
+    "go vet ./...",
+    "golangci-lint run",
+    "go test -race ./..."
+  ],
+  "merge": {
+    "label": "auto-merge",
+    "workflow": "auto-merge.yaml"
+  },
+  "review": {
+    "required": true
+  },
+  "worktreeDir": ".claude/worktrees"
+}
