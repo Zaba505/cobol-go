@@ -30,3 +30,10 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Per-issue worktrees created by the backlog loop (backlog.worktreeDir)
+.claude/worktrees/
+
+# Per-operator Claude Code settings: permissions and the unattended-run
+# authorization are personal, not shared.
+.claude/settings.local.json
