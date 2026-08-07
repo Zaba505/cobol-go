@@ -2,6 +2,12 @@
 
 ## Overview
 
+> **Companion document:** this file specifies COBOL **source syntax**.
+> [`codec/SPEC.md`](codec/SPEC.md) specifies the **byte-level representation of
+> data items** — how a value described by a copybook is laid out in the bytes of
+> a data file, in both ASCII and EBCDIC. Layout questions belong there; syntax
+> questions belong here.
+
 This document is the single source of truth for the `cobol` package — a
 tokenizer / parser / printer pipeline for COBOL source. It distills the lexical
 and syntactic rules of the ISO/IEC 1989 COBOL standard, as implemented by
@@ -1085,10 +1091,17 @@ parse).
   - `9` plus editing symbols (`Z * , . + - CR DB $ B 0 /`) → **numeric-edited**
   - `X`/`A` plus `B`/`0`/`/` → **alphanumeric-edited**
 
+  How `digits`, `scale` (`V`, `P`) and the operational sign (`S`) are derived
+  from the symbols — and how many bytes the result occupies — is *data
+  representation*, not source syntax; see
+  [`codec/SPEC.md`](codec/SPEC.md#from-picture-to-attributes).
+
 - **`USAGE` default is `DISPLAY`.** An item with no `USAGE` clause is `DISPLAY`
   (character) representation; `COMP`/`BINARY`/`PACKED-DECIMAL` change the stored
   encoding but not the logical value. `USAGE` is inherited by subordinate items
-  from a group unless overridden.
+  from a group unless overridden. *What* each stored encoding is, byte for byte,
+  in both ASCII and EBCDIC files, is specified in
+  [`codec/SPEC.md`](codec/SPEC.md).
 
 - **`VALUE` initialization.** A `VALUE` clause sets the item's initial content;
   its literal must be compatible with the item's category. On a level-88 entry,
