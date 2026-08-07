@@ -47,6 +47,18 @@ here. Numeric accessors take `digits` but **not** `scale`: byte width never
 depends on scale, so the return is the unscaled integer and the generator emits
 the scale as a constant.
 
+Their `digits` bound belongs to the **accessor**, not to the field: 9 for the
+int32 accessors, 18 for the int64 ones, 31 — the IBM maximum — for the
+`math/big.Int` ones. A wider count is a `PackedDigitCountError` rather than a
+silent overflow.
+
+Numeric **writers** additionally take a `Signedness` (`Signed`/`Unsigned`) with
+an invalid zero value. Whether the PICTURE carries `S` selects the stored sign
+value and is not recoverable from the value being written, so it is stated per
+call and never defaulted — the same argument as the `Encoding` axes, one level
+down. A negative value written into an `Unsigned` field is a `PackedRangeError`,
+not a silent absolute value.
+
 ## Errors: one wrapper, typed leaves
 
 Every error returned after construction is wrapped once in
@@ -56,9 +68,17 @@ The offset is stamped in exactly one place per direction — `Reader.read` and
 Never construct an `OffsetError` outside those paths without a reason, and never
 add a second offset field to a leaf error.
 
+There is one standing exception, and it is the shape any later one should take:
+`Reader.readPackedDigits` stamps a bad nibble with the offset of the **byte
+holding it**, computed from the field's start offset in a single `nibbleAt`
+helper. A packed field is several bytes wide, and "the field ended at offset N"
+does not say which byte was corrupt.
+
 Leaves are typed values (`EncodingError`, `FieldWidthError`,
-`FieldTooLongError`, `UnrepresentableRuneError`, `JustificationError`) or
-stdlib sentinels (`io.EOF`, `io.ErrUnexpectedEOF`, `io.ErrShortWrite`). Callers
+`FieldTooLongError`, `UnrepresentableRuneError`, `JustificationError`,
+`SignednessError`, `PackedDigitCountError`, `PackedPadError`,
+`PackedDigitError`, `PackedSignError`, `PackedRangeError`) or stdlib sentinels
+(`io.EOF`, `io.ErrUnexpectedEOF`, `io.ErrShortWrite`, `ErrNilValue`). Callers
 use `errors.Is` for the cause and `errors.As` for the offset; tests assert both.
 
 Loud beats silent everywhere except one documented place: **alphanumeric
