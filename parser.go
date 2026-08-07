@@ -1615,11 +1615,16 @@ func WithSourceFormat(f SourceFormat) ParseOption {
 // without being wrapped in a synthetic program shell.
 //
 // The entries are reached on the returned [File] through its Fragment field
-// rather than through a Program; File.Programs is empty. Levels follow the
-// ordinary data-description rules — 01 and 77 entries at the top level, 02–49
-// subordinate to the group above them, 88 condition-names and 66 RENAMES
-// entries as usual — since the fragment is exactly the entry list a DATA
-// DIVISION section would hold.
+// rather than through a Program; File.Programs is empty.
+//
+// A fragment is exactly the entry list a DATA DIVISION section holds, read by
+// the same parser, so its level-numbers behave the same way: 01–49 for the
+// record hierarchy, 66 for RENAMES, 77 for an independent elementary item and 88
+// for a condition-name are accepted, and anything else is an
+// [InvalidLevelNumberError]. As in a section, the hierarchy those numbers imply
+// is recorded rather than enforced — the entry list is flat, and a fragment
+// opening at level 05, or nesting in an order no compiler would accept, is not
+// rejected here.
 //
 // It composes with [WithSourceFormat]: copybooks are commonly fixed format, so
 // Parse(r, WithFragment(), WithSourceFormat(FixedFormat)) is the usual call for
@@ -2145,9 +2150,11 @@ func parseFragmentEntries(p *parser, frag *Fragment) (parserAction[*Fragment], e
 
 // parseFragmentEnd requires the source to be exhausted. A fragment holds data
 // description entries and nothing else, so a token left over — a division header,
-// a stray period — is reported rather than ignored: it means the caller passed a
-// whole source file to a fragment parse, and silently dropping the rest of the
-// file would be the worse answer.
+// a stray period — is reported as a [TrailingTokenError] rather than ignored: it
+// means the caller passed a whole source file to a fragment parse, and silently
+// dropping the rest of the file would be the worse answer. The fragment is
+// already complete at this point, so nothing would have been accepted in the
+// token's place and the expectation reported is end of input.
 //
 // The comments buffered past the last entry have no entry to lead, so they become
 // the fragment's trailing comments; claiming them here keeps a copybook that ends
@@ -2158,7 +2165,7 @@ func parseFragmentEnd(p *parser, frag *Fragment) (parserAction[*Fragment], error
 		return nil, err
 	}
 	if ok {
-		return nil, UnexpectedTokenError{Expected: []TokenType{TokenNumber}, Actual: tok}
+		return nil, TrailingTokenError{Actual: tok}
 	}
 
 	frag.Trailing = p.takeComments()
@@ -8263,6 +8270,24 @@ type UnexpectedKeywordError struct {
 // Error implements the [error] interface.
 func (e UnexpectedKeywordError) Error() string {
 	return fmt.Sprintf("unexpected keyword %q at line %d, column %d, expected one of %v", string(e.Actual.Value), e.Actual.Pos.Line, e.Actual.Pos.Column, e.Expected)
+}
+
+// TrailingTokenError is returned when a [WithFragment] parse reaches a token
+// past the fragment's data description entries. A fragment holds entries and
+// nothing else, so a stray token there — a division header, most often — means a
+// whole source file was handed to a fragment parse; reporting it is what stops
+// the rest of that file being silently dropped. Actual is the offending token.
+//
+// It is distinct from [UnexpectedTokenError] because nothing would have been
+// accepted in its place: the fragment was already complete, so the expectation
+// is end of input rather than a token of some other type.
+type TrailingTokenError struct {
+	Actual Token
+}
+
+// Error implements the [error] interface.
+func (e TrailingTokenError) Error() string {
+	return fmt.Sprintf("unexpected token %s at line %d, column %d, expected end of input", e.Actual, e.Actual.Pos.Line, e.Actual.Pos.Column)
 }
 
 // InvalidLevelNumberError is returned when a data-description entry's

@@ -3456,6 +3456,35 @@ func TestParserFragment(t *testing.T) {
 			},
 		},
 		{
+			// The hierarchy the level numbers imply is recorded, not enforced —
+			// exactly as in a DATA DIVISION section. A copybook is routinely a
+			// record's middle, COPYed in under a group the file itself never
+			// names, so a fragment opening below level 01 parses rather than
+			// being rejected on a hierarchy the source cannot show.
+			name: "entries below the record level",
+			src: "05 CUST-NAME.\n" +
+				"   10 CUST-FIRST PIC X(20).\n",
+			expected: &File{
+				Fragment: &Fragment{
+					Entries: []*DataDescriptionEntry{
+						{
+							Pos:   Pos{Line: 1, Column: 1},
+							Level: 5,
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUST-NAME"},
+						},
+						{
+							Pos:   Pos{Line: 2, Column: 4},
+							Level: 10,
+							Name:  &Word{Pos: Pos{Line: 2, Column: 7}, Value: "CUST-FIRST"},
+							Clauses: []DataClause{
+								&PictureClause{Pos: Pos{Line: 2, Column: 18}, Picture: "X(20)"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			// An empty copybook is a fragment with no entries — not a nil Fragment,
 			// so a consumer can still tell it apart from a whole source file.
 			name:     "empty source",
@@ -3559,9 +3588,13 @@ func TestParserFragmentErrors(t *testing.T) {
 
 		_, err := Parse(strings.NewReader(src), WithFragment())
 
-		var unexpected UnexpectedTokenError
-		require.ErrorAs(t, err, &unexpected)
-		require.Equal(t, Pos{Line: 2, Column: 1}, unexpected.Actual.Pos)
+		// The fragment was already complete, so nothing would have been accepted
+		// in the token's place: the expectation reported is end of input, not
+		// another level-number.
+		var trailing TrailingTokenError
+		require.ErrorAs(t, err, &trailing)
+		require.Equal(t, Pos{Line: 2, Column: 1}, trailing.Actual.Pos)
+		require.Contains(t, trailing.Error(), "expected end of input")
 	})
 
 	t.Run("invalid level number", func(t *testing.T) {
