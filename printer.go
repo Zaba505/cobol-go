@@ -137,15 +137,34 @@ func failPrint(err error) printerAction {
 	}
 }
 
-// printFile is the entry action: it prints each program in source order. The
-// empty (zero-value) *File prints nothing, since printProgramAt(0) ends
-// immediately when there are no programs. A nil *File is rejected with an
+// printFile is the entry action: it prints the file's standalone copybook
+// fragment, if it has one, then each program in source order. The empty
+// (zero-value) *File prints nothing, since printProgramAt(0) ends immediately
+// when there are no programs. A nil *File is rejected with an
 // [UnsupportedNodeError] rather than panicking, since Print is a public API.
 func printFile(pr *printer, f *File) printerAction {
 	if f == nil {
 		return failPrint(UnsupportedNodeError{Node: f})
 	}
+	if f.Fragment != nil {
+		return printFragment(f.Fragment, printProgramAt(0))
+	}
 	return printProgramAt(0)
+}
+
+// printFragment prints a standalone copybook fragment — its data-description
+// entries at the depths their level numbers imply, then the comments that
+// followed the last entry — and continues with next. There is no division or
+// section header to emit: the output is a copybook again, so Print of a
+// [WithFragment] parse re-parses with [WithFragment]. A nil fragment is skipped.
+func printFragment(frag *Fragment, next printerAction) printerAction {
+	return func(pr *printer, f *File) printerAction {
+		if frag == nil {
+			return next
+		}
+		tail := printComments(frag.Trailing, 0, next)
+		return printDataEntryAt(frag.Entries, dataEntryDepths(frag.Entries), 0, tail)
+	}
 }
 
 // printProgramAt prints the program at index i, then continues with the program

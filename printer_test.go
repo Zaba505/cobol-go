@@ -1722,6 +1722,11 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		// fixtures set it to FixedFormat so the first parse reads the column-oriented
 		// layout. The printer always emits free format, so the re-parse stays free.
 		format SourceFormat
+		// fragment reads the fixture as a standalone copybook (WithFragment)
+		// rather than as a whole source file. The printer emits a fragment as a
+		// fragment — no division or section header — so the re-parse keeps the
+		// option while dropping the format.
+		fragment bool
 	}{
 		{name: "hello_cob", fixture: "hello.cob"},
 		{name: "environment_cob", fixture: "environment.cob"},
@@ -1749,6 +1754,12 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		{name: "fixed_hello_cob", fixture: "fixed_hello.cob", format: FixedFormat},
 		{name: "fixed_report_cob", fixture: "fixed_report.cob", format: FixedFormat},
 		{name: "fixed_continuation_cob", fixture: "fixed_continuation.cob", format: FixedFormat},
+
+		// A standalone copybook: data description entries with no IDENTIFICATION
+		// DIVISION, parsed with WithFragment. It is fixed format because copybook
+		// libraries generally are, so the row exercises both options at once
+		// (issue #70).
+		{name: "customer_copybook_cpy", fixture: "customer_copybook.cpy", format: FixedFormat, fragment: true},
 	}
 
 	for _, tc := range testCases {
@@ -1758,15 +1769,25 @@ func TestRoundTripFromTestdata(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join("testdata", tc.fixture))
 			require.NoError(t, err)
 
-			first, err := Parse(bytes.NewReader(data), WithSourceFormat(tc.format))
+			opts := []ParseOption{WithSourceFormat(tc.format)}
+			if tc.fragment {
+				opts = append(opts, WithFragment())
+			}
+
+			first, err := Parse(bytes.NewReader(data), opts...)
 			require.NoError(t, err)
 
 			var buf bytes.Buffer
 			require.NoError(t, Print(&buf, first))
 
 			// The printer always emits free format, so the re-parse uses the
-			// default (free) format regardless of the fixture's source format.
-			second, err := Parse(&buf)
+			// default (free) format regardless of the fixture's source format. A
+			// fragment stays a fragment, though, so that option is kept.
+			var reparse []ParseOption
+			if tc.fragment {
+				reparse = append(reparse, WithFragment())
+			}
+			second, err := Parse(&buf, reparse...)
 			require.NoError(t, err)
 
 			// The printer reformats canonically, so positions shift between the
@@ -1889,6 +1910,145 @@ P.
 	require.Equal(t, expected, buf.String())
 }
 
+// TestPrintFragment pins the printer's canonical layout for a standalone copybook
+// fragment: no division or section header, entries indented by the depth their
+// level numbers imply (the same hierarchy a DATA DIVISION section gets), leading
+// comments at their entry's depth, and the fragment's trailing comments last. The
+// round-trip test cannot observe any of that, since it ignores positions.
+func TestPrintFragment(t *testing.T) {
+	t.Parallel()
+
+	f := &File{
+		Fragment: &Fragment{
+			Entries: []*DataDescriptionEntry{
+				{
+					Comments: []*Comment{{Text: "customer copybook"}},
+					Level:    1,
+					Name:     &Word{Value: "CUSTOMER-RECORD"},
+				},
+				{
+					Level: 5,
+					Name:  &Word{Value: "CUST-ID"},
+					Clauses: []DataClause{
+						&PictureClause{Picture: "9(6)"},
+						&UsageClause{Usage: "COMP-3"},
+					},
+				},
+				{Level: 5, Name: &Word{Value: "CUST-NAME"}},
+				{
+					Level:   10,
+					Name:    &Word{Value: "FIRST-NAME"},
+					Clauses: []DataClause{&PictureClause{Picture: "X(20)"}},
+				},
+				{
+					Level:   5,
+					Name:    &Word{Value: "CUST-STATUS"},
+					Clauses: []DataClause{&PictureClause{Picture: "X"}},
+				},
+				{
+					Level: 88,
+					Name:  &Word{Value: "CUST-ACTIVE"},
+					Clauses: []DataClause{
+						&ValueClause{Values: []ValueSpec{{From: &StringLiteral{Value: `"A"`}}}},
+					},
+				},
+				{
+					Level: 66,
+					Name:  &Word{Value: "CUST-KEY"},
+					Clauses: []DataClause{
+						&RenamesClause{From: &Word{Value: "CUST-ID"}, Through: &Word{Value: "CUST-NAME"}},
+					},
+				},
+				{
+					Level: 77,
+					Name:  &Word{Value: "CUST-COUNT"},
+					Clauses: []DataClause{
+						&PictureClause{Picture: "9(4)"},
+						&ValueClause{Values: []ValueSpec{{From: &Word{Value: "ZERO"}}}},
+					},
+				},
+			},
+			Trailing: []*Comment{{Text: "end of copybook"}},
+		},
+	}
+
+	const expected = `*> customer copybook
+01 CUSTOMER-RECORD.
+    05 CUST-ID PIC 9(6) USAGE COMP-3.
+    05 CUST-NAME.
+        10 FIRST-NAME PIC X(20).
+    05 CUST-STATUS PIC X.
+        88 CUST-ACTIVE VALUE "A".
+66 CUST-KEY RENAMES CUST-ID THROUGH CUST-NAME.
+77 CUST-COUNT PIC 9(4) VALUE ZERO.
+*> end of copybook
+`
+	var buf bytes.Buffer
+	require.NoError(t, Print(&buf, f))
+	require.Equal(t, expected, buf.String())
+}
+
+// TestPrintFragmentRoundTrip is the fragment's Parse -> Print -> Parse check for
+// the free-format source strings the fixture harness below covers in fixed format.
+func TestPrintFragmentRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "record with subordinates",
+			src: "01 CUSTOMER-RECORD.\n" +
+				"   05 CUST-ID PIC 9(6) COMP-3.\n" +
+				"   05 CUST-NAME.\n" +
+				"      10 FIRST-NAME PIC X(20).\n" +
+				"      10 LAST-NAME PIC X(20).\n",
+		},
+		{
+			name: "condition names and renames",
+			src: "01 CUST-RECORD.\n" +
+				"   05 CUST-STATUS PIC X.\n" +
+				"      88 CUST-ACTIVE VALUE \"A\".\n" +
+				"      88 CUST-CLOSED VALUE \"C\" THROUGH \"D\".\n" +
+				"   05 CUST-KIND PIC X.\n" +
+				"66 CUST-KEY RENAMES CUST-STATUS THROUGH CUST-KIND.\n" +
+				"77 CUST-COUNT PIC 9(4) VALUE ZERO.\n",
+		},
+		{
+			name: "comments",
+			src: "*> customer copybook\n" +
+				"01 CUSTOMER-RECORD.\n" +
+				"*> the identifier\n" +
+				"   05 CUST-ID PIC 9(6).\n" +
+				"*> end of copybook\n",
+		},
+		{
+			name: "empty",
+			src:  "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			first, err := Parse(strings.NewReader(tc.src), WithFragment())
+			require.NoError(t, err)
+
+			var buf bytes.Buffer
+			require.NoError(t, Print(&buf, first))
+
+			// A printed fragment is a fragment again — the printer emits no
+			// division or section header — so the re-parse uses WithFragment too.
+			second, err := Parse(&buf, WithFragment())
+			require.NoError(t, err)
+
+			require.Equal(t, withoutPos(first), withoutPos(second))
+		})
+	}
+}
+
 // withoutPos zeroes every Pos in f and returns it, so round-trip comparisons
 // assert AST structure while ignoring the line/column positions the printer is
 // free to choose (SPEC.md "Reference format independence").
@@ -1896,7 +2056,21 @@ func withoutPos(f *File) *File {
 	for _, prog := range f.Programs {
 		clearProgramPos(prog)
 	}
+	clearFragmentPos(f.Fragment)
 	return f
+}
+
+// clearFragmentPos zeroes every Pos beneath a standalone copybook fragment — its
+// entries and its trailing comments. A nil fragment (an ordinary source file) is a
+// no-op.
+func clearFragmentPos(frag *Fragment) {
+	if frag == nil {
+		return
+	}
+	for _, entry := range frag.Entries {
+		clearDataEntryPos(entry)
+	}
+	clearCommentsPos(frag.Trailing)
 }
 
 // clearProgramPos zeroes every Pos beneath a program — its divisions, its END
@@ -2701,6 +2875,10 @@ func TestPrinterErrors(t *testing.T) {
 		{
 			name:  "unknown division type",
 			input: &File{Programs: []*Program{{Divisions: []Division{fakeDivision{}}}}},
+		},
+		{
+			name:  "nil fragment entry",
+			input: &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{nil}}},
 		},
 		{
 			name:  "missing program-id paragraph",

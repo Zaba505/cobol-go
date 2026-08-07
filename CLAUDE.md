@@ -112,6 +112,15 @@ container of `Programs []*Program` (a COBOL source file holds one or more
 programs); each `Program` carries `Divisions []Division`. Every node below
 `File` carries a `Pos`, mirroring `go/ast`, where every node is position-aware.
 
+`File` has one other container: `Fragment *Fragment`, the data description
+entries of a standalone copybook read with `Parse(r, WithFragment())`. A
+copybook has no IDENTIFICATION DIVISION and no program for a DATA DIVISION to
+hang off, so its entries get their own field rather than a synthetic
+`DataDivision` — no node then claims a division header the source never had.
+`Fragment` is non-nil only in that mode, and `Programs` is empty when it is; the
+entry loop itself (`parseDataEntries`) is shared with the DATA DIVISION
+sections, so a fragment is exactly the entry list a section would hold.
+
 ### `expect`
 
 The `parser` exposes one helper:
