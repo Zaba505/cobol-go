@@ -967,6 +967,320 @@ func TestWriterWriteBinaryErrors(t *testing.T) {
 	})
 }
 
+// TestWriterWriteFloatIEEE is the direct shape for binary32 and binary64: a
+// value in, the exact bytes out, in both byte orders.
+func TestWriterWriteFloatIEEE(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		v    float64
+		be32 []byte
+		be64 []byte
+	}{
+		{
+			name: "one",
+			v:    1,
+			be32: []byte{0x3F, 0x80, 0x00, 0x00},
+			be64: []byte{0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name: "zero",
+			v:    0,
+			be32: []byte{0x00, 0x00, 0x00, 0x00},
+			be64: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name: "negative one",
+			v:    -1,
+			be32: []byte{0xBF, 0x80, 0x00, 0x00},
+			be64: []byte{0xBF, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name: "one and a half",
+			v:    1.5,
+			be32: []byte{0x3F, 0xC0, 0x00, 0x00},
+			be64: []byte{0x3F, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name: "a thirty-second",
+			v:    0.03125,
+			be32: []byte{0x3D, 0x00, 0x00, 0x00},
+			be64: []byte{0x3F, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+	}
+
+	for _, tc := range testCases {
+		for _, bo := range binaryOrders {
+			t.Run(tc.name+", "+bo.String(), func(t *testing.T) {
+				t.Parallel()
+
+				enc := floatEncoding(FloatIEEE, bo)
+
+				var buf bytes.Buffer
+				w, err := NewWriter(&buf, enc)
+				require.NoError(t, err)
+				require.NoError(t, w.WriteFloat32(float32(tc.v)))
+				require.Equal(t, inByteOrder(bo, tc.be32), buf.Bytes())
+				require.Equal(t, int64(comp1Width), w.Offset())
+
+				buf.Reset()
+				w, err = NewWriter(&buf, enc)
+				require.NoError(t, err)
+				require.NoError(t, w.WriteFloat64(tc.v))
+				require.Equal(t, inByteOrder(bo, tc.be64), buf.Bytes())
+				require.Equal(t, int64(comp2Width), w.Offset())
+			})
+		}
+	}
+}
+
+// TestWriterWriteFloatHFP is the direct shape for IBM hexadecimal floating
+// point: the same known bit patterns TestReaderReadFloatHFP decodes, written
+// from the value side.
+func TestWriterWriteFloatHFP(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name  string
+		v     float64
+		short []byte
+		long  []byte
+	}{
+		{
+			name:  "zero is the all-zero field",
+			v:     0,
+			short: []byte{0x00, 0x00, 0x00, 0x00},
+			long:  []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name: "negative zero is the all-zero field too",
+			// HFP has no signed zero to preserve one as, so the sign bit is
+			// dropped rather than stored on a zero fraction.
+			v:     math.Copysign(0, -1),
+			short: []byte{0x00, 0x00, 0x00, 0x00},
+			long:  []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name:  "one",
+			v:     1,
+			short: []byte{0x41, 0x10, 0x00, 0x00},
+			long:  []byte{0x41, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name:  "negative one",
+			v:     -1,
+			short: []byte{0xC1, 0x10, 0x00, 0x00},
+			long:  []byte{0xC1, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name:  "a half",
+			v:     0.5,
+			short: []byte{0x40, 0x80, 0x00, 0x00},
+			long:  []byte{0x40, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name:  "a sixteenth",
+			v:     0.0625,
+			short: []byte{0x40, 0x10, 0x00, 0x00},
+			long:  []byte{0x40, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name:  "sixteen",
+			v:     16,
+			short: []byte{0x42, 0x10, 0x00, 0x00},
+			long:  []byte{0x42, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name:  "two hundred and fifty-five",
+			v:     255,
+			short: []byte{0x42, 0xFF, 0x00, 0x00},
+			long:  []byte{0x42, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name: "a thirty-second",
+			// The bytes IEEE spells 1.0 with, written from the other side of
+			// codec/SPEC.md's worked example.
+			v:     0.03125,
+			short: []byte{0x3F, 0x80, 0x00, 0x00},
+			long:  []byte{0x3F, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name: "always normalized",
+			// 1.0 has an unnormalized spelling, 0.01₁₆ × 16^2, that the reader
+			// accepts. The writer emits the normalized one and only that.
+			v:     1,
+			short: []byte{0x41, 0x10, 0x00, 0x00},
+			long:  []byte{0x41, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Little-endian deliberately: HFP is big-endian regardless of the
+			// axis, so a writer that consulted it would emit these reversed.
+			enc := floatEncoding(FloatHFP, binary.LittleEndian)
+
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, enc)
+			require.NoError(t, err)
+			require.NoError(t, w.WriteFloat32(float32(tc.v)))
+			require.Equal(t, tc.short, buf.Bytes())
+
+			buf.Reset()
+			w, err = NewWriter(&buf, enc)
+			require.NoError(t, err)
+			require.NoError(t, w.WriteFloat64(tc.v))
+			require.Equal(t, tc.long, buf.Bytes())
+		})
+	}
+}
+
+func TestWriterWriteFloatErrors(t *testing.T) {
+	t.Parallel()
+
+	hfp := floatEncoding(FloatHFP, binary.BigEndian)
+
+	notFinite := []struct {
+		name string
+		v    float64
+	}{
+		{name: "nan", v: math.NaN()},
+		{name: "positive infinity", v: math.Inf(1)},
+		{name: "negative infinity", v: math.Inf(-1)},
+	}
+
+	for _, tc := range notFinite {
+		t.Run("hfp rejects "+tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, hfp)
+			require.NoError(t, err)
+
+			err = w.WriteFloat64(tc.v)
+
+			var rangeErr FloatRangeError
+			require.ErrorAs(t, err, &rangeErr)
+			require.Equal(t, FloatHFP, rangeErr.Format)
+			require.Equal(t, comp2Width, rangeErr.Width)
+			require.Contains(t, rangeErr.Reason, "not a finite number")
+			// A rejected field writes nothing, so the record has not
+			// desynchronized.
+			require.Zero(t, buf.Len())
+			require.Zero(t, w.Offset())
+
+			// The same value is an ordinary binary64 bit pattern under IEEE.
+			buf.Reset()
+			w, err = NewWriter(&buf, floatEncoding(FloatIEEE, binary.BigEndian))
+			require.NoError(t, err)
+			require.NoError(t, w.WriteFloat64(tc.v))
+			require.Len(t, buf.Bytes(), comp2Width)
+		})
+
+		t.Run("hfp rejects "+tc.name+" as comp-1", func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, hfp)
+			require.NoError(t, err)
+
+			err = w.WriteFloat32(float32(tc.v))
+
+			var rangeErr FloatRangeError
+			require.ErrorAs(t, err, &rangeErr)
+			require.Equal(t, comp1Width, rangeErr.Width)
+			require.Zero(t, buf.Len())
+		})
+	}
+
+	t.Run("hfp rejects a magnitude above its range", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, hfp)
+		require.NoError(t, err)
+
+		// HFP stops at 16^63, about 7.2e75; a float64 runs to 1.8e308.
+		err = w.WriteFloat64(1e300)
+
+		var rangeErr FloatRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, "1e+300", rangeErr.Value)
+		require.Contains(t, rangeErr.Reason, "above 16^63")
+		require.Zero(t, buf.Len())
+	})
+
+	t.Run("hfp rejects a magnitude below its range", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, hfp)
+		require.NoError(t, err)
+
+		// HFP stops at 16^-65, about 5.4e-79; a float64 runs down to 5e-324.
+		err = w.WriteFloat64(-1e-300)
+
+		var rangeErr FloatRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Contains(t, rangeErr.Reason, "below 16^-65")
+		require.Zero(t, buf.Len())
+	})
+
+	t.Run("every finite float32 is in HFP's range", func(t *testing.T) {
+		t.Parallel()
+
+		// binary32 reaches neither end of HFP's range, so the two bounds above
+		// are unreachable from a COMP-1 field and only NaN and infinity are
+		// rejected there.
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, hfp)
+		require.NoError(t, err)
+
+		require.NoError(t, w.WriteFloat32(math.MaxFloat32))
+		require.NoError(t, w.WriteFloat32(-math.MaxFloat32))
+		require.NoError(t, w.WriteFloat32(math.SmallestNonzeroFloat32))
+		require.Equal(t, int64(3*comp1Width), w.Offset())
+	})
+
+	t.Run("the very largest HFP long value does not survive a float64", func(t *testing.T) {
+		t.Parallel()
+
+		// HFP long carries 56 bits of fraction against a float64's 53, so the
+		// three bits below are rounded away on the way out — and at the top of
+		// the exponent range that rounding is upward, to 16^63 exactly, which
+		// is one ulp past what a fraction below one can spell. It is the one
+		// place a value this package decoded cannot be written back, and it is
+		// reported rather than clamped.
+		r, err := NewReader(bytes.NewReader([]byte{
+			0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+		}), hfp)
+		require.NoError(t, err)
+		v, err := r.ReadFloat64()
+		require.NoError(t, err)
+		require.Equal(t, math.Ldexp(1, 252), v)
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, hfp)
+		require.NoError(t, err)
+
+		var rangeErr FloatRangeError
+		require.ErrorAs(t, w.WriteFloat64(v), &rangeErr)
+		require.Contains(t, rangeErr.Reason, "above 16^63")
+	})
+
+	t.Run("write failure is reported", func(t *testing.T) {
+		t.Parallel()
+
+		w, err := NewWriter(&failingWriter{limit: 0}, floatEncoding(FloatIEEE, binary.BigEndian))
+		require.NoError(t, err)
+
+		require.ErrorIs(t, w.WriteFloat32(1), errWriteFailed)
+	})
+}
+
 func TestWriterOffset(t *testing.T) {
 	t.Parallel()
 
@@ -1103,9 +1417,14 @@ func TestMarshal(t *testing.T) {
 			Amount: 12345,
 			Qty:    42,
 			Seq:    1234,
+			Rate:   1.5,
+			Factor: 2.5,
 		})
 		require.NoError(t, err)
-		require.Equal(t, []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2"), got)
+		// 3F C0 00 00 is RATE as binary32 and 40 04 … FACTOR as binary64,
+		// big-endian as GnuCOBOL writes them by default.
+		require.Equal(t, []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2"+
+			"\x3F\xC0\x00\x00"+"\x40\x04\x00\x00\x00\x00\x00\x00"), got)
 	})
 
 	t.Run("incomplete encoding", func(t *testing.T) {
@@ -1142,23 +1461,32 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 			name: "ascii record",
 			enc:  GnuCOBOLASCII(),
 			// … | 12 34 5C: AMOUNT +12345 | 00 04 2F: QTY 42 | 04 D2: SEQ 1234
-			src: []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2"),
+			// | 3F C0 00 00: RATE 1.5, binary32 | 40 04 …: FACTOR 2.5, binary64
+			src: []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2" +
+				"\x3F\xC0\x00\x00" + "\x40\x04\x00\x00\x00\x00\x00\x00"),
 		},
 		{
 			name: "ascii record with empty fields",
 			enc:  MicroFocusASCII(),
 			// The zero of a signed packed field is C, of an unsigned one F.
 			// SEQ is zero, which is the one binary value this encoding's
-			// native byte order cannot reorder.
+			// native byte order cannot reorder — and RATE and FACTOR are zero
+			// for the same reason, since their IEEE bytes follow that order
+			// too.
 			src: []byte("      " + "            " + "    " + "\x00\x00\x00" +
-				"\x00\x00\x0C" + "\x00\x00\x0F" + "\x00\x00"),
+				"\x00\x00\x0C" + "\x00\x00\x0F" + "\x00\x00" +
+				"\x00\x00\x00\x00" + "\x00\x00\x00\x00\x00\x00\x00\x00"),
 		},
 		{
 			name: "ascii record with full fields",
 			enc:  ConvertedFromEBCDIC(),
 			// 98 76 5D: AMOUNT -98765 | 09 99 9F: QTY 9999 | FB 2E: SEQ -1234,
-			// big-endian because the mainframe that wrote it was
-			src: []byte("A12345WIDGETGRIP123456\xFF\xFE\xFD\x98\x76\x5D\x09\x99\x9F\xFB\x2E"),
+			// big-endian because the mainframe that wrote it was — and for the
+			// same reason RATE and FACTOR are HFP, C1 18 …: -1.5 and
+			// 42 FF …: 255. A converted file keeps the floating point format
+			// the compiler that wrote it used; only the characters changed.
+			src: []byte("A12345WIDGETGRIP123456\xFF\xFE\xFD\x98\x76\x5D\x09\x99\x9F\xFB\x2E" +
+				"\xC1\x18\x00\x00" + "\x42\xFF\x00\x00\x00\x00\x00\x00"),
 		},
 		{
 			name: "ebcdic record",
@@ -1170,11 +1498,15 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 					0x40, 0x40, 0xF4, 0xF2, // "  42"
 				},
 				// The packed bytes are byte-identical to the ASCII case
-				// above: COMP-3 is charset-invariant.
+				// above: COMP-3 is charset-invariant. The floating point ones
+				// are not — these are HFP where the first case is IEEE, and
+				// the same twelve bytes mean different numbers in each.
 				0x00, 0x01, 0xFF, // raw payload
 				0x12, 0x34, 0x5C, // AMOUNT +12345
 				0x00, 0x04, 0x2F, // QTY 42
 				0x04, 0xD2, // SEQ 1234, big-endian as z/OS writes it
+				0x41, 0x18, 0x00, 0x00, // RATE 1.5 as HFP short
+				0x41, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // FACTOR 2.5 as HFP long
 			),
 		},
 	}
@@ -1465,6 +1797,236 @@ func TestRoundTripBinaryUnsignedFullWidth(t *testing.T) {
 	}
 }
 
+// floatRoundTripValues are values every float round-trip runs. Each is exact in
+// binary32, and each has at most three significant hex digits, so each survives
+// the up-to-three bits of fraction that normalizing to a hex digit boundary can
+// cost a COMP-1 field.
+var floatRoundTripValues = []float64{
+	0, 1, -1, 0.5, -0.5, 0.0625, 16, 255, 0.03125, 123.25, 1024, -4096.5,
+}
+
+// TestRoundTripFloat is the value-equality direction for both formats and both
+// widths: a value written and read back under the same encoding must compare
+// equal to what went in.
+func TestRoundTripFloat(t *testing.T) {
+	t.Parallel()
+
+	for _, format := range []FloatFormat{FloatIEEE, FloatHFP} {
+		for _, bo := range binaryOrders {
+			t.Run(format.String()+", "+bo.String(), func(t *testing.T) {
+				t.Parallel()
+
+				enc := floatEncoding(format, bo)
+
+				for _, v := range floatRoundTripValues {
+					var buf bytes.Buffer
+					w, err := NewWriter(&buf, enc)
+					require.NoError(t, err)
+					require.NoError(t, w.WriteFloat32(float32(v)))
+					require.NoError(t, w.WriteFloat64(v))
+					require.Equal(t, int64(comp1Width+comp2Width), w.Offset())
+
+					r, err := NewReader(bytes.NewReader(buf.Bytes()), enc)
+					require.NoError(t, err)
+					got32, err := r.ReadFloat32()
+					require.NoError(t, err)
+					require.Equal(t, float32(v), got32)
+					got64, err := r.ReadFloat64()
+					require.NoError(t, err)
+					require.Equal(t, v, got64)
+				}
+			})
+		}
+	}
+}
+
+// TestRoundTripFloatDecodeEncode is the byte-equality direction: bytes read out
+// of a field and written straight back must reproduce them. For HFP that is a
+// real claim rather than a tautology, since the writer always normalizes and
+// the reader accepts more patterns than the writer emits — every pattern here
+// is one the writer would have produced.
+func TestRoundTripFloatDecodeEncode(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		format FloatFormat
+		short  []byte
+		long   []byte
+	}{
+		{
+			name:   "hfp one",
+			format: FloatHFP,
+			short:  []byte{0x41, 0x10, 0x00, 0x00},
+			long:   []byte{0x41, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name:   "hfp negative, every fraction digit in use",
+			format: FloatHFP,
+			short:  []byte{0xC2, 0x7B, 0x40, 0x00},
+			long:   []byte{0xC2, 0x7B, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name:   "hfp true zero",
+			format: FloatHFP,
+			short:  []byte{0x00, 0x00, 0x00, 0x00},
+			long:   []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name: "hfp fraction filled to the last bit a float64 holds",
+			// The long form sits at the top of the exponent range with its last
+			// three fraction bits clear, which is what keeps it inside a
+			// float64's 53-bit significand — HFP long carries 56. The short
+			// form is not at the top, because 16^63 is far past a float32.
+			format: FloatHFP,
+			short:  []byte{0x41, 0xFF, 0xFF, 0xFF},
+			long:   []byte{0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF8},
+		},
+		{
+			name:   "ieee one",
+			format: FloatIEEE,
+			short:  []byte{0x3F, 0x80, 0x00, 0x00},
+			long:   []byte{0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name:   "ieee negative fraction",
+			format: FloatIEEE,
+			short:  []byte{0xBE, 0xAA, 0xAA, 0xAB},
+			long:   []byte{0xBF, 0xD5, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// HFP ignores the byte order axis and IEEE follows it, so stating
+			// big-endian is what makes the two rows comparable.
+			enc := floatEncoding(tc.format, binary.BigEndian)
+
+			r, err := NewReader(bytes.NewReader(tc.short), enc)
+			require.NoError(t, err)
+			v32, err := r.ReadFloat32()
+			require.NoError(t, err)
+
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, enc)
+			require.NoError(t, err)
+			require.NoError(t, w.WriteFloat32(v32))
+			require.Equal(t, tc.short, buf.Bytes())
+
+			r, err = NewReader(bytes.NewReader(tc.long), enc)
+			require.NoError(t, err)
+			v64, err := r.ReadFloat64()
+			require.NoError(t, err)
+
+			buf.Reset()
+			w, err = NewWriter(&buf, enc)
+			require.NoError(t, err)
+			require.NoError(t, w.WriteFloat64(v64))
+			require.Equal(t, tc.long, buf.Bytes())
+		})
+	}
+}
+
+// TestRoundTripFloatAcrossDialects converts a float field from one dialect to
+// the other and back, which is the operation a real migration performs: read a
+// z/OS file under [IBMEnterprise], write it under [GnuCOBOLASCII], and the
+// number must survive. It runs both directions, because the two formats are not
+// symmetric — HFP is a base-16 fraction with no implied leading one and IEEE is
+// a base-2 significand with one.
+func TestRoundTripFloatAcrossDialects(t *testing.T) {
+	t.Parallel()
+
+	directions := []struct {
+		name string
+		from Encoding
+		to   Encoding
+	}{
+		{name: "hfp to ieee", from: IBMEnterprise(), to: GnuCOBOLASCII()},
+		{name: "ieee to hfp", from: GnuCOBOLASCII(), to: IBMEnterprise()},
+	}
+
+	for _, d := range directions {
+		t.Run(d.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, v := range floatRoundTripValues {
+				// Write the field as the source dialect spells it.
+				var src bytes.Buffer
+				w, err := NewWriter(&src, d.from)
+				require.NoError(t, err)
+				require.NoError(t, w.WriteFloat32(float32(v)))
+				require.NoError(t, w.WriteFloat64(v))
+
+				// Read it back and write it as the target dialect spells it.
+				r, err := NewReader(bytes.NewReader(src.Bytes()), d.from)
+				require.NoError(t, err)
+				v32, err := r.ReadFloat32()
+				require.NoError(t, err)
+				v64, err := r.ReadFloat64()
+				require.NoError(t, err)
+
+				var dst bytes.Buffer
+				w, err = NewWriter(&dst, d.to)
+				require.NoError(t, err)
+				require.NoError(t, w.WriteFloat32(v32))
+				require.NoError(t, w.WriteFloat64(v64))
+
+				// The bytes differ — that is the whole point of the axis — and
+				// the numbers do not. Zero is the one value both formats spell
+				// the same way, an all-zero field.
+				if v != 0 {
+					require.NotEqual(t, src.Bytes(), dst.Bytes())
+				}
+
+				r, err = NewReader(bytes.NewReader(dst.Bytes()), d.to)
+				require.NoError(t, err)
+				got32, err := r.ReadFloat32()
+				require.NoError(t, err)
+				got64, err := r.ReadFloat64()
+				require.NoError(t, err)
+
+				require.Equal(t, float32(v), got32)
+				require.Equal(t, v, got64)
+			}
+		})
+	}
+}
+
+// TestRoundTripFloatHFPLongIsExact walks the whole of HFP's exponent range and
+// asserts that a float64 in it survives the long form unchanged. It is what
+// says the documented claim is true: 56 bits of fraction leave room for the
+// three that normalizing to a hex digit boundary can cost a 53-bit significand,
+// so nothing is rounded on the way in.
+func TestRoundTripFloatHFPLongIsExact(t *testing.T) {
+	t.Parallel()
+
+	enc := floatEncoding(FloatHFP, binary.BigEndian)
+
+	// A significand using every bit a float64 has, so that any lost bit shows.
+	const significand = 1.9999999999999998
+
+	for exp := -259; exp <= 251; exp++ {
+		v := math.Ldexp(significand, exp)
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteFloat64(v), "exponent %d", exp)
+		require.NoError(t, w.WriteFloat64(-v), "exponent %d", exp)
+
+		r, err := NewReader(bytes.NewReader(buf.Bytes()), enc)
+		require.NoError(t, err)
+		got, err := r.ReadFloat64()
+		require.NoError(t, err)
+		require.Equal(t, v, got, "exponent %d", exp)
+		gotNeg, err := r.ReadFloat64()
+		require.NoError(t, err)
+		require.Equal(t, -v, gotNeg, "exponent %d", exp)
+	}
+}
+
 // TestRoundTripEncodeDecode is the value-equality direction: a record written
 // and read back must compare equal to what went in.
 func TestRoundTripEncodeDecode(t *testing.T) {
@@ -1486,6 +2048,8 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Amount: 12345,
 				Qty:    42,
 				Seq:    1234,
+				Rate:   1.5,
+				Factor: 2.5,
 			},
 		},
 		{
@@ -1499,6 +2063,10 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Amount: -12345,
 				Qty:    42,
 				Seq:    -1234,
+				// HFP, so both are values whose fraction survives being
+				// normalized to a hex digit boundary.
+				Rate:   -1.5,
+				Factor: -0.03125,
 			},
 		},
 		{
@@ -1525,6 +2093,9 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Amount: -99999,
 				Qty:    9999,
 				Seq:    9999,
+				// IEEE, so the widest value each width holds is in range.
+				Rate:   math.MaxFloat32,
+				Factor: math.MaxFloat64,
 			},
 		},
 		{
@@ -1538,6 +2109,10 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Amount: -1,
 				Qty:    1,
 				Seq:    -1,
+				// A value binary32 cannot spell exactly still round-trips,
+				// because it is the same format on the way back.
+				Rate:   -0.1,
+				Factor: 0.1,
 			},
 		},
 	}

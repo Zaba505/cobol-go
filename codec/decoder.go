@@ -7,7 +7,9 @@ package codec
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -501,6 +503,86 @@ func (r *Reader) readBinaryBig(digits int, t Truncation) (*big.Int, error) {
 		}
 	}
 	return v, nil
+}
+
+// ReadFloat32 reads the next floating point (COMP-1) field as a float32,
+// consuming 4 bytes.
+//
+// COMP-1 takes no PICTURE — the usage alone fixes the format — so this
+// accessor takes no digit count and there is no scale to apply. It is the one
+// numeric family in this package whose width is not a function of a digit
+// count.
+//
+// What the four bytes mean comes entirely from [Encoding.Float], which is
+// required and never inferred. Under [FloatIEEE] they are binary32 in the order
+// [Encoding.ByteOrder] declares. Under [FloatHFP] they are IBM hexadecimal
+// floating point and big-endian *regardless* of that axis: HFP predates any
+// little-endian IBM platform and has no little-endian form, so byte order is
+// not a question a COMP-1 field in that format asks.
+//
+// The two formats read each other's bytes without complaint. IEEE 1.0 is
+// 3F 80 00 00 and reads as 0.03125 under HFP; HFP 1.0 is 41 10 00 00 and reads
+// as 9.0 under IEEE. Neither is an error, a NaN or an out-of-range value — they
+// are plausible numbers that pass every check downstream, which is why the axis
+// has no default.
+//
+// HFP's exponent range is far wider than binary32's, so a COMP-1 field may
+// legitimately hold a value no float32 expresses. That is a [FloatRangeError]
+// rather than an infinity or a zero; see [FloatRangeError] for why it is not
+// simply returned.
+func (r *Reader) ReadFloat32() (float32, error) {
+	start := r.off
+	b, err := r.read(comp1Width)
+	if err != nil {
+		return 0, err
+	}
+	if r.enc.Float == FloatIEEE {
+		return math.Float32frombits(r.enc.ByteOrder.Uint32(b)), nil
+	}
+	v := floatFromHFP(uint64(binary.BigEndian.Uint32(b)), comp1Width)
+	f := float32(v)
+	reason := ""
+	switch {
+	case math.IsInf(float64(f), 0):
+		reason = "overflows a float32"
+	case f == 0 && v != 0:
+		reason = "underflows a float32 to zero"
+	default:
+		return f, nil
+	}
+	return 0, &OffsetError{
+		Offset: start,
+		Err: FloatRangeError{
+			Value:  strconv.FormatFloat(v, 'g', -1, 64),
+			Format: FloatHFP,
+			Width:  comp1Width,
+			Reason: reason,
+		},
+	}
+}
+
+// ReadFloat64 reads the next floating point (COMP-2) field as a float64,
+// consuming 8 bytes.
+//
+// It is [Reader.ReadFloat32] one width up, and everything that accessor says
+// about [Encoding.Float], about HFP being big-endian regardless of
+// [Encoding.ByteOrder], and about the two formats reading each other silently
+// holds here unchanged.
+//
+// It has no range failure. HFP's range, 16^-65 to 16^63, sits well inside a
+// float64's, so every COMP-2 field decodes to a number. HFP long carries 56
+// bits of fraction against a float64's 53, so a value using the last three is
+// rounded to nearest on the way out — the one place in this package a decoded
+// number is not exact.
+func (r *Reader) ReadFloat64() (float64, error) {
+	b, err := r.read(comp2Width)
+	if err != nil {
+		return 0, err
+	}
+	if r.enc.Float == FloatIEEE {
+		return math.Float64frombits(r.enc.ByteOrder.Uint64(b)), nil
+	}
+	return floatFromHFP(binary.BigEndian.Uint64(b), comp2Width), nil
 }
 
 // Unmarshal reads data into v under the given encoding.

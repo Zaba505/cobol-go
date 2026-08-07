@@ -18,10 +18,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testRecord is a seven-field record exercising every accessor the package
-// currently has: two left-justified alphanumeric fields, a JUSTIFIED RIGHT one,
-// a raw byte field, a signed packed decimal field, an unsigned one and a signed
-// binary one. It stands in for the code a generator will emit, for
+// testRecord is a nine-field record exercising every accessor family the
+// package currently has: two left-justified alphanumeric fields, a JUSTIFIED
+// RIGHT one, a raw byte field, a signed packed decimal field, an unsigned one,
+// a signed binary one and the two floating point widths. It stands in for the
+// code a generator will emit, for
 //
 //	01 TEST-RECORD.
 //	   05 ID     PIC X(6).
@@ -31,6 +32,10 @@ import (
 //	   05 AMOUNT PIC S9(5) COMP-3.
 //	   05 QTY    PIC 9(4)  COMP-3.
 //	   05 SEQ    PIC S9(4) COMP.
+//	   05 RATE   COMP-1.
+//	   05 FACTOR COMP-2.
+//
+// RATE and FACTOR carry no PICTURE, because COMP-1 and COMP-2 do not take one.
 type testRecord struct {
 	ID     string
 	Name   string
@@ -39,6 +44,8 @@ type testRecord struct {
 	Amount int64
 	Qty    int32
 	Seq    int16
+	Rate   float32
+	Factor float64
 }
 
 const (
@@ -51,12 +58,14 @@ const (
 	testRecordSeqDigits    = 4
 )
 
-// testRecordWidth is the record's length in bytes, packed and binary fields
-// included. SEQ contributes two bytes and not four: a binary field's width is a
-// staircase in its digit count, not the digit count itself.
+// testRecordWidth is the record's length in bytes, packed, binary and floating
+// point fields included. SEQ contributes two bytes and not four: a binary
+// field's width is a staircase in its digit count, not the digit count itself.
+// RATE and FACTOR contribute a fixed four and eight, since neither has a digit
+// count for a width to depend on.
 var testRecordWidth = testRecordIDWidth + testRecordNameWidth + testRecordCodeWidth +
 	testRecordRawWidth + packedWidth(testRecordAmountDigits) + packedWidth(testRecordQtyDigits) +
-	binaryWidth(testRecordSeqDigits)
+	binaryWidth(testRecordSeqDigits) + comp1Width + comp2Width
 
 // MarshalCOBOL implements the [Marshaler] interface.
 func (r *testRecord) MarshalCOBOL(w *Writer) error {
@@ -78,7 +87,13 @@ func (r *testRecord) MarshalCOBOL(w *Writer) error {
 	if err := w.WritePackedInt32(r.Qty, testRecordQtyDigits, Unsigned); err != nil {
 		return err
 	}
-	return w.WriteBinaryInt16(r.Seq, testRecordSeqDigits, Signed)
+	if err := w.WriteBinaryInt16(r.Seq, testRecordSeqDigits, Signed); err != nil {
+		return err
+	}
+	if err := w.WriteFloat32(r.Rate); err != nil {
+		return err
+	}
+	return w.WriteFloat64(r.Factor)
 }
 
 // UnmarshalCOBOL implements the [Unmarshaler] interface.
@@ -102,7 +117,13 @@ func (r *testRecord) UnmarshalCOBOL(rd *Reader) error {
 	if r.Qty, err = rd.ReadPackedInt32(testRecordQtyDigits); err != nil {
 		return err
 	}
-	r.Seq, err = rd.ReadBinaryInt16(testRecordSeqDigits)
+	if r.Seq, err = rd.ReadBinaryInt16(testRecordSeqDigits); err != nil {
+		return err
+	}
+	if r.Rate, err = rd.ReadFloat32(); err != nil {
+		return err
+	}
+	r.Factor, err = rd.ReadFloat64()
 	return err
 }
 
@@ -127,6 +148,18 @@ func inByteOrder(bo binary.ByteOrder, be []byte) []byte {
 	b := slices.Clone(be)
 	orderBinaryBytes(bo, b)
 	return b
+}
+
+// floatEncoding returns an encoding whose floating point format is f and whose
+// byte order is bo. Those are the only two axes a COMP-1 or COMP-2 field reads,
+// and the named bundles pin the pair together — every one of them is either
+// IEEE with a platform order or HFP big-endian — where the point of these tests
+// is that the two axes are independent.
+func floatEncoding(f FloatFormat, bo binary.ByteOrder) Encoding {
+	enc := GnuCOBOLASCII()
+	enc.Float = f
+	enc.ByteOrder = bo
+	return enc
 }
 
 func TestNewReader(t *testing.T) {
@@ -1109,6 +1142,422 @@ func TestReaderReadBinaryErrors(t *testing.T) {
 	})
 }
 
+// TestReaderReadFloatIEEE reads binary32 and binary64 in both byte orders. The
+// bytes are stated big-endian and reversed for the little-endian subtest, which
+// is the axis a COMP-1 field does read — unlike HFP, which is big-endian
+// whatever [Encoding.ByteOrder] says.
+func TestReaderReadFloatIEEE(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		be32 []byte
+		be64 []byte
+		want float64
+	}{
+		{
+			name: "one",
+			be32: []byte{0x3F, 0x80, 0x00, 0x00},
+			be64: []byte{0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: 1,
+		},
+		{
+			name: "zero",
+			be32: []byte{0x00, 0x00, 0x00, 0x00},
+			be64: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: 0,
+		},
+		{
+			name: "negative one",
+			be32: []byte{0xBF, 0x80, 0x00, 0x00},
+			be64: []byte{0xBF, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: -1,
+		},
+		{
+			name: "one and a half",
+			be32: []byte{0x3F, 0xC0, 0x00, 0x00},
+			be64: []byte{0x3F, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: 1.5,
+		},
+		{
+			name: "a thirty-second",
+			be32: []byte{0x3D, 0x00, 0x00, 0x00},
+			be64: []byte{0x3F, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: 0.03125,
+		},
+		{
+			name: "nine",
+			be32: []byte{0x41, 0x10, 0x00, 0x00},
+			be64: []byte{0x40, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: 9,
+		},
+	}
+
+	for _, tc := range testCases {
+		for _, bo := range binaryOrders {
+			t.Run(tc.name+", "+bo.String(), func(t *testing.T) {
+				t.Parallel()
+
+				enc := floatEncoding(FloatIEEE, bo)
+
+				r, err := NewReader(bytes.NewReader(inByteOrder(bo, tc.be32)), enc)
+				require.NoError(t, err)
+				got32, err := r.ReadFloat32()
+				require.NoError(t, err)
+				require.Equal(t, float32(tc.want), got32)
+				require.Equal(t, int64(comp1Width), r.Offset())
+
+				r, err = NewReader(bytes.NewReader(inByteOrder(bo, tc.be64)), enc)
+				require.NoError(t, err)
+				got64, err := r.ReadFloat64()
+				require.NoError(t, err)
+				require.Equal(t, tc.want, got64)
+				require.Equal(t, int64(comp2Width), r.Offset())
+			})
+		}
+	}
+}
+
+// TestReaderReadFloatHFP reads known IBM hexadecimal floating point bit
+// patterns. Between them they cover the three parts of the format the
+// conversion has to get right: the sign bit, the excess-64 base-16 exponent and
+// the normalized fraction with no implied leading one.
+func TestReaderReadFloatHFP(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name  string
+		short []byte
+		long  []byte
+		want  float64
+	}{
+		{
+			name: "true zero is the all-zero field",
+			// Exponent and fraction alike; HFP has no implied leading one to
+			// make a zero fraction denote anything else.
+			short: []byte{0x00, 0x00, 0x00, 0x00},
+			long:  []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want:  0,
+		},
+		{
+			name: "one",
+			// 0.1₁₆ × 16^1: exponent 0x41 is 65, which is 1 in excess-64.
+			short: []byte{0x41, 0x10, 0x00, 0x00},
+			long:  []byte{0x41, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want:  1,
+		},
+		{
+			name: "negative one is the same field with the sign bit set",
+			// The top bit of 0x41 is the sign, so the exponent reads 0x41
+			// either way: HFP is sign-magnitude, not two's complement.
+			short: []byte{0xC1, 0x10, 0x00, 0x00},
+			long:  []byte{0xC1, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want:  -1,
+		},
+		{
+			name: "a half",
+			// 0.8₁₆ × 16^0: the fraction is a base-16 fraction, so its leading
+			// digit 8 is a half rather than the 1.0 an IEEE significand starts
+			// from.
+			short: []byte{0x40, 0x80, 0x00, 0x00},
+			long:  []byte{0x40, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want:  0.5,
+		},
+		{
+			name: "a sixteenth is the smallest normalized fraction",
+			// 0.1₁₆ × 16^0. Any smaller fraction would leave the leading hex
+			// digit zero, which is what normalization forbids.
+			short: []byte{0x40, 0x10, 0x00, 0x00},
+			long:  []byte{0x40, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want:  0.0625,
+		},
+		{
+			name: "sixteen steps the exponent, not the fraction",
+			// 0.1₁₆ × 16^2 — the same fraction as one, one exponent up.
+			short: []byte{0x42, 0x10, 0x00, 0x00},
+			long:  []byte{0x42, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want:  16,
+		},
+		{
+			name: "two hundred and fifty-five fills both fraction digits",
+			// 0.FF₁₆ × 16^2.
+			short: []byte{0x42, 0xFF, 0x00, 0x00},
+			long:  []byte{0x42, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want:  255,
+		},
+		{
+			name: "a fraction below one sixteenth borrows an exponent",
+			// 0.8₁₆ × 16^-1: exponent 0x3F is 63, which is -1 in excess-64.
+			// These are also the bytes IEEE spells 1.0 with, which is the
+			// worked example in codec/SPEC.md.
+			short: []byte{0x3F, 0x80, 0x00, 0x00},
+			long:  []byte{0x3F, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want:  0.03125,
+		},
+		{
+			name: "a value using every fraction digit of the short form",
+			// 0.7B4₁₆ × 16^2.
+			short: []byte{0x42, 0x7B, 0x40, 0x00},
+			long:  []byte{0x42, 0x7B, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want:  123.25,
+		},
+		{
+			name: "an unnormalized field decodes rather than failing",
+			// 0.01₁₆ × 16^2 is 1.0 written with a zero leading digit. Nothing
+			// here writes one, but z/OS arithmetic produces them, and the
+			// formula gives the right answer without any special case.
+			short: []byte{0x42, 0x01, 0x00, 0x00},
+			long:  []byte{0x42, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want:  1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// The byte order axis is stated little-endian deliberately: HFP is
+			// big-endian regardless of it, and a reader that consulted the axis
+			// would read every one of these backwards.
+			enc := floatEncoding(FloatHFP, binary.LittleEndian)
+
+			r, err := NewReader(bytes.NewReader(tc.short), enc)
+			require.NoError(t, err)
+			got32, err := r.ReadFloat32()
+			require.NoError(t, err)
+			require.Equal(t, float32(tc.want), got32)
+			require.Equal(t, int64(comp1Width), r.Offset())
+
+			r, err = NewReader(bytes.NewReader(tc.long), enc)
+			require.NoError(t, err)
+			got64, err := r.ReadFloat64()
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got64)
+			require.Equal(t, int64(comp2Width), r.Offset())
+		})
+	}
+}
+
+// TestReaderReadFloatHFPExtremes reads the two ends of HFP's range, which is
+// far wider than binary32's at both of them. A float64 takes them; a float32
+// does not, and reports rather than returning an infinity or a zero.
+func TestReaderReadFloatHFPExtremes(t *testing.T) {
+	t.Parallel()
+
+	enc := floatEncoding(FloatHFP, binary.BigEndian)
+
+	t.Run("the largest short value overflows a float32", func(t *testing.T) {
+		t.Parallel()
+
+		// 0.FFFFFF₁₆ × 16^63, about 7.2e75, against a float32 that stops at
+		// about 3.4e38.
+		r, err := NewReader(bytes.NewReader([]byte{0x7F, 0xFF, 0xFF, 0xFF}), enc)
+		require.NoError(t, err)
+
+		_, err = r.ReadFloat32()
+
+		var rangeErr FloatRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, FloatHFP, rangeErr.Format)
+		require.Equal(t, comp1Width, rangeErr.Width)
+		require.Equal(t, "overflows a float32", rangeErr.Reason)
+
+		// The offset names the byte the field starts at, not the one it ends
+		// at: the error is a statement about the whole field.
+		var offErr *OffsetError
+		require.ErrorAs(t, err, &offErr)
+		require.Zero(t, offErr.Offset)
+	})
+
+	t.Run("the smallest short value underflows a float32", func(t *testing.T) {
+		t.Parallel()
+
+		// 0.1₁₆ × 16^-64, about 5.4e-79, against a float32 whose smallest
+		// subnormal is about 1.4e-45.
+		r, err := NewReader(bytes.NewReader([]byte{0x00, 0x10, 0x00, 0x00}), enc)
+		require.NoError(t, err)
+
+		_, err = r.ReadFloat32()
+
+		var rangeErr FloatRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, "underflows a float32 to zero", rangeErr.Reason)
+	})
+
+	t.Run("a float64 takes both ends", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader([]byte{
+			0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+			0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		}), enc)
+		require.NoError(t, err)
+
+		// 16^63 and 16^-65, the two ends of HFP's range. The largest reads as
+		// 2^252 exactly rather than one ulp below it, because HFP long's 56
+		// bits of fraction are three more than a float64 holds.
+		largest, err := r.ReadFloat64()
+		require.NoError(t, err)
+		require.Equal(t, math.Ldexp(1, 252), largest)
+
+		smallest, err := r.ReadFloat64()
+		require.NoError(t, err)
+		require.Equal(t, math.Ldexp(1, -260), smallest)
+	})
+}
+
+// TestReaderReadFloatDialectBoundary is the silent-failure test: the same four
+// bytes decode to a different, entirely plausible number under the other
+// format, with no error and nothing a caller could check. It is the table in
+// codec/SPEC.md, "Why this is silent", and the whole argument for
+// [Encoding.Float] having no default.
+func TestReaderReadFloatDialectBoundary(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		src      []byte
+		asIEEE   float32
+		asHFP    float32
+		src64    []byte
+		asIEEE64 float64
+		asHFP64  float64
+	}{
+		{
+			name:     "IEEE one read as HFP is a thirty-second",
+			src:      []byte{0x3F, 0x80, 0x00, 0x00},
+			asIEEE:   1,
+			asHFP:    0.03125,
+			src64:    []byte{0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			asIEEE64: 1,
+			asHFP64:  0.05859375,
+		},
+		{
+			name:     "HFP one read as IEEE is nine",
+			src:      []byte{0x41, 0x10, 0x00, 0x00},
+			asIEEE:   9,
+			asHFP:    1,
+			src64:    []byte{0x41, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			asIEEE64: 262144,
+			asHFP64:  1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			read32 := func(f FloatFormat) float32 {
+				r, err := NewReader(bytes.NewReader(tc.src), floatEncoding(f, binary.BigEndian))
+				require.NoError(t, err)
+				v, err := r.ReadFloat32()
+				require.NoError(t, err)
+				return v
+			}
+			read64 := func(f FloatFormat) float64 {
+				r, err := NewReader(bytes.NewReader(tc.src64), floatEncoding(f, binary.BigEndian))
+				require.NoError(t, err)
+				v, err := r.ReadFloat64()
+				require.NoError(t, err)
+				return v
+			}
+
+			// Both readings succeed. Neither is a NaN, an infinity or an
+			// out-of-range value; the wrong one is simply a wrong number.
+			require.Equal(t, tc.asIEEE, read32(FloatIEEE))
+			require.Equal(t, tc.asHFP, read32(FloatHFP))
+			require.Equal(t, tc.asIEEE64, read64(FloatIEEE))
+			require.Equal(t, tc.asHFP64, read64(FloatHFP))
+		})
+	}
+}
+
+func TestReaderReadFloatErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an unset float format is rejected at construction", func(t *testing.T) {
+		t.Parallel()
+
+		// There is no default, because reading HFP bytes as IEEE — or the
+		// reverse — produces a plausible wrong number rather than an error, so
+		// the axis has to be settled before a byte is read rather than at the
+		// first COMP-1 field.
+		enc := GnuCOBOLASCII()
+		enc.Float = FloatUnset
+
+		_, err := NewReader(bytes.NewReader(nil), enc)
+
+		var encErr EncodingError
+		require.ErrorAs(t, err, &encErr)
+		require.Equal(t, "Float", encErr.Field)
+
+		_, err = NewWriter(&bytes.Buffer{}, enc)
+		require.ErrorAs(t, err, &encErr)
+		require.Equal(t, "Float", encErr.Field)
+	})
+
+	t.Run("comp-1 field cut short", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader([]byte{0x41, 0x10}), floatEncoding(FloatHFP, binary.BigEndian))
+		require.NoError(t, err)
+
+		_, err = r.ReadFloat32()
+		require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+
+		var offErr *OffsetError
+		require.ErrorAs(t, err, &offErr)
+		require.Equal(t, int64(2), offErr.Offset)
+	})
+
+	t.Run("comp-2 field cut short", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader([]byte{0x41, 0x10, 0x00, 0x00}), floatEncoding(FloatIEEE, binary.BigEndian))
+		require.NoError(t, err)
+
+		_, err = r.ReadFloat64()
+		require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	})
+
+	t.Run("end of stream reports io.EOF", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader(nil), floatEncoding(FloatIEEE, binary.BigEndian))
+		require.NoError(t, err)
+
+		_, err = r.ReadFloat32()
+		require.ErrorIs(t, err, io.EOF)
+		require.NotErrorIs(t, err, io.ErrUnexpectedEOF)
+	})
+
+	t.Run("IEEE carries NaN and infinity through unchanged", func(t *testing.T) {
+		t.Parallel()
+
+		// binary32 and binary64 have encodings for both, so nothing here is
+		// out of range; only HFP has to reject them.
+		src := []byte{
+			0x7F, 0x80, 0x00, 0x00, // +Inf, binary32
+			0xFF, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // -Inf, binary64
+			0x7F, 0xC0, 0x00, 0x00, // NaN, binary32
+		}
+		r, err := NewReader(bytes.NewReader(src), floatEncoding(FloatIEEE, binary.BigEndian))
+		require.NoError(t, err)
+
+		inf32, err := r.ReadFloat32()
+		require.NoError(t, err)
+		require.True(t, math.IsInf(float64(inf32), 1))
+
+		inf64, err := r.ReadFloat64()
+		require.NoError(t, err)
+		require.True(t, math.IsInf(inf64, -1))
+
+		nan32, err := r.ReadFloat32()
+		require.NoError(t, err)
+		require.True(t, math.IsNaN(float64(nan32)))
+	})
+}
+
 func TestReaderOffset(t *testing.T) {
 	t.Parallel()
 
@@ -1220,7 +1669,9 @@ func TestUnmarshal(t *testing.T) {
 
 		// "A12345" | "WIDGET GRIP " | "  42" | 00 01 FF | 12 34 5C | 00 04 2F
 		// | 04 D2: SEQ +1234, big-endian as GnuCOBOL writes it by default
-		data := []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2")
+		// | 3F C0 00 00: RATE 1.5 as binary32 | 40 04 …: FACTOR 2.5 as binary64
+		data := []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2" +
+			"\x3F\xC0\x00\x00" + "\x40\x04\x00\x00\x00\x00\x00\x00")
 		require.Len(t, data, testRecordWidth)
 
 		var got testRecord
@@ -1233,6 +1684,8 @@ func TestUnmarshal(t *testing.T) {
 			Amount: 12345,
 			Qty:    42,
 			Seq:    1234,
+			Rate:   1.5,
+			Factor: 2.5,
 		}, got)
 	})
 
