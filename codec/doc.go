@@ -41,9 +41,21 @@
 //
 // # Scope of this package as it stands
 //
-// [Reader] and [Writer] currently cover alphanumeric and raw byte fields.
-// Zoned decimal, packed decimal, binary and floating-point accessors, and the
-// charset axis beyond [ASCII] and [CP037], arrive in later stories; the
-// [Encoding] axes they need are already declared here so that no field of it
-// ever has to acquire a default retroactively.
+// [Reader] and [Writer] currently cover alphanumeric fields, raw byte fields
+// and packed decimal (COMP-3). Zoned decimal, binary and floating-point
+// accessors, and the charset axis beyond [ASCII] and [CP037], arrive in later
+// stories; the [Encoding] axes they need are already declared here so that no
+// field of it ever has to acquire a default retroactively.
+//
+// # Numeric items carry digits, not scale
+//
+// Every numeric accessor takes the item's digit count and returns the unscaled
+// integer. A PICTURE's V and P positions occupy no storage and are not
+// recoverable from the bytes, so scale is not a decoding input: PIC S9(3)V99
+// COMP-3 holding -123.45 reads as -12345, and a generator emits the scale
+// beside the field as a constant.
+//
+// The writers additionally take a [Signedness], because whether an item's
+// PICTURE carries S selects the sign value stored with it and cannot be
+// recovered from the value being written.
 package codec

@@ -8,6 +8,9 @@ package codec
 import (
 	"bytes"
 	"io"
+	"math/big"
+	"strconv"
+	"strings"
 )
 
 // Writer writes the fields of a COBOL data file to an [io.Writer], one field at
@@ -122,6 +125,101 @@ func (w *Writer) WriteAlphanumericJustified(s string, n int, j Justification) er
 		copy(field[n-len(value):], value)
 	} else {
 		copy(field, value)
+	}
+	return w.write(field)
+}
+
+// WritePackedInt32 writes v as a packed decimal (COMP-3, PACKED-DECIMAL) field
+// of digits digits, exactly ceil((digits+1)/2) bytes wide.
+//
+// digits must be between 1 and 9; see [Reader.ReadPackedInt32] for why the
+// bound belongs to the accessor rather than to the field.
+//
+// s is required and says whether the item's PICTURE carries S, which is what
+// selects the sign nibble: C or D when [Signed], F when [Unsigned]. It has no
+// default, because neither choice is recoverable from v — see [Signedness].
+//
+// v is the unscaled integer: a PIC S9(3)V99 COMP-3 item holding -123.45 is
+// written as -12345 with digits 5, since V occupies no storage.
+func (w *Writer) WritePackedInt32(v int32, digits int, s Signedness) error {
+	return w.writePackedInt(int64(v), digits, maxPackedInt32Digits, s)
+}
+
+// WritePackedInt64 writes v as a packed decimal field of digits digits,
+// exactly ceil((digits+1)/2) bytes wide. digits must be between 1 and 18; the
+// 19-to-31 digit range is written with [Writer.WritePackedBig]. s is required,
+// as it is on [Writer.WritePackedInt32], and for the same reason.
+func (w *Writer) WritePackedInt64(v int64, digits int, s Signedness) error {
+	return w.writePackedInt(v, digits, maxPackedInt64Digits, s)
+}
+
+// WritePackedBig writes v as a packed decimal field of digits digits, exactly
+// ceil((digits+1)/2) bytes wide. digits must be between 1 and 31, the IBM
+// Enterprise COBOL maximum. s is required, as it is on
+// [Writer.WritePackedInt32], and for the same reason.
+//
+// A nil v is [ErrNilValue] rather than a zero: an absent number and the number
+// zero are different things, and a field is not written from a guess.
+func (w *Writer) WritePackedBig(v *big.Int, digits int, s Signedness) error {
+	if v == nil {
+		return &OffsetError{Offset: w.off, Err: ErrNilValue}
+	}
+	return w.writePacked(v.String(), v.Sign() < 0, digits, maxPackedDigits, s)
+}
+
+// writePackedInt is the shared body of the two integer packed writers, whose
+// only difference is the digit count they accept.
+func (w *Writer) writePackedInt(v int64, digits, max int, s Signedness) error {
+	// Formatted rather than negated, so that the most negative int64 is
+	// written like any other value instead of overflowing on its way out.
+	return w.writePacked(strconv.FormatInt(v, 10), v < 0, digits, max, s)
+}
+
+// writePacked builds and writes one packed decimal field from the decimal
+// spelling of a value.
+//
+// The whole field is validated and built before a byte of it is written, so a
+// rejected value writes nothing and cannot leave a half-field behind to
+// desynchronize the record.
+func (w *Writer) writePacked(text string, negative bool, digits, max int, s Signedness) error {
+	if !s.valid() {
+		return &OffsetError{Offset: w.off, Err: SignednessError{Signedness: s}}
+	}
+	if digits < 1 || digits > max {
+		return &OffsetError{
+			Offset: w.off,
+			Err:    PackedDigitCountError{Digits: digits, Max: max},
+		}
+	}
+	magnitude := strings.TrimPrefix(text, "-")
+	if len(magnitude) > digits || (negative && s == Unsigned) {
+		return &OffsetError{
+			Offset: w.off,
+			Err:    PackedRangeError{Value: text, Digits: digits, Signedness: s},
+		}
+	}
+
+	// Nibbles high first. Everything ahead of the digits stays zero, which
+	// covers both the high-order zeros the value does not fill and the pad
+	// nibble an even digit count leaves over.
+	width := packedWidth(digits)
+	nibbles := make([]byte, 2*width)
+	first := len(nibbles) - 1 - len(magnitude)
+	for i := 0; i < len(magnitude); i++ {
+		nibbles[first+i] = magnitude[i] - '0'
+	}
+	switch {
+	case s == Unsigned:
+		nibbles[len(nibbles)-1] = packedSignUnsigned
+	case negative:
+		nibbles[len(nibbles)-1] = packedSignNegative
+	default:
+		nibbles[len(nibbles)-1] = packedSignPositive
+	}
+
+	field := make([]byte, width)
+	for i := range field {
+		field[i] = nibbles[2*i]<<4 | nibbles[2*i+1]
 	}
 	return w.write(field)
 }

@@ -8,6 +8,7 @@ package codec
 import (
 	"bytes"
 	"io"
+	"math/big"
 	"strings"
 )
 
@@ -126,6 +127,134 @@ func (r *Reader) ReadAlphanumericJustified(n int, j Justification) (string, erro
 		return strings.TrimLeft(sb.String(), " "), nil
 	}
 	return strings.TrimRight(sb.String(), " "), nil
+}
+
+// ReadPackedInt32 reads the next packed decimal (COMP-3, PACKED-DECIMAL) field
+// of digits digits as an int32, consuming ceil((digits+1)/2) bytes.
+//
+// digits must be between 1 and 9, the most that always fits an int32; a wider
+// field is a [PackedDigitCountError] rather than a silent overflow, and is read
+// with [Reader.ReadPackedInt64] or [Reader.ReadPackedBig].
+//
+// The return is the unscaled integer. A PICTURE's V and P positions occupy no
+// storage and are not recoverable from the bytes, so scale is not a decoding
+// input: PIC S9(3)V99 COMP-3 holding -123.45 reads as -12345, and a generator
+// emits the scale beside the field as a constant.
+func (r *Reader) ReadPackedInt32(digits int) (int32, error) {
+	v, err := r.readPackedInt(digits, maxPackedInt32Digits)
+	return int32(v), err
+}
+
+// ReadPackedInt64 reads the next packed decimal field of digits digits as an
+// int64, consuming ceil((digits+1)/2) bytes.
+//
+// digits must be between 1 and 18, the most that always fits an int64. The 19
+// to 31 digit range an IBM packed item may declare is read with
+// [Reader.ReadPackedBig]. As with every numeric accessor the return is the
+// unscaled integer; see [Reader.ReadPackedInt32].
+func (r *Reader) ReadPackedInt64(digits int) (int64, error) {
+	return r.readPackedInt(digits, maxPackedInt64Digits)
+}
+
+// ReadPackedBig reads the next packed decimal field of digits digits as a
+// [math/big.Int], consuming ceil((digits+1)/2) bytes.
+//
+// digits must be between 1 and 31, the IBM Enterprise COBOL maximum for a
+// packed item. This is the accessor for the 19-to-31 digit range no Go integer
+// type holds; below 19 digits the int32 and int64 accessors say the same thing
+// without allocating. As with every numeric accessor the return is the unscaled
+// integer; see [Reader.ReadPackedInt32].
+func (r *Reader) ReadPackedBig(digits int) (*big.Int, error) {
+	ds, negative, err := r.readPackedDigits(digits, maxPackedDigits)
+	if err != nil {
+		return nil, err
+	}
+	v := new(big.Int)
+	ten := big.NewInt(10)
+	d := new(big.Int)
+	for _, n := range ds {
+		v.Mul(v, ten)
+		v.Add(v, d.SetInt64(int64(n)))
+	}
+	if negative {
+		v.Neg(v)
+	}
+	return v, nil
+}
+
+// readPackedInt is the shared body of the two integer packed accessors, whose
+// only difference is the digit count they accept.
+func (r *Reader) readPackedInt(digits, max int) (int64, error) {
+	ds, negative, err := r.readPackedDigits(digits, max)
+	if err != nil {
+		return 0, err
+	}
+	var v int64
+	for _, d := range ds {
+		v = v*10 + int64(d)
+	}
+	if negative {
+		v = -v
+	}
+	return v, nil
+}
+
+// readPackedDigits reads one packed decimal field and returns its digits, most
+// significant first and one per element with values 0-9, together with whether
+// the sign nibble made it negative.
+//
+// Every nibble is validated: the pad, each digit, and the sign. Rejecting them
+// is the only defence a reader has against a record whose offsets have slipped,
+// and against a file whose packed fields were destroyed by a naive EBCDIC
+// character conversion — see codec/SPEC.md, "The COMP-3 conversion trap".
+//
+// A nibble error carries the offset of the byte the nibble sits in rather than
+// the offset the field ended at, which is the one place in this package an
+// [OffsetError] is stamped with something other than the current position: a
+// bad nibble is diagnosable only if the byte holding it can be found.
+func (r *Reader) readPackedDigits(digits, max int) ([]byte, bool, error) {
+	if digits < 1 || digits > max {
+		return nil, false, &OffsetError{
+			Offset: r.off,
+			Err:    PackedDigitCountError{Digits: digits, Max: max},
+		}
+	}
+	start := r.off
+	b, err := r.read(packedWidth(digits))
+	if err != nil {
+		return nil, false, err
+	}
+	// nibbleAt is the offset of the byte holding nibble i, counted from the
+	// first byte of the field.
+	nibbleAt := func(i int) int64 { return start + int64(i/2) }
+
+	nibbles := make([]byte, 0, 2*len(b))
+	for _, c := range b {
+		nibbles = append(nibbles, c>>4, c&0x0F)
+	}
+	// The pad nibble exists exactly when the digit count is even, because
+	// digits+1 nibbles is then odd and rounds up to a whole byte.
+	if digits%2 == 0 && nibbles[0] != 0 {
+		return nil, false, &OffsetError{
+			Offset: nibbleAt(0),
+			Err:    PackedPadError{Nibble: nibbles[0]},
+		}
+	}
+	first := len(nibbles) - 1 - digits
+	ds := nibbles[first : len(nibbles)-1]
+	for i, d := range ds {
+		if d > 9 {
+			return nil, false, &OffsetError{
+				Offset: nibbleAt(first + i),
+				Err:    PackedDigitError{Nibble: d},
+			}
+		}
+	}
+	negative, err := packedSignIsNegative(nibbles[len(nibbles)-1])
+	if err != nil {
+		return nil, false, &OffsetError{Offset: nibbleAt(len(nibbles) - 1), Err: err}
+	}
+	return ds, negative, nil
 }
 
 // Unmarshal reads data into v under the given encoding.

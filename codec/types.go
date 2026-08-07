@@ -402,6 +402,101 @@ func (j Justification) String() string {
 	return "Justification(" + strconv.Itoa(int(j)) + ")"
 }
 
+// Signedness is whether a numeric item carries an operational sign — the S in
+// its PICTURE — and therefore which sign value is stored with it.
+//
+// It is a third, independent thing from the two the SPEC's naming note already
+// separates. *Sign convention* ([SignConvention]) is a property of the file in
+// hand; *sign position* (LEADING, TRAILING, SEPARATE) is a property of the
+// copybook and applies to USAGE DISPLAY only; Signedness is a property of the
+// copybook that applies to every numeric usage. `PIC S9(5) COMP-3` is signed
+// and stores C or D; `PIC 9(5) COMP-3` is unsigned and stores F. See
+// codec/SPEC.md, "Sign".
+//
+// Unlike [Justification], whose zero value is COBOL's own default, Signedness
+// has an invalid zero value and every writer takes it explicitly. There is no
+// safe default: writing a signed field as unsigned discards the sign of every
+// negative value, and writing an unsigned field as signed puts a C where a
+// consumer expects an F. Neither is recoverable from the value being written,
+// so the caller states it.
+type Signedness int
+
+const (
+	// SignednessUnset is the zero value. It names neither, and every writer
+	// that takes a Signedness rejects it.
+	SignednessUnset Signedness = iota
+	// Signed is an item whose PICTURE carries S: it stores C when positive
+	// and D when negative.
+	Signed
+	// Unsigned is an item whose PICTURE has no S: it stores F, and a
+	// negative value is rejected rather than silently stored as its
+	// absolute value.
+	Unsigned
+)
+
+// String implements the [fmt.Stringer] interface.
+func (s Signedness) String() string {
+	switch s {
+	case Signed:
+		return "signed"
+	case Unsigned:
+		return "unsigned"
+	case SignednessUnset:
+		return "unset"
+	}
+	return "Signedness(" + strconv.Itoa(int(s)) + ")"
+}
+
+// valid reports whether s names a member rather than the zero value or an
+// out-of-range one.
+func (s Signedness) valid() bool {
+	return s >= Signed && s <= Unsigned
+}
+
+// Digit counts a packed decimal accessor accepts. The limit is the range of
+// the Go type the accessor returns and not a property of the field: 9 digits
+// is the most that always fits an int32 and 18 the most that always fits an
+// int64, which is the same digit-count staircase COBOL uses to pick a binary
+// width. 31 is the IBM Enterprise COBOL maximum for a packed item, reachable
+// through [Reader.ReadPackedBig] and [Writer.WritePackedBig].
+const (
+	maxPackedInt32Digits = 9
+	maxPackedInt64Digits = 18
+	maxPackedDigits      = 31
+)
+
+// Packed decimal sign nibbles. A writer emits only these three; a reader also
+// accepts packedSignA and packedSignE as positive and packedSignB as negative,
+// which is what z/Architecture decimal instructions do. See codec/SPEC.md,
+// "Sign nibble".
+const (
+	packedSignPositive byte = 0x0C
+	packedSignNegative byte = 0x0D
+	packedSignUnsigned byte = 0x0F
+)
+
+// packedWidth reports the byte width of a packed decimal field holding digits
+// digits: ceil((digits + 1) / 2), one nibble per digit plus the sign nibble,
+// rounded up to a whole byte. It is the whole of the packed size model, and it
+// does not depend on scale.
+func packedWidth(digits int) int { return (digits + 2) / 2 }
+
+// packedSignIsNegative reports whether a sign nibble means the value is
+// negative, rejecting the nibbles 0-9 that mean nothing at all.
+//
+// The accepted set is wider than the emitted one: A, C, E and F are positive
+// and B and D are negative, because z/Architecture decimal instructions accept
+// more sign values than they generate and real files carry them.
+func packedSignIsNegative(nibble byte) (bool, error) {
+	switch nibble {
+	case 0x0A, 0x0C, 0x0E, 0x0F:
+		return false, nil
+	case 0x0B, 0x0D:
+		return true, nil
+	}
+	return false, PackedSignError{Nibble: nibble}
+}
+
 // Marshaler is implemented by a value that can write itself to a data file.
 // Generated record types implement it; the [Writer] it is handed already knows
 // the [Encoding], so an implementation never chooses one.
@@ -522,4 +617,103 @@ type JustificationError struct {
 // Error implements the [error] interface.
 func (e JustificationError) Error() string {
 	return fmt.Sprintf("invalid justification %d", int(e.Justification))
+}
+
+// SignednessError is returned when a [Signedness] names no member, which
+// includes the zero value: a writer of a numeric item will not guess whether
+// the item's PICTURE carries S.
+type SignednessError struct {
+	// Signedness is the value that was passed.
+	Signedness Signedness
+}
+
+// Error implements the [error] interface.
+func (e SignednessError) Error() string {
+	return fmt.Sprintf("invalid signedness %d: an item is either Signed or Unsigned", int(e.Signedness))
+}
+
+// PackedDigitCountError is returned when a packed decimal digit count is
+// outside the range the accessor accepts.
+//
+// The upper bound belongs to the accessor rather than to the field: 9 digits
+// for the int32 accessors, 18 for the int64 ones and 31 — the IBM Enterprise
+// COBOL maximum — for the [math/big.Int] ones. A field wider than the accessor
+// asked for is a call that would have silently overflowed.
+type PackedDigitCountError struct {
+	// Digits is the digit count that was asked for.
+	Digits int
+	// Max is the largest digit count this accessor accepts.
+	Max int
+}
+
+// Error implements the [error] interface.
+func (e PackedDigitCountError) Error() string {
+	return fmt.Sprintf("invalid packed decimal digit count %d: must be between 1 and %d", e.Digits, e.Max)
+}
+
+// PackedPadError is returned when the pad nibble of a packed decimal field is
+// not zero.
+//
+// The pad nibble is the high nibble of the first byte, and it exists only when
+// the digit count is even. A non-zero pad is the cheapest available signal
+// that the field offset is wrong — that the copybook being read does not
+// describe the file in hand — which is why it is validated rather than
+// skipped.
+type PackedPadError struct {
+	// Nibble is the pad nibble that was found, which is between 0x1 and 0xF.
+	Nibble byte
+}
+
+// Error implements the [error] interface.
+func (e PackedPadError) Error() string {
+	return fmt.Sprintf("packed decimal pad nibble is %X, not 0", e.Nibble)
+}
+
+// PackedDigitError is returned when a digit nibble of a packed decimal field
+// holds a value above 9, which no writer produces and which denotes no digit.
+type PackedDigitError struct {
+	// Nibble is the offending nibble, which is between 0xA and 0xF.
+	Nibble byte
+}
+
+// Error implements the [error] interface.
+func (e PackedDigitError) Error() string {
+	return fmt.Sprintf("invalid packed decimal digit nibble %X: digit nibbles are 0-9", e.Nibble)
+}
+
+// PackedSignError is returned when the sign nibble of a packed decimal field
+// is one of 0-9, none of which names a sign.
+//
+// A, B, C, D, E and F all name one and are all accepted on read, so this
+// rejects exactly the nibbles that cannot have come from a packed field.
+type PackedSignError struct {
+	// Nibble is the offending nibble, which is between 0x0 and 0x9.
+	Nibble byte
+}
+
+// Error implements the [error] interface.
+func (e PackedSignError) Error() string {
+	return fmt.Sprintf("invalid packed decimal sign nibble %X: sign nibbles are A-F", e.Nibble)
+}
+
+// PackedRangeError is returned when a value cannot be written into the packed
+// decimal field it was given: it has more digits than the field holds, or it is
+// negative and the field is [Unsigned].
+//
+// Both are loud for the reason [FieldTooLongError] is. A COBOL MOVE truncates
+// high-order digits and stores a negative value into an unsigned item as its
+// absolute value; a codec doing either would write a record that no longer says
+// what the caller asked it to.
+type PackedRangeError struct {
+	// Value is the decimal spelling of the value that did not fit.
+	Value string
+	// Digits is the number of digits the field holds.
+	Digits int
+	// Signedness is whether the field carries a sign.
+	Signedness Signedness
+}
+
+// Error implements the [error] interface.
+func (e PackedRangeError) Error() string {
+	return fmt.Sprintf("value %s does not fit a %d-digit %s packed decimal field", e.Value, e.Digits, e.Signedness)
 }
