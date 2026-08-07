@@ -3287,6 +3287,294 @@ func TestParserDefaultSourceFormat(t *testing.T) {
 	require.Equal(t, defaultAST, explicitAST)
 }
 
+// TestParserFragment pins WithFragment: a source consisting solely of data
+// description entries — a standalone copybook — parses without an IDENTIFICATION
+// DIVISION, and its entries land on File.Fragment with File.Programs empty. The
+// level rules are the ordinary ones (01/77 at the top, 02–49 subordinate, 88
+// condition-names, 66 RENAMES), because the fragment reuses the very same entry
+// loop the DATA DIVISION sections drive.
+func TestParserFragment(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		src      string
+		expected *File
+	}{
+		{
+			// The issue's motivating example: the copybook that Parse used to
+			// reject outright with "unexpected token Number(01)".
+			name: "record with subordinate elementary item",
+			src: "01 CUSTOMER-RECORD.\n" +
+				"   05 CUST-ID PIC 9(6) COMP-3.\n",
+			expected: &File{
+				Fragment: &Fragment{
+					Entries: []*DataDescriptionEntry{
+						{
+							Pos:   Pos{Line: 1, Column: 1},
+							Level: 1,
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUSTOMER-RECORD"},
+						},
+						{
+							Pos:   Pos{Line: 2, Column: 4},
+							Level: 5,
+							Name:  &Word{Pos: Pos{Line: 2, Column: 7}, Value: "CUST-ID"},
+							Clauses: []DataClause{
+								&PictureClause{Pos: Pos{Line: 2, Column: 15}, Picture: "9(6)"},
+								&UsageClause{Pos: Pos{Line: 2, Column: 24}, Usage: "COMP-3"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			// A level-77 independent item at the top level, with the level-88
+			// condition-names it qualifies subordinate to it.
+			name: "level 77 independent item with condition names",
+			src: "77 CUST-STATUS PIC X.\n" +
+				"   88 CUST-ACTIVE VALUE \"A\".\n" +
+				"   88 CUST-CLOSED VALUE \"C\" THROUGH \"D\".\n",
+			expected: &File{
+				Fragment: &Fragment{
+					Entries: []*DataDescriptionEntry{
+						{
+							Pos:   Pos{Line: 1, Column: 1},
+							Level: 77,
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUST-STATUS"},
+							Clauses: []DataClause{
+								&PictureClause{Pos: Pos{Line: 1, Column: 16}, Picture: "X"},
+							},
+						},
+						{
+							Pos:   Pos{Line: 2, Column: 4},
+							Level: 88,
+							Name:  &Word{Pos: Pos{Line: 2, Column: 7}, Value: "CUST-ACTIVE"},
+							Clauses: []DataClause{
+								&ValueClause{
+									Pos:    Pos{Line: 2, Column: 19},
+									Values: []ValueSpec{{From: &StringLiteral{Pos: Pos{Line: 2, Column: 25}, Value: `"A"`}}},
+								},
+							},
+						},
+						{
+							Pos:   Pos{Line: 3, Column: 4},
+							Level: 88,
+							Name:  &Word{Pos: Pos{Line: 3, Column: 7}, Value: "CUST-CLOSED"},
+							Clauses: []DataClause{
+								&ValueClause{
+									Pos: Pos{Line: 3, Column: 19},
+									Values: []ValueSpec{{
+										From:    &StringLiteral{Pos: Pos{Line: 3, Column: 25}, Value: `"C"`},
+										Through: &StringLiteral{Pos: Pos{Line: 3, Column: 37}, Value: `"D"`},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "level 66 renames",
+			src: "01 CUST-RECORD.\n" +
+				"   05 F1 PIC X.\n" +
+				"   05 F2 PIC X.\n" +
+				"66 CUST-KEY RENAMES F1 THROUGH F2.\n",
+			expected: &File{
+				Fragment: &Fragment{
+					Entries: []*DataDescriptionEntry{
+						{
+							Pos:   Pos{Line: 1, Column: 1},
+							Level: 1,
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUST-RECORD"},
+						},
+						{
+							Pos:   Pos{Line: 2, Column: 4},
+							Level: 5,
+							Name:  &Word{Pos: Pos{Line: 2, Column: 7}, Value: "F1"},
+							Clauses: []DataClause{
+								&PictureClause{Pos: Pos{Line: 2, Column: 10}, Picture: "X"},
+							},
+						},
+						{
+							Pos:   Pos{Line: 3, Column: 4},
+							Level: 5,
+							Name:  &Word{Pos: Pos{Line: 3, Column: 7}, Value: "F2"},
+							Clauses: []DataClause{
+								&PictureClause{Pos: Pos{Line: 3, Column: 10}, Picture: "X"},
+							},
+						},
+						{
+							Pos:   Pos{Line: 4, Column: 1},
+							Level: 66,
+							Name:  &Word{Pos: Pos{Line: 4, Column: 4}, Value: "CUST-KEY"},
+							Clauses: []DataClause{
+								&RenamesClause{
+									Pos:     Pos{Line: 4, Column: 13},
+									From:    &Word{Pos: Pos{Line: 4, Column: 21}, Value: "F1"},
+									Through: &Word{Pos: Pos{Line: 4, Column: 32}, Value: "F2"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			// A comment leads the entry it precedes, exactly as in a program; the
+			// one past the last entry has no entry to lead and becomes the
+			// fragment's Trailing comments, so a copybook ending in a banner still
+			// round-trips.
+			name: "leading and trailing comments",
+			src: "*> customer copybook\n" +
+				"01 CUSTOMER-RECORD.\n" +
+				"*> the identifier\n" +
+				"   05 CUST-ID PIC 9(6).\n" +
+				"*> end of copybook\n",
+			expected: &File{
+				Fragment: &Fragment{
+					Entries: []*DataDescriptionEntry{
+						{
+							Pos:      Pos{Line: 2, Column: 1},
+							Comments: []*Comment{{Pos: Pos{Line: 1, Column: 1}, Text: "customer copybook"}},
+							Level:    1,
+							Name:     &Word{Pos: Pos{Line: 2, Column: 4}, Value: "CUSTOMER-RECORD"},
+						},
+						{
+							Pos:      Pos{Line: 4, Column: 4},
+							Comments: []*Comment{{Pos: Pos{Line: 3, Column: 1}, Text: "the identifier"}},
+							Level:    5,
+							Name:     &Word{Pos: Pos{Line: 4, Column: 7}, Value: "CUST-ID"},
+							Clauses: []DataClause{
+								&PictureClause{Pos: Pos{Line: 4, Column: 15}, Picture: "9(6)"},
+							},
+						},
+					},
+					Trailing: []*Comment{{Pos: Pos{Line: 5, Column: 1}, Text: "end of copybook"}},
+				},
+			},
+		},
+		{
+			// An empty copybook is a fragment with no entries — not a nil Fragment,
+			// so a consumer can still tell it apart from a whole source file.
+			name:     "empty source",
+			src:      "",
+			expected: &File{Fragment: &Fragment{}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f, err := Parse(strings.NewReader(tc.src), WithFragment())
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, f)
+			require.Empty(t, f.Programs)
+		})
+	}
+}
+
+// TestParserFragmentFixedFormat pins fragments in fixed format: copybooks are
+// commonly held in column-oriented libraries, so WithFragment has to compose with
+// WithSourceFormat(FixedFormat) — the sequence area ignored, a column-7 "*"
+// comment attached to the entry it precedes.
+func TestParserFragmentFixedFormat(t *testing.T) {
+	t.Parallel()
+
+	src := "000100* customer copybook\n" +
+		"000200 01  CUSTOMER-RECORD.\n" +
+		"000300     05  CUST-ID     PIC 9(6) COMP-3.\n" +
+		"000400     05  CUST-NAME   PIC X(20).\n"
+
+	expected := &File{
+		Fragment: &Fragment{
+			Entries: []*DataDescriptionEntry{
+				{
+					Pos:      Pos{Line: 2, Column: 8},
+					Comments: []*Comment{{Pos: Pos{Line: 1, Column: 7}, Text: "customer copybook"}},
+					Level:    1,
+					Name:     &Word{Pos: Pos{Line: 2, Column: 12}, Value: "CUSTOMER-RECORD"},
+				},
+				{
+					Pos:   Pos{Line: 3, Column: 12},
+					Level: 5,
+					Name:  &Word{Pos: Pos{Line: 3, Column: 16}, Value: "CUST-ID"},
+					Clauses: []DataClause{
+						&PictureClause{Pos: Pos{Line: 3, Column: 28}, Picture: "9(6)"},
+						&UsageClause{Pos: Pos{Line: 3, Column: 37}, Usage: "COMP-3"},
+					},
+				},
+				{
+					Pos:   Pos{Line: 4, Column: 12},
+					Level: 5,
+					Name:  &Word{Pos: Pos{Line: 4, Column: 16}, Value: "CUST-NAME"},
+					Clauses: []DataClause{
+						&PictureClause{Pos: Pos{Line: 4, Column: 28}, Picture: "X(20)"},
+					},
+				},
+			},
+		},
+	}
+
+	f, err := Parse(strings.NewReader(src), WithFragment(), WithSourceFormat(FixedFormat))
+	require.NoError(t, err)
+	require.Equal(t, expected, f)
+
+	// The same source must NOT parse as a free-format fragment: the columns 1–6
+	// sequence numbers are only ignored in fixed format, so the free-format parse
+	// sees them as stray tokens. This proves the two options compose rather than
+	// one overriding the other.
+	_, freeErr := Parse(strings.NewReader(src), WithFragment())
+	require.Error(t, freeErr)
+}
+
+// TestParserFragmentErrors pins the two ends of the mode: a copybook is rejected
+// without WithFragment (the behaviour the issue reported), and a whole source file
+// is rejected with it, rather than the parser silently dropping everything past the
+// entries it understood.
+func TestParserFragmentErrors(t *testing.T) {
+	t.Parallel()
+
+	const copybook = "01 CUSTOMER-RECORD.\n" +
+		"   05 CUST-ID PIC 9(6) COMP-3.\n"
+
+	t.Run("copybook without WithFragment", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := Parse(strings.NewReader(copybook))
+
+		var unexpected UnexpectedTokenError
+		require.ErrorAs(t, err, &unexpected)
+		require.Equal(t, Pos{Line: 1, Column: 1}, unexpected.Actual.Pos)
+	})
+
+	t.Run("division header with WithFragment", func(t *testing.T) {
+		t.Parallel()
+
+		src := "01 CUSTOMER-RECORD.\n" +
+			"IDENTIFICATION DIVISION.\n"
+
+		_, err := Parse(strings.NewReader(src), WithFragment())
+
+		var unexpected UnexpectedTokenError
+		require.ErrorAs(t, err, &unexpected)
+		require.Equal(t, Pos{Line: 2, Column: 1}, unexpected.Actual.Pos)
+	})
+
+	t.Run("invalid level number", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := Parse(strings.NewReader("50 CUST-ID PIC X.\n"), WithFragment())
+
+		var invalid InvalidLevelNumberError
+		require.ErrorAs(t, err, &invalid)
+		require.Equal(t, "50", invalid.Value)
+	})
+}
+
 // TestSourceFormatString pins the String() rendering of each SourceFormat.
 func TestSourceFormatString(t *testing.T) {
 	t.Parallel()

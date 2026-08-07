@@ -21,6 +21,28 @@ import (
 type File struct {
 	// Programs holds the programs of a COBOL source file in source order.
 	Programs []*Program
+	// Fragment holds the data description entries of a standalone copybook read
+	// with [WithFragment]; it is nil for an ordinary source file, and when it is
+	// non-nil Programs is empty. A copybook has no IDENTIFICATION DIVISION and no
+	// program for a DATA DIVISION to hang off, so the entries live in their own
+	// field rather than under a synthetic [DataDivision] — nothing in the AST
+	// then claims a division header the source never had, and a consumer can tell
+	// a fragment from a program by the field alone.
+	Fragment *Fragment
+}
+
+// Fragment is a standalone copybook fragment: a source consisting solely of data
+// description entries, parsed with [WithFragment]. Like [File] it is a container
+// with no position of its own; every node beneath it carries a [Pos].
+//
+// Entries is the flat entry list in source order — the same shape a [DataSection]
+// holds — so the record hierarchy is implied by the entries' level numbers rather
+// than nested in the AST. Trailing holds any comments that follow the last entry
+// and so have no entry to lead; a comment preceding an entry is that entry's
+// leading Comments.
+type Fragment struct {
+	Entries  []*DataDescriptionEntry
+	Trailing []*Comment
 }
 
 // Comment is a source comment preserved in the AST. Pos is the position of the
@@ -1570,6 +1592,10 @@ type parseConfig struct {
 	// format is the reference format used to tokenize the source. FreeFormat is
 	// the zero value and the default.
 	format SourceFormat
+	// fragment reads the source as a standalone copybook fragment (data
+	// description entries only) rather than as a sequence of programs. False —
+	// a whole source file — is the default.
+	fragment bool
 }
 
 // WithSourceFormat selects the reference format [Parse] uses to tokenize the
@@ -1582,6 +1608,30 @@ func WithSourceFormat(f SourceFormat) ParseOption {
 	return func(c *parseConfig) { c.format = f }
 }
 
+// WithFragment makes [Parse] read the source as a standalone copybook fragment:
+// a source consisting solely of data description entries, with no IDENTIFICATION
+// DIVISION and no DATA DIVISION or section header to introduce them. It is how a
+// copybook file (conventionally .cpy, pulled into a program by COPY) is parsed
+// without being wrapped in a synthetic program shell.
+//
+// The entries are reached on the returned [File] through its Fragment field
+// rather than through a Program; File.Programs is empty. Levels follow the
+// ordinary data-description rules — 01 and 77 entries at the top level, 02–49
+// subordinate to the group above them, 88 condition-names and 66 RENAMES
+// entries as usual — since the fragment is exactly the entry list a DATA
+// DIVISION section would hold.
+//
+// It composes with [WithSourceFormat]: copybooks are commonly fixed format, so
+// Parse(r, WithFragment(), WithSourceFormat(FixedFormat)) is the usual call for
+// a copybook out of a mainframe library.
+//
+// Anything that is not a data description entry is an error in this mode — a
+// division header in a fragment is a caller that meant to parse a whole source
+// file, not the start of something the fragment could contain.
+func WithFragment() ParseOption {
+	return func(c *parseConfig) { c.fragment = true }
+}
+
 // Parse the COBOL source from the given reader into a [File].
 //
 // It pulls tokens from [Tokenize] with [iter.Pull2] and runs the top-level
@@ -1590,6 +1640,10 @@ func WithSourceFormat(f SourceFormat) ParseOption {
 // By default the source is read as free format. Pass
 // [WithSourceFormat]([FixedFormat]) to parse fixed-format ("reference format")
 // source instead.
+//
+// By default the source is read as a whole source file: one or more programs,
+// each beginning with an IDENTIFICATION DIVISION. Pass [WithFragment] to read a
+// standalone copybook — data description entries alone — instead.
 func Parse(r io.Reader, opts ...ParseOption) (*File, error) {
 	cfg := parseConfig{} // zero value => FreeFormat
 	for _, opt := range opts {
@@ -1612,8 +1666,16 @@ func Parse(r io.Reader, opts ...ParseOption) (*File, error) {
 	p := &parser{pull: next}
 	f := &File{}
 
+	// The mode selects the top-level action; everything below it is shared, so a
+	// fragment reuses the very same data-description-entry parser a DATA DIVISION
+	// section drives.
+	root := parseFile
+	if cfg.fragment {
+		root = parseFragmentFile
+	}
+
 	var err error
-	for action := parseFile; action != nil && err == nil; {
+	for action := root; action != nil && err == nil; {
 		action, err = action(p, f)
 	}
 	if err != nil {
@@ -2046,6 +2108,61 @@ func parseFile(p *parser, f *File) (parserAction[*File], error) {
 
 	f.Programs = append(f.Programs, prog)
 	return parseFile, nil
+}
+
+// parseFragmentFile is the top-level action for [WithFragment]: it drives the
+// fragment's inner action loop over the whole source and stores the result on
+// f.Fragment, leaving f.Programs empty. It completes the outer loop, since a
+// fragment is the entire source rather than one of a sequence.
+func parseFragmentFile(p *parser, f *File) (parserAction[*File], error) {
+	frag := &Fragment{}
+
+	var err error
+	for action := parseFragmentEntries; action != nil && err == nil; {
+		action, err = action(p, frag)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	f.Fragment = frag
+	return nil, nil
+}
+
+// parseFragmentEntries reads the fragment's data description entries with the
+// same loop the DATA DIVISION sections use, so level rules, condition-names,
+// RENAMES entries and comment attachment behave identically to a copybook's
+// contents once COPYed into a program. The first token that does not begin an
+// entry ends the list and is left for parseFragmentEnd.
+func parseFragmentEntries(p *parser, frag *Fragment) (parserAction[*Fragment], error) {
+	entries, err := parseDataEntries(p)
+	if err != nil {
+		return nil, err
+	}
+	frag.Entries = entries
+	return parseFragmentEnd, nil
+}
+
+// parseFragmentEnd requires the source to be exhausted. A fragment holds data
+// description entries and nothing else, so a token left over — a division header,
+// a stray period — is reported rather than ignored: it means the caller passed a
+// whole source file to a fragment parse, and silently dropping the rest of the
+// file would be the worse answer.
+//
+// The comments buffered past the last entry have no entry to lead, so they become
+// the fragment's trailing comments; claiming them here keeps a copybook that ends
+// in a banner round-tripping.
+func parseFragmentEnd(p *parser, frag *Fragment) (parserAction[*Fragment], error) {
+	tok, err, ok := p.advance()
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenNumber}, Actual: tok}
+	}
+
+	frag.Trailing = p.takeComments()
+	return nil, nil
 }
 
 // parseProgram builds one program whose first division header keyword firstKw has
