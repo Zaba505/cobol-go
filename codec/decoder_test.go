@@ -18,54 +18,73 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testRecord is a nine-field record exercising every accessor family the
+// testRecord is an eleven-field record exercising every accessor family the
 // package currently has: two left-justified alphanumeric fields, a JUSTIFIED
 // RIGHT one, a raw byte field, a signed packed decimal field, an unsigned one,
-// a signed binary one and the two floating point widths. It stands in for the
-// code a generator will emit, for
+// a signed binary one, the two floating point widths, a signed zoned decimal
+// field and an unsigned one. It stands in for the code a generator will emit,
+// for
 //
 //	01 TEST-RECORD.
-//	   05 ID     PIC X(6).
-//	   05 NAME   PIC X(12).
-//	   05 CODE   PIC X(4) JUSTIFIED RIGHT.
-//	   05 RAW    PIC X(3).
-//	   05 AMOUNT PIC S9(5) COMP-3.
-//	   05 QTY    PIC 9(4)  COMP-3.
-//	   05 SEQ    PIC S9(4) COMP.
-//	   05 RATE   COMP-1.
-//	   05 FACTOR COMP-2.
+//	   05 ID      PIC X(6).
+//	   05 NAME    PIC X(12).
+//	   05 CODE    PIC X(4) JUSTIFIED RIGHT.
+//	   05 RAW     PIC X(3).
+//	   05 AMOUNT  PIC S9(5) COMP-3.
+//	   05 QTY     PIC 9(4)  COMP-3.
+//	   05 SEQ     PIC S9(4) COMP.
+//	   05 RATE    COMP-1.
+//	   05 FACTOR  COMP-2.
+//	   05 BALANCE PIC S9(5) DISPLAY.
+//	   05 COUNT   PIC 9(3)  DISPLAY.
 //
 // RATE and FACTOR carry no PICTURE, because COMP-1 and COMP-2 do not take one.
+//
+// That one record mixes DISPLAY, COMP-3, COMP, COMP-1 and COMP-2 fields is the
+// point rather than an accident: USAGE is a property of each item, so a
+// generator computes every field's width from its own usage and no file is in
+// one numeric mode.
 type testRecord struct {
-	ID     string
-	Name   string
-	Code   string
-	Raw    []byte
-	Amount int64
-	Qty    int32
-	Seq    int16
-	Rate   float32
-	Factor float64
+	ID      string
+	Name    string
+	Code    string
+	Raw     []byte
+	Amount  int64
+	Qty     int32
+	Seq     int16
+	Rate    float32
+	Factor  float64
+	Balance int64
+	Count   int32
 }
 
 const (
-	testRecordIDWidth      = 6
-	testRecordNameWidth    = 12
-	testRecordCodeWidth    = 4
-	testRecordRawWidth     = 3
-	testRecordAmountDigits = 5
-	testRecordQtyDigits    = 4
-	testRecordSeqDigits    = 4
+	testRecordIDWidth       = 6
+	testRecordNameWidth     = 12
+	testRecordCodeWidth     = 4
+	testRecordRawWidth      = 3
+	testRecordAmountDigits  = 5
+	testRecordQtyDigits     = 4
+	testRecordSeqDigits     = 4
+	testRecordBalanceDigits = 5
+	testRecordCountDigits   = 3
 )
 
-// testRecordWidth is the record's length in bytes, packed, binary and floating
-// point fields included. SEQ contributes two bytes and not four: a binary
-// field's width is a staircase in its digit count, not the digit count itself.
-// RATE and FACTOR contribute a fixed four and eight, since neither has a digit
-// count for a width to depend on.
+// testRecordBalanceSign is the sign position of BALANCE: the COBOL default for
+// an item whose PICTURE carries S, overpunched into the last digit byte.
+const testRecordBalanceSign = SignTrailing
+
+// testRecordWidth is the record's length in bytes, zoned, packed, binary and
+// floating point fields included. SEQ contributes two bytes and not four: a
+// binary field's width is a staircase in its digit count, not the digit count
+// itself. BALANCE contributes five and not six, because a TRAILING sign is
+// overpunched rather than given a byte. RATE and FACTOR contribute a fixed four
+// and eight, since neither has a digit count for a width to depend on.
 var testRecordWidth = testRecordIDWidth + testRecordNameWidth + testRecordCodeWidth +
 	testRecordRawWidth + packedWidth(testRecordAmountDigits) + packedWidth(testRecordQtyDigits) +
-	binaryWidth(testRecordSeqDigits) + comp1Width + comp2Width
+	binaryWidth(testRecordSeqDigits) + comp1Width + comp2Width +
+	zonedWidth(testRecordBalanceDigits, testRecordBalanceSign) +
+	zonedWidth(testRecordCountDigits, SignUnsigned)
 
 // MarshalCOBOL implements the [Marshaler] interface.
 func (r *testRecord) MarshalCOBOL(w *Writer) error {
@@ -93,7 +112,13 @@ func (r *testRecord) MarshalCOBOL(w *Writer) error {
 	if err := w.WriteFloat32(r.Rate); err != nil {
 		return err
 	}
-	return w.WriteFloat64(r.Factor)
+	if err := w.WriteFloat64(r.Factor); err != nil {
+		return err
+	}
+	if err := w.WriteZonedInt64(r.Balance, testRecordBalanceDigits, testRecordBalanceSign); err != nil {
+		return err
+	}
+	return w.WriteZonedInt32(r.Count, testRecordCountDigits, SignUnsigned)
 }
 
 // UnmarshalCOBOL implements the [Unmarshaler] interface.
@@ -123,7 +148,13 @@ func (r *testRecord) UnmarshalCOBOL(rd *Reader) error {
 	if r.Rate, err = rd.ReadFloat32(); err != nil {
 		return err
 	}
-	r.Factor, err = rd.ReadFloat64()
+	if r.Factor, err = rd.ReadFloat64(); err != nil {
+		return err
+	}
+	if r.Balance, err = rd.ReadZonedInt64(testRecordBalanceDigits, testRecordBalanceSign); err != nil {
+		return err
+	}
+	r.Count, err = rd.ReadZonedInt32(testRecordCountDigits, SignUnsigned)
 	return err
 }
 
@@ -342,6 +373,783 @@ func TestReaderReadBytes(t *testing.T) {
 		require.Empty(t, got)
 		require.Zero(t, r.Offset())
 	})
+}
+
+// zonedEncoding returns an encoding whose charset is cs and whose sign
+// convention is s. Those are the only two axes a zoned decimal field reads, and
+// the named bundles cannot express every pairing of them: [SignRealia] has no
+// bundle at all, and the point of these tests is that the charset and the
+// convention are independent axes rather than one dialect flag.
+func zonedEncoding(cs Charset, s SignConvention) Encoding {
+	enc := GnuCOBOLASCII()
+	enc.Charset = cs
+	enc.Sign = s
+	return enc
+}
+
+// TestReaderReadZoned walks the test vectors of codec/SPEC.md, Appendix A.1 and
+// A.2, in both charsets and every sign convention: the same number spelled the
+// way each combination spells it.
+func TestReaderReadZoned(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		src    []byte
+		digits int
+		sign   SignPosition
+		enc    Encoding
+		want   int64
+	}{
+		{
+			name:   "ebcdic trailing overpunch, positive",
+			src:    []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xC5}, // PIC S9(5) DISPLAY, +12345
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   12345,
+		},
+		{
+			name:   "ebcdic trailing overpunch, negative",
+			src:    []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xD5}, // PIC S9(5) DISPLAY, -12345
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   -12345,
+		},
+		{
+			name:   "ascii zone 3/7, positive",
+			src:    []byte{0x31, 0x32, 0x33, 0x34, 0x35}, // "12345"
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    GnuCOBOLASCII(),
+			want:   12345,
+		},
+		{
+			name:   "ascii zone 3/7, negative",
+			src:    []byte{0x31, 0x32, 0x33, 0x34, 0x75}, // "1234u"
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    GnuCOBOLASCII(),
+			want:   -12345,
+		},
+		{
+			name:   "translated ebcdic, positive",
+			src:    []byte{0x31, 0x32, 0x33, 0x34, 0x45}, // "1234E"
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    ConvertedFromEBCDIC(),
+			want:   12345,
+		},
+		{
+			name:   "translated ebcdic, negative",
+			src:    []byte{0x31, 0x32, 0x33, 0x34, 0x4E}, // "1234N"
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    ConvertedFromEBCDIC(),
+			want:   -12345,
+		},
+		{
+			name:   "realia, positive",
+			src:    []byte{0x31, 0x32, 0x33, 0x34, 0x35}, // "12345"
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    zonedEncoding(ASCII(), SignRealia),
+			want:   12345,
+		},
+		{
+			name:   "realia, negative",
+			src:    []byte{0x31, 0x32, 0x33, 0x34, 0x25}, // "1234%"
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    zonedEncoding(ASCII(), SignRealia),
+			want:   -12345,
+		},
+		{
+			name:   "realia negative zero is zero",
+			src:    []byte{0x20}, // a space, which is how Realia spells -0
+			digits: 1,
+			sign:   SignTrailing,
+			enc:    zonedEncoding(ASCII(), SignRealia),
+			want:   0,
+		},
+		{
+			name:   "ebcdic leading overpunch, negative",
+			src:    []byte{0xD1, 0xF2, 0xF3, 0xF4, 0xF5}, // PIC S9(5) SIGN LEADING
+			digits: 5,
+			sign:   SignLeading,
+			enc:    IBMEnterprise(),
+			want:   -12345,
+		},
+		{
+			name:   "ascii leading overpunch, negative",
+			src:    []byte{0x71, 0x32, 0x33, 0x34, 0x35}, // "q2345"
+			digits: 5,
+			sign:   SignLeading,
+			enc:    GnuCOBOLASCII(),
+			want:   -12345,
+		},
+		{
+			name:   "ebcdic unsigned",
+			src:    []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xF5}, // PIC 9(5) DISPLAY
+			digits: 5,
+			sign:   SignUnsigned,
+			enc:    IBMEnterprise(),
+			want:   12345,
+		},
+		{
+			name:   "ascii unsigned",
+			src:    []byte{0x31, 0x32, 0x33, 0x34, 0x35}, // PIC 9(5) DISPLAY
+			digits: 5,
+			sign:   SignUnsigned,
+			enc:    GnuCOBOLASCII(),
+			want:   12345,
+		},
+		{
+			name:   "ascii leading separate, negative",
+			src:    []byte{0x2D, 0x31, 0x32, 0x33, 0x34, 0x35}, // "-12345"
+			digits: 5,
+			sign:   SignLeadingSeparate,
+			enc:    GnuCOBOLASCII(),
+			want:   -12345,
+		},
+		{
+			name:   "ebcdic leading separate, negative",
+			src:    []byte{0x60, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5},
+			digits: 5,
+			sign:   SignLeadingSeparate,
+			enc:    IBMEnterprise(),
+			want:   -12345,
+		},
+		{
+			name:   "ascii trailing separate, positive",
+			src:    []byte{0x31, 0x32, 0x33, 0x34, 0x35, 0x2B}, // "12345+"
+			digits: 5,
+			sign:   SignTrailingSeparate,
+			enc:    GnuCOBOLASCII(),
+			want:   12345,
+		},
+		{
+			name:   "ebcdic trailing separate, positive",
+			src:    []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0x4E},
+			digits: 5,
+			sign:   SignTrailingSeparate,
+			enc:    IBMEnterprise(),
+			want:   12345,
+		},
+		{
+			name: "a separate sign is convention-independent",
+			src:  []byte{0x2D, 0x31, 0x32, 0x33, 0x34, 0x35},
+			// Realia rather than zone 3/7, on bytes that carry nothing
+			// either convention could disagree about.
+			digits: 5,
+			sign:   SignLeadingSeparate,
+			enc:    zonedEncoding(ASCII(), SignRealia),
+			want:   -12345,
+		},
+		{
+			name:   "unsigned zone in a signed field reads non-negative",
+			src:    []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xF5}, // after a MOVE from an unsigned item
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   12345,
+		},
+		{
+			name:   "lenient ebcdic zone A reads positive",
+			src:    []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xA5},
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   12345,
+		},
+		{
+			name:   "lenient ebcdic zone B reads negative",
+			src:    []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xB5},
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   -12345,
+		},
+		{
+			name:   "single digit",
+			src:    []byte{0xC7}, // PIC S9(1) DISPLAY, +7
+			digits: 1,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   7,
+		},
+		{
+			name:   "zero",
+			src:    []byte{0xF0, 0xF0, 0xF0, 0xF0, 0xC0},
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   0,
+		},
+		{
+			name:   "high-order zeros are not digits of the value",
+			src:    []byte{0xF0, 0xF0, 0xF0, 0xF4, 0xC2}, // +42
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   42,
+		},
+		{
+			name:   "nine digits, the int32 maximum",
+			src:    []byte{0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xD9},
+			digits: 9,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   -999999999,
+		},
+		{
+			name: "eighteen digits, the int64 maximum",
+			src: []byte{
+				0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9,
+				0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xC9,
+			},
+			digits: 18,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   999999999999999999,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, err := NewReader(bytes.NewReader(tc.src), tc.enc)
+			require.NoError(t, err)
+
+			got, err := r.ReadZonedInt64(tc.digits, tc.sign)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+			require.Equal(t, int64(len(tc.src)), r.Offset())
+
+			// A DISPLAY field is one byte per digit, plus one for a
+			// SEPARATE sign and nothing else: no V and no scale.
+			require.Equal(t, len(tc.src), zonedWidth(tc.digits, tc.sign))
+
+			if tc.digits <= maxZonedInt32Digits {
+				r32, err := NewReader(bytes.NewReader(tc.src), tc.enc)
+				require.NoError(t, err)
+
+				got32, err := r32.ReadZonedInt32(tc.digits, tc.sign)
+				require.NoError(t, err)
+				require.Equal(t, int32(tc.want), got32)
+			}
+
+			rb, err := NewReader(bytes.NewReader(tc.src), tc.enc)
+			require.NoError(t, err)
+
+			gotBig, err := rb.ReadZonedBig(tc.digits, tc.sign)
+			require.NoError(t, err)
+			require.Equal(t, big.NewInt(tc.want), gotBig)
+		})
+	}
+}
+
+func TestReaderReadZonedBig(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		src    []byte
+		digits int
+		sign   SignPosition
+		enc    Encoding
+		want   string
+	}{
+		{
+			name:   "nineteen digits, one past int64",
+			src:    []byte("123456789012345678" + "\x79"), // "…8y", zone 7 negative 9
+			digits: 19,
+			sign:   SignTrailing,
+			enc:    GnuCOBOLASCII(),
+			want:   "-1234567890123456789",
+		},
+		{
+			name: "thirty-one digits, the COBOL maximum",
+			src: append(
+				bytes.Repeat([]byte{0xF9}, 30),
+				0xC9, // the sign-carrying digit, positive
+			),
+			digits: 31,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   "9999999999999999999999999999999",
+		},
+		{
+			name:   "thirty-one digits, unsigned",
+			src:    []byte("1234567890123456789012345678901"),
+			digits: 31,
+			sign:   SignUnsigned,
+			enc:    GnuCOBOLASCII(),
+			want:   "1234567890123456789012345678901",
+		},
+		{
+			name:   "thirty-one digits, leading separate",
+			src:    append([]byte{0x2D}, []byte("1234567890123456789012345678901")...),
+			digits: 31,
+			sign:   SignLeadingSeparate,
+			enc:    GnuCOBOLASCII(),
+			want:   "-1234567890123456789012345678901",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, err := NewReader(bytes.NewReader(tc.src), tc.enc)
+			require.NoError(t, err)
+
+			got, err := r.ReadZonedBig(tc.digits, tc.sign)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got.String())
+			require.Equal(t, int64(zonedWidth(tc.digits, tc.sign)), r.Offset())
+		})
+	}
+}
+
+// TestReaderReadZonedRejectsOtherConventions walks codec/SPEC.md, Appendix A.3:
+// every row is a field that is valid under some convention and must be refused
+// under the one declared, which is what makes a wrong convention loud rather
+// than silently wrong signs.
+func TestReaderReadZonedRejectsOtherConventions(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		src      []byte
+		enc      Encoding
+		wantByte byte
+		wantAt   int64
+	}{
+		{
+			name:     "translated positive zero under zone 3/7",
+			src:      []byte{0x31, 0x32, 0x33, 0x34, 0x7B}, // "1234{"
+			enc:      GnuCOBOLASCII(),
+			wantByte: 0x7B,
+			wantAt:   4,
+		},
+		{
+			name:     "zone 3/7 negative under translated ebcdic",
+			src:      []byte{0x31, 0x32, 0x33, 0x34, 0x75}, // "1234u"
+			enc:      ConvertedFromEBCDIC(),
+			wantByte: 0x75,
+			wantAt:   4,
+		},
+		{
+			name:     "realia negative under zone 3/7",
+			src:      []byte{0x31, 0x32, 0x33, 0x34, 0x25}, // "1234%"
+			enc:      GnuCOBOLASCII(),
+			wantByte: 0x25,
+			wantAt:   4,
+		},
+		{
+			name:     "ebcdic negative under zone 3/7",
+			src:      []byte{0x31, 0x32, 0x33, 0x34, 0xD5},
+			enc:      GnuCOBOLASCII(),
+			wantByte: 0xD5,
+			wantAt:   4,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, err := NewReader(bytes.NewReader(tc.src), tc.enc)
+			require.NoError(t, err)
+
+			_, err = r.ReadZonedInt64(5, SignTrailing)
+
+			var signErr ZonedSignError
+			require.ErrorAs(t, err, &signErr)
+			require.Equal(t, tc.wantByte, signErr.Byte)
+			require.Equal(t, tc.enc.Sign, signErr.Sign)
+
+			// The offset names the byte at fault, not the end of the field.
+			var offErr *OffsetError
+			require.ErrorAs(t, err, &offErr)
+			require.Equal(t, tc.wantAt, offErr.Offset)
+		})
+	}
+}
+
+func TestReaderReadZonedErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("wrong charset is caught at the first digit", func(t *testing.T) {
+		t.Parallel()
+
+		// codec/SPEC.md, A.3: EBCDIC digits read under an ASCII charset.
+		// Nothing about the field is plausible, and offset 0 says so.
+		r, err := NewReader(bytes.NewReader([]byte{0xF1, 0xF2, 0xF3, 0xF4, 0xD5}), GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		_, err = r.ReadZonedInt64(5, SignTrailing)
+
+		var digitErr ZonedDigitError
+		require.ErrorAs(t, err, &digitErr)
+		require.Equal(t, byte(0xF1), digitErr.Byte)
+		require.Equal(t, "ASCII", digitErr.Charset)
+		require.Equal(t, byte(0x30), digitErr.Zero)
+		require.Equal(t, byte(0x39), digitErr.Nine)
+
+		var offErr *OffsetError
+		require.ErrorAs(t, err, &offErr)
+		require.Zero(t, offErr.Offset)
+	})
+
+	t.Run("the other wrong charset is caught the same way", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader([]byte{0x31, 0x32, 0x33, 0x34, 0x35}), IBMEnterprise())
+		require.NoError(t, err)
+
+		_, err = r.ReadZonedInt64(5, SignTrailing)
+
+		var digitErr ZonedDigitError
+		require.ErrorAs(t, err, &digitErr)
+		require.Equal(t, byte(0x31), digitErr.Byte)
+		require.Equal(t, "cp037", digitErr.Charset)
+
+		var offErr *OffsetError
+		require.ErrorAs(t, err, &offErr)
+		require.Zero(t, offErr.Offset)
+	})
+
+	t.Run("a non-digit inside the field names its own byte", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader([]byte{0x31, 0x32, 0x3A, 0x34, 0x35}), GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		_, err = r.ReadZonedInt64(5, SignTrailing)
+
+		var digitErr ZonedDigitError
+		require.ErrorAs(t, err, &digitErr)
+		require.Equal(t, byte(0x3A), digitErr.Byte)
+
+		var offErr *OffsetError
+		require.ErrorAs(t, err, &offErr)
+		require.Equal(t, int64(2), offErr.Offset)
+	})
+
+	t.Run("a leading separate sign shifts the digit offsets", func(t *testing.T) {
+		t.Parallel()
+
+		// The bad byte is the third digit, which is the fourth byte of the
+		// field: the sign byte ahead of the digits is counted too.
+		r, err := NewReader(bytes.NewReader([]byte{0x2D, 0x31, 0x32, 0x3A, 0x34, 0x35}), GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		_, err = r.ReadZonedInt64(5, SignLeadingSeparate)
+
+		var digitErr ZonedDigitError
+		require.ErrorAs(t, err, &digitErr)
+		require.Equal(t, byte(0x3A), digitErr.Byte)
+
+		var offErr *OffsetError
+		require.ErrorAs(t, err, &offErr)
+		require.Equal(t, int64(3), offErr.Offset)
+	})
+
+	t.Run("a digit byte in the leading sign position", func(t *testing.T) {
+		t.Parallel()
+
+		// An overpunched LEADING sign under EBCDIC: F1 is the unsigned zone,
+		// which is a non-negative 1 and not an error, but 31 is not a byte
+		// cp037 spells any digit with.
+		r, err := NewReader(bytes.NewReader([]byte{0x31, 0xF2, 0xF3, 0xF4, 0xF5}), IBMEnterprise())
+		require.NoError(t, err)
+
+		_, err = r.ReadZonedInt64(5, SignLeading)
+
+		var signErr ZonedSignError
+		require.ErrorAs(t, err, &signErr)
+		require.Equal(t, byte(0x31), signErr.Byte)
+
+		var offErr *OffsetError
+		require.ErrorAs(t, err, &offErr)
+		require.Zero(t, offErr.Offset)
+	})
+
+	t.Run("separate sign byte that is neither plus nor minus", func(t *testing.T) {
+		t.Parallel()
+
+		testCases := []struct {
+			name   string
+			src    []byte
+			sign   SignPosition
+			wantAt int64
+		}{
+			{
+				name:   "leading",
+				src:    []byte{0x2A, 0x31, 0x32, 0x33, 0x34, 0x35}, // '*'
+				sign:   SignLeadingSeparate,
+				wantAt: 0,
+			},
+			{
+				name:   "trailing",
+				src:    []byte{0x31, 0x32, 0x33, 0x34, 0x35, 0x2A},
+				sign:   SignTrailingSeparate,
+				wantAt: 5,
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				r, err := NewReader(bytes.NewReader(tc.src), GnuCOBOLASCII())
+				require.NoError(t, err)
+
+				_, err = r.ReadZonedInt64(5, tc.sign)
+
+				var sepErr ZonedSeparateSignError
+				require.ErrorAs(t, err, &sepErr)
+				require.Equal(t, byte(0x2A), sepErr.Byte)
+				require.Equal(t, byte(0x2B), sepErr.Plus)
+				require.Equal(t, byte(0x2D), sepErr.Minus)
+
+				var offErr *OffsetError
+				require.ErrorAs(t, err, &offErr)
+				require.Equal(t, tc.wantAt, offErr.Offset)
+			})
+		}
+	})
+
+	t.Run("digit count outside the accessor's range", func(t *testing.T) {
+		t.Parallel()
+
+		testCases := []struct {
+			name    string
+			digits  int
+			read    func(*Reader, int) error
+			wantMax int
+		}{
+			{
+				name:   "zero digits",
+				digits: 0,
+				read: func(r *Reader, d int) error {
+					_, err := r.ReadZonedInt64(d, SignTrailing)
+					return err
+				},
+				wantMax: maxZonedInt64Digits,
+			},
+			{
+				name:   "ten digits into an int32",
+				digits: 10,
+				read: func(r *Reader, d int) error {
+					_, err := r.ReadZonedInt32(d, SignTrailing)
+					return err
+				},
+				wantMax: maxZonedInt32Digits,
+			},
+			{
+				name:   "nineteen digits into an int64",
+				digits: 19,
+				read: func(r *Reader, d int) error {
+					_, err := r.ReadZonedInt64(d, SignTrailing)
+					return err
+				},
+				wantMax: maxZonedInt64Digits,
+			},
+			{
+				name:   "thirty-two digits into a big.Int",
+				digits: 32,
+				read: func(r *Reader, d int) error {
+					_, err := r.ReadZonedBig(d, SignTrailing)
+					return err
+				},
+				wantMax: maxZonedDigits,
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				r, err := NewReader(bytes.NewReader(bytes.Repeat([]byte{0x30}, 64)), GnuCOBOLASCII())
+				require.NoError(t, err)
+
+				err = tc.read(r, tc.digits)
+
+				var countErr ZonedDigitCountError
+				require.ErrorAs(t, err, &countErr)
+				require.Equal(t, tc.digits, countErr.Digits)
+				require.Equal(t, tc.wantMax, countErr.Max)
+
+				// A field that would have overflowed is refused before a
+				// byte of it is consumed.
+				require.Zero(t, r.Offset())
+			})
+		}
+	})
+
+	t.Run("sign position is required", func(t *testing.T) {
+		t.Parallel()
+
+		for _, s := range []SignPosition{SignPositionUnset, SignPosition(99)} {
+			r, err := NewReader(bytes.NewReader([]byte("12345")), GnuCOBOLASCII())
+			require.NoError(t, err)
+
+			_, err = r.ReadZonedInt64(5, s)
+
+			var posErr SignPositionError
+			require.ErrorAs(t, err, &posErr)
+			require.Equal(t, s, posErr.SignPosition)
+			require.Zero(t, r.Offset())
+		}
+	})
+
+	t.Run("short field", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader([]byte("123")), GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		_, err = r.ReadZonedInt64(5, SignTrailing)
+		require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	})
+
+	t.Run("a separate sign is part of the width", func(t *testing.T) {
+		t.Parallel()
+
+		// Five digit bytes are there; the sign byte is not, and a field is
+		// short when any byte of it is.
+		r, err := NewReader(bytes.NewReader([]byte("12345")), GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		_, err = r.ReadZonedInt64(5, SignTrailingSeparate)
+		require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	})
+
+	t.Run("end of file", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader(nil), GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		_, err = r.ReadZonedInt64(5, SignTrailing)
+		require.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("a charset that cannot spell a numeric field", func(t *testing.T) {
+		t.Parallel()
+
+		// Reported by the first zoned field rather than by NewReader: such a
+		// charset still reads alphanumeric fields perfectly well.
+		r, err := NewReader(bytes.NewReader([]byte("12345")), zonedEncoding(partialCharset{}, SignASCIIZone37))
+		require.NoError(t, err)
+
+		s, err := r.ReadAlphanumeric(2)
+		require.NoError(t, err)
+		require.Equal(t, "12", s)
+
+		_, err = r.ReadZonedInt64(3, SignTrailing)
+
+		var runeErr UnrepresentableRuneError
+		require.ErrorAs(t, err, &runeErr)
+		require.Equal(t, '0', runeErr.Rune)
+	})
+}
+
+// TestReaderReadMixedUsageRecord decodes the record of codec/SPEC.md, Appendix
+// A.7, with a USAGE DISPLAY field added to it. It is the guarantee that usage
+// is a property of each item rather than a mode of the file: one record holds a
+// DISPLAY field, a COMP-3 field and a COMP field, each read at its own width.
+func TestReaderReadMixedUsageRecord(t *testing.T) {
+	t.Parallel()
+
+	// 01 TXN.
+	//    05 ID   PIC X(4).
+	//    05 BAL  PIC S9(5)       DISPLAY.
+	//    05 AMT  PIC S9(5)       COMP-3.
+	//    05 QTY  PIC S9(4)       COMP.
+	//    05 NAME PIC X(6).
+	// 4 + 5 + 3 + 2 + 6 = 20 bytes.
+	testCases := []struct {
+		name string
+		enc  Encoding
+		src  []byte
+	}{
+		{
+			name: "ibm enterprise",
+			enc:  IBMEnterprise(),
+			src: []byte{
+				0xC1, 0xF1, 0xF2, 0xF3, // ID   "A123"
+				0xF1, 0xF2, 0xF3, 0xF4, 0xD5, // BAL  -12345, EBCDIC overpunch
+				0x12, 0x34, 0x5D, // AMT  -12345, packed
+				0x04, 0xD2, // QTY  1234, big-endian
+				0xE6, 0xC9, 0xC4, 0xC7, 0xC5, 0xE3, // NAME "WIDGET"
+			},
+		},
+		{
+			name: "gnucobol ascii",
+			enc:  GnuCOBOLASCII(),
+			src: []byte{
+				0x41, 0x31, 0x32, 0x33, // ID   "A123"
+				0x31, 0x32, 0x33, 0x34, 0x75, // BAL  -12345, zone 3/7 overpunch
+				0x12, 0x34, 0x5D, // AMT  -12345, packed
+				0x04, 0xD2, // QTY  1234, big-endian
+				0x57, 0x49, 0x44, 0x47, 0x45, 0x54, // NAME "WIDGET"
+			},
+		},
+		{
+			name: "converted from ebcdic",
+			enc:  ConvertedFromEBCDIC(),
+			src: []byte{
+				0x41, 0x31, 0x32, 0x33, // ID   "A123"
+				0x31, 0x32, 0x33, 0x34, 0x4E, // BAL  -12345, translated overpunch
+				0x12, 0x34, 0x5D, // AMT  -12345, packed
+				0x04, 0xD2, // QTY  1234, big-endian
+				0x57, 0x49, 0x44, 0x47, 0x45, 0x54, // NAME "WIDGET"
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, err := NewReader(bytes.NewReader(tc.src), tc.enc)
+			require.NoError(t, err)
+
+			id, err := r.ReadAlphanumeric(4)
+			require.NoError(t, err)
+			require.Equal(t, "A123", id)
+
+			bal, err := r.ReadZonedInt64(5, SignTrailing)
+			require.NoError(t, err)
+			require.Equal(t, int64(-12345), bal)
+
+			amt, err := r.ReadPackedInt64(5)
+			require.NoError(t, err)
+			require.Equal(t, int64(-12345), amt)
+
+			qty, err := r.ReadBinaryInt16(4)
+			require.NoError(t, err)
+			require.Equal(t, int16(1234), qty)
+
+			name, err := r.ReadAlphanumeric(6)
+			require.NoError(t, err)
+			require.Equal(t, "WIDGET", name)
+
+			require.Equal(t, int64(len(tc.src)), r.Offset())
+
+			// The DISPLAY field is spelled differently in every row above
+			// and the COMP-3 field identically in all three: a zoned sign
+			// is charset- and convention-sensitive where a packed one is
+			// neither. See codec/SPEC.md, "Charset invariance".
+			require.Equal(t, []byte{0x12, 0x34, 0x5D}, tc.src[9:12])
+		})
+	}
 }
 
 func TestReaderReadPacked(t *testing.T) {
@@ -1670,22 +2478,25 @@ func TestUnmarshal(t *testing.T) {
 		// "A12345" | "WIDGET GRIP " | "  42" | 00 01 FF | 12 34 5C | 00 04 2F
 		// | 04 D2: SEQ +1234, big-endian as GnuCOBOL writes it by default
 		// | 3F C0 00 00: RATE 1.5 as binary32 | 40 04 …: FACTOR 2.5 as binary64
+		// | "1234u": BALANCE -12345, zone 3/7 overpunch | "042": COUNT 42
 		data := []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2" +
-			"\x3F\xC0\x00\x00" + "\x40\x04\x00\x00\x00\x00\x00\x00")
+			"\x3F\xC0\x00\x00" + "\x40\x04\x00\x00\x00\x00\x00\x00" + "1234u" + "042")
 		require.Len(t, data, testRecordWidth)
 
 		var got testRecord
 		require.NoError(t, Unmarshal(GnuCOBOLASCII(), data, &got))
 		require.Equal(t, testRecord{
-			ID:     "A12345",
-			Name:   "WIDGET GRIP",
-			Code:   "42",
-			Raw:    []byte{0x00, 0x01, 0xFF},
-			Amount: 12345,
-			Qty:    42,
-			Seq:    1234,
-			Rate:   1.5,
-			Factor: 2.5,
+			ID:      "A12345",
+			Name:    "WIDGET GRIP",
+			Code:    "42",
+			Raw:     []byte{0x00, 0x01, 0xFF},
+			Amount:  12345,
+			Qty:     42,
+			Seq:     1234,
+			Rate:    1.5,
+			Factor:  2.5,
+			Balance: -12345,
+			Count:   42,
 		}, got)
 	})
 

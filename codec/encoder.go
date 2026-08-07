@@ -27,6 +27,13 @@ type Writer struct {
 	w   io.Writer
 	enc Encoding
 	off int64
+	// zoned and zonedErr are the encoding's zoned decimal byte table and the
+	// failure of deriving it, for the reason [Reader] carries them: the
+	// table is derived once rather than per field, and a charset that cannot
+	// spell a digit is refused by the first zoned field rather than by the
+	// constructor, since alphanumeric fields do not need one.
+	zoned    zonedCodec
+	zonedErr error
 }
 
 // NewWriter returns a [Writer] that writes to w under the given encoding.
@@ -42,7 +49,8 @@ func NewWriter(w io.Writer, enc Encoding) (*Writer, error) {
 	if err := enc.Validate(); err != nil {
 		return nil, err
 	}
-	return &Writer{w: w, enc: enc}, nil
+	zoned, zonedErr := newZonedCodec(enc)
+	return &Writer{w: w, enc: enc, zoned: zoned, zonedErr: zonedErr}, nil
 }
 
 // Encoding reports the encoding the [Writer] was constructed with.
@@ -127,6 +135,116 @@ func (w *Writer) WriteAlphanumericJustified(s string, n int, j Justification) er
 		copy(field[n-len(value):], value)
 	} else {
 		copy(field, value)
+	}
+	return w.write(field)
+}
+
+// WriteZonedInt32 writes v as a zoned decimal (USAGE DISPLAY) field of digits
+// digits, exactly digits bytes wide — or digits+1 when s is a SEPARATE
+// position. It is the counterpart of [Reader.ReadZonedInt32].
+//
+// digits must be between 1 and 9; see [Reader.ReadZonedInt32] for why the bound
+// belongs to the accessor rather than to the field.
+//
+// s is required and, unlike the packed and binary writers, it takes the place
+// of a [Signedness] rather than joining one: [SignUnsigned] is an item whose
+// PICTURE has no S, and the other four both declare the S and say which byte
+// carries it. Neither fact is recoverable from v, so both are stated per call
+// and never defaulted; see [SignPosition].
+//
+// A value with more digits than the field holds, or a negative one written into
+// a [SignUnsigned] field, is a [ZonedRangeError] and writes nothing — a whole
+// field is emitted or none of it, so a rejected value cannot desynchronize the
+// record. A value with fewer digits is padded on the left with zeros, which is
+// what a COBOL MOVE stores.
+//
+// v is the unscaled integer: a PIC S9(3)V99 item holding -123.45 is written as
+// -12345 with digits 5, since V occupies no byte.
+func (w *Writer) WriteZonedInt32(v int32, digits int, s SignPosition) error {
+	return w.writeZonedInt(int64(v), digits, maxZonedInt32Digits, s)
+}
+
+// WriteZonedInt64 writes v as a zoned decimal field of digits digits, exactly
+// digits bytes wide, or digits+1 under a SEPARATE sign position. digits must be
+// between 1 and 18; the 19-to-31 digit range is written with
+// [Writer.WriteZonedBig]. s is required, as it is on [Writer.WriteZonedInt32],
+// and for the same reason.
+func (w *Writer) WriteZonedInt64(v int64, digits int, s SignPosition) error {
+	return w.writeZonedInt(v, digits, maxZonedInt64Digits, s)
+}
+
+// WriteZonedBig writes v as a zoned decimal field of digits digits, exactly
+// digits bytes wide, or digits+1 under a SEPARATE sign position. digits must be
+// between 1 and 31, the IBM Enterprise COBOL maximum. s is required; see
+// [Writer.WriteZonedInt32].
+//
+// A nil v is [ErrNilValue] rather than a zero, as it is on
+// [Writer.WritePackedBig]: an absent number and the number zero are different
+// things, and a field is not written from a guess.
+func (w *Writer) WriteZonedBig(v *big.Int, digits int, s SignPosition) error {
+	if v == nil {
+		return &OffsetError{Offset: w.off, Err: ErrNilValue}
+	}
+	return w.writeZoned(v.String(), v.Sign() < 0, digits, maxZonedDigits, s)
+}
+
+// writeZonedInt is the shared body of the two integer zoned writers, whose only
+// difference is the digit count they accept.
+func (w *Writer) writeZonedInt(v int64, digits, max int, s SignPosition) error {
+	// Formatted rather than negated, so that the most negative int64 is
+	// written like any other value instead of overflowing on its way out.
+	return w.writeZoned(strconv.FormatInt(v, 10), v < 0, digits, max, s)
+}
+
+// writeZoned builds and writes one zoned decimal field from the decimal
+// spelling of a value.
+//
+// The whole field is validated and built before a byte of it is written, so a
+// rejected value writes nothing and cannot leave a half-field behind to
+// desynchronize the record.
+func (w *Writer) writeZoned(text string, negative bool, digits, max int, s SignPosition) error {
+	if !s.valid() {
+		return &OffsetError{Offset: w.off, Err: SignPositionError{SignPosition: s}}
+	}
+	if digits < 1 || digits > max {
+		return &OffsetError{
+			Offset: w.off,
+			Err:    ZonedDigitCountError{Digits: digits, Max: max},
+		}
+	}
+	if w.zonedErr != nil {
+		return &OffsetError{Offset: w.off, Err: w.zonedErr}
+	}
+	magnitude := strings.TrimPrefix(text, "-")
+	if len(magnitude) > digits || (negative && s == SignUnsigned) {
+		return &OffsetError{
+			Offset: w.off,
+			Err:    ZonedRangeError{Value: text, Digits: digits, Sign: s},
+		}
+	}
+
+	// Digit values, high first. Everything ahead of the value stays zero,
+	// which is the high-order zero padding a COBOL MOVE stores.
+	ds := make([]byte, digits)
+	first := digits - len(magnitude)
+	for i := 0; i < len(magnitude); i++ {
+		ds[first+i] = magnitude[i] - '0'
+	}
+
+	// The separate sign byte, where there is one, sits outside the digits;
+	// every other position is a digit byte, signed or not.
+	field := make([]byte, zonedWidth(digits, s))
+	digitBytes := field
+	switch s {
+	case SignLeadingSeparate:
+		field[0] = w.zoned.bytes.separateSignByte(negative)
+		digitBytes = field[1:]
+	case SignTrailingSeparate:
+		field[digits] = w.zoned.bytes.separateSignByte(negative)
+		digitBytes = field[:digits]
+	}
+	if err := w.zoned.encodeField(digitBytes, ds, s.overpunchAt(digits), negative); err != nil {
+		return &OffsetError{Offset: w.off, Err: err}
 	}
 	return w.write(field)
 }

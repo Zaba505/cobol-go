@@ -534,6 +534,126 @@ func (c zonedCodec) decodeField(src []byte, signAt int) (ds []byte, negative boo
 	return ds, negative, 0, nil
 }
 
+// SignPosition is where a zoned decimal (USAGE DISPLAY) item keeps its sign:
+// whether its PICTURE carries S at all, and what the SIGN clause says about the
+// byte the sign lives in.
+//
+// It is named apart from [SignConvention] because the two are different kinds
+// of fact and both are needed to read one field. *Position* comes from the
+// copybook — the PICTURE and the SIGN clause — and says which byte carries the
+// sign and how wide the field is. *Convention* comes from the file and says how
+// that byte is spelled. Neither implies the other, and no file states the
+// first.
+//
+// It subsumes [Signedness] for zoned items, which is why the zoned accessors
+// take no Signedness of their own: [SignUnsigned] is an item whose PICTURE has
+// no S, and the other four are items that have one. A negative value written
+// into a [SignUnsigned] field is a [ZonedRangeError] rather than a silent
+// absolute value, exactly as it is for a packed [Unsigned] one.
+//
+// Like [Signedness] and unlike [Justification], its zero value is invalid
+// rather than a default. COBOL's default applies only to an item that already
+// has an S — SIGN IS TRAILING — so there is no one position an item with no
+// clause at all can be assumed to have, and assuming wrongly shifts every later
+// field of the record by the byte a SEPARATE sign takes. See codec/SPEC.md,
+// "Sign position".
+type SignPosition int
+
+const (
+	// SignPositionUnset is the zero value. It names no position, and every
+	// zoned accessor rejects it.
+	SignPositionUnset SignPosition = iota
+	// SignUnsigned is an item whose PICTURE has no S. Every byte carries the
+	// plain digit zone, no sign is stored and none is read, so such a field
+	// is sign-convention-independent and only charset-sensitive.
+	SignUnsigned
+	// SignTrailing is SIGN IS TRAILING, the COBOL default for a signed item:
+	// the sign is overpunched into the zone of the *last* digit byte, and
+	// the field is digits bytes wide.
+	SignTrailing
+	// SignLeading is SIGN IS LEADING: the sign is overpunched into the zone
+	// of the *first* digit byte, and the field is still digits bytes wide.
+	SignLeading
+	// SignTrailingSeparate is SIGN IS TRAILING SEPARATE CHARACTER: the sign
+	// takes a byte of its own, '+' or '-', *after* the digits, so the field
+	// is digits+1 bytes wide and every digit byte carries the plain zone.
+	SignTrailingSeparate
+	// SignLeadingSeparate is SIGN IS LEADING SEPARATE CHARACTER: the same
+	// extra byte *before* the digits.
+	SignLeadingSeparate
+)
+
+// String implements the [fmt.Stringer] interface.
+func (s SignPosition) String() string {
+	switch s {
+	case SignUnsigned:
+		return "unsigned"
+	case SignTrailing:
+		return "trailing"
+	case SignLeading:
+		return "leading"
+	case SignTrailingSeparate:
+		return "trailing-separate"
+	case SignLeadingSeparate:
+		return "leading-separate"
+	case SignPositionUnset:
+		return "unset"
+	}
+	return "SignPosition(" + strconv.Itoa(int(s)) + ")"
+}
+
+// valid reports whether s names a position rather than the zero value or an
+// out-of-range one.
+func (s SignPosition) valid() bool {
+	return s >= SignUnsigned && s <= SignLeadingSeparate
+}
+
+// separate reports whether the sign takes a byte of its own, which is the one
+// thing about a sign position that changes a field's width.
+func (s SignPosition) separate() bool {
+	return s == SignTrailingSeparate || s == SignLeadingSeparate
+}
+
+// overpunchAt reports the index within the digit bytes of the one the sign is
+// overpunched into, or -1 when no byte is: an unsigned item has no sign, and a
+// SEPARATE one keeps it outside the digits. It is the signAt of
+// [zonedCodec.encodeField] and [zonedCodec.decodeField].
+func (s SignPosition) overpunchAt(digits int) int {
+	switch s {
+	case SignTrailing:
+		return digits - 1
+	case SignLeading:
+		return 0
+	}
+	return -1
+}
+
+// Digit counts a zoned decimal accessor accepts. As with the packed and binary
+// accessors the limit is the range of the Go type the accessor returns and not
+// a property of the field: 9 digits is the most that always fits an int32 and
+// 18 the most that always fits an int64. 31 is the IBM Enterprise COBOL
+// maximum, reachable through [Reader.ReadZonedBig] and [Writer.WriteZonedBig].
+const (
+	maxZonedInt32Digits = 9
+	maxZonedInt64Digits = 18
+	maxZonedDigits      = 31
+)
+
+// zonedWidth reports the byte width of a zoned decimal field holding digits
+// digits under sign position s: one byte per digit, plus one for a SEPARATE
+// sign. It is the whole of the zoned size model.
+//
+// Like [packedWidth] and [binaryWidth] it does not depend on scale, and unlike
+// them it is the digit count itself rather than a function of it — a V occupies
+// no byte, so PIC S9(7)V99 is nine bytes and PIC S9(7)V99 SIGN LEADING
+// SEPARATE is ten.
+func zonedWidth(digits int, s SignPosition) int {
+	if s.separate() {
+		return digits + 1
+	}
+	return digits
+}
+
 // FloatFormat is the representation of COMP-1 and COMP-2 items.
 //
 // The two formats are incompatible and neither is self-describing: an IBM
@@ -1253,6 +1373,26 @@ func (e SignednessError) Error() string {
 	return fmt.Sprintf("invalid signedness %d: an item is either Signed or Unsigned", int(e.Signedness))
 }
 
+// SignPositionError is returned when a [SignPosition] names no position, which
+// includes the zero value: a zoned decimal accessor will not guess whether the
+// item's PICTURE carries S, nor where its SIGN clause put it.
+//
+// It is [SignednessError] for USAGE DISPLAY, and the guess it refuses to make
+// is wider: a sign position is also what says whether the field is digits bytes
+// wide or digits+1.
+type SignPositionError struct {
+	// SignPosition is the value that was passed.
+	SignPosition SignPosition
+}
+
+// Error implements the [error] interface.
+func (e SignPositionError) Error() string {
+	return fmt.Sprintf(
+		"invalid sign position %d: an item is SignUnsigned, SignTrailing, SignLeading, SignTrailingSeparate or SignLeadingSeparate",
+		int(e.SignPosition),
+	)
+}
+
 // The three sentinels below guard internal contracts of the zoned helpers, and
 // none of them can reach a caller: a caller states a digit count and a sign
 // position, and it is this package that turns those into a digit slice, a field
@@ -1338,6 +1478,50 @@ type ZonedSeparateSignError struct {
 // Error implements the [error] interface.
 func (e ZonedSeparateSignError) Error() string {
 	return fmt.Sprintf("invalid separate sign byte %#02X: %s spells + as %#02X and - as %#02X", e.Byte, e.Charset, e.Plus, e.Minus)
+}
+
+// ZonedDigitCountError is returned when a zoned decimal (USAGE DISPLAY) digit
+// count is outside the range the accessor accepts.
+//
+// The upper bound belongs to the accessor rather than to the field, exactly as
+// it does for [PackedDigitCountError]: 9 digits for the int32 accessors, 18 for
+// the int64 ones and 31 — the IBM Enterprise COBOL maximum — for the
+// [math/big.Int] ones. A field wider than the accessor asked for is a call that
+// would have silently overflowed its return type, so it is refused before a
+// byte is read.
+type ZonedDigitCountError struct {
+	// Digits is the digit count that was asked for.
+	Digits int
+	// Max is the largest digit count this accessor accepts.
+	Max int
+}
+
+// Error implements the [error] interface.
+func (e ZonedDigitCountError) Error() string {
+	return fmt.Sprintf("invalid zoned decimal digit count %d: must be between 1 and %d", e.Digits, e.Max)
+}
+
+// ZonedRangeError is returned when a value cannot be written into the zoned
+// decimal field it was given: it has more digits than the field holds, or it is
+// negative and the field is [SignUnsigned].
+//
+// It is [PackedRangeError] for USAGE DISPLAY and is loud for the same reason. A
+// COBOL MOVE truncates high-order digits and stores a negative value into an
+// unsigned item as its absolute value; a codec doing either would write a
+// record that no longer says what the caller asked it to.
+type ZonedRangeError struct {
+	// Value is the decimal spelling of the value that did not fit.
+	Value string
+	// Digits is the number of digits the field holds.
+	Digits int
+	// Sign is where the field keeps its sign, which is also what says
+	// whether it has one at all.
+	Sign SignPosition
+}
+
+// Error implements the [error] interface.
+func (e ZonedRangeError) Error() string {
+	return fmt.Sprintf("value %s does not fit a %d-digit %s zoned decimal field", e.Value, e.Digits, e.Sign)
 }
 
 // PackedDigitCountError is returned when a packed decimal digit count is
