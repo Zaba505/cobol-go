@@ -15,12 +15,17 @@ import (
 // Charset is the character set of a data file: the mapping between the bytes
 // of an alphanumeric field and the characters they spell.
 //
-// Charset applies to alphanumeric and alphabetic fields and to nothing else.
-// Numeric decoding operates on raw byte values, because digit bytes (F0-F9 in
-// EBCDIC, 30-39 in ASCII) and overpunched sign zones are byte-level facts;
-// routing them through a character translation would lose information and make
-// the sign convention unrepresentable. See codec/SPEC.md, "Charset as a
-// First-Class Axis".
+// Charset *translation* is applied to alphanumeric and alphabetic fields and to
+// nothing else. Numeric decoding operates on raw byte values, because digit
+// bytes (F0-F9 in EBCDIC, 30-39 in ASCII) and overpunched sign zones are
+// byte-level facts; routing them through a character translation would lose
+// information and make the sign convention unrepresentable.
+//
+// Which charset is declared still matters to a numeric field, because it is
+// what says whether that field's digits are spelled F0-F9 or 30-39 and whether
+// a separate sign is 4E/60 or 2B/2D. Those byte values are compared, not
+// translated — the distinction this paragraph and the one above it draw.
+// See codec/SPEC.md, "Charset as a First-Class Axis".
 //
 // A Charset is an interface rather than an enum so that nil is detectable:
 // [Encoding] must have an invalid zero value in every field. It is also the
@@ -257,8 +262,10 @@ func (f FloatFormat) valid() bool {
 // bundles ([IBMEnterprise] and friends) are constructors that fill in all four,
 // never defaults the package applies on its own.
 type Encoding struct {
-	// Charset governs alphanumeric fields, the digit zone of zoned decimal
-	// and the byte values of a separate sign. Required; nil is invalid.
+	// Charset is the character set of the file. Its translation table is
+	// applied to alphanumeric fields; for zoned decimal it fixes which byte
+	// values the digit zone and a separate sign take, which are compared
+	// rather than translated. See [Charset]. Required; nil is invalid.
 	Charset Charset
 	// Sign governs how an overpunched zoned decimal sign is spelled.
 	// Required; [SignUnset] is invalid.

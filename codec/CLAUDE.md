@@ -83,9 +83,13 @@ alphanumeric data round-trip unchanged; `TestCharsetIsTotalAndBijective`
 asserts it for every charset, so a new one gets that check for free by being
 added to its table.
 
-Charset applies to **alphanumeric fields only**. Numeric decoding works on raw
-byte values — digit zones and overpunch signs are byte-level facts, and routing
-them through a character translation makes the sign convention unrepresentable.
+Charset *translation* applies to **alphanumeric fields only**. Numeric decoding
+works on raw byte values — digit zones and overpunch signs are byte-level facts,
+and routing them through a character translation makes the sign convention
+unrepresentable. The declared charset still matters to a numeric field: it says
+whether the digits are `F0`–`F9` or `30`–`39` and whether a separate sign is
+`4E`/`60` or `2B`/`2D`. Compare those byte values; do not call `ToUnicode` on
+them.
 
 ## Testing style
 
