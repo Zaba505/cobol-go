@@ -16,14 +16,19 @@ import (
 //
 // stride and occurs default to length and 1, so a table states them only where
 // slack or an OCCURS clause makes them interesting — which is exactly where the
-// arithmetic is worth reading twice.
+// arithmetic is worth reading twice. minOccurs and maxOccurs default to occurs,
+// so only an OCCURS ... DEPENDING ON row states them; dependsOn is the name of
+// the item such a row takes its count from, empty for every other row.
 type span struct {
-	name   string
-	offset int
-	length int
-	stride int
-	occurs int
-	slack  int
+	name      string
+	offset    int
+	length    int
+	stride    int
+	occurs    int
+	slack     int
+	minOccurs int
+	maxOccurs int
+	dependsOn string
 }
 
 // records builds the record tree of a copybook source, driving the real parser
@@ -65,6 +70,13 @@ func requireSpans(t *testing.T, l *Layout, want []span) {
 		if occurs == 0 {
 			occurs = 1
 		}
+		minOccurs, maxOccurs := w.minOccurs, w.maxOccurs
+		if minOccurs == 0 {
+			minOccurs = occurs
+		}
+		if maxOccurs == 0 {
+			maxOccurs = occurs
+		}
 
 		require.Equal(t, w.name, got.Field.Name, "item %d: name", i)
 		require.Equal(t, w.offset, got.Offset, "%s: offset", w.name)
@@ -74,6 +86,15 @@ func requireSpans(t *testing.T, l *Layout, want []span) {
 		require.Equal(t, w.slack, got.Slack, "%s: slack", w.name)
 		require.Equal(t, stride*occurs, got.Total(), "%s: total", w.name)
 		require.Equal(t, w.offset+stride*occurs, got.End(), "%s: end", w.name)
+		require.Equal(t, minOccurs, got.MinOccurs, "%s: min occurs", w.name)
+		require.Equal(t, maxOccurs, got.MaxOccurs, "%s: max occurs", w.name)
+
+		if w.dependsOn == "" {
+			require.Nil(t, got.DependingOn, "%s: depends on nothing", w.name)
+			continue
+		}
+		require.NotNil(t, got.DependingOn, "%s: depends on %q", w.name, w.dependsOn)
+		require.Equal(t, w.dependsOn, got.DependingOn.Field.Name, "%s: depends on", w.name)
 	}
 }
 
@@ -601,16 +622,6 @@ func TestNewLayoutErrors(t *testing.T) {
 		target   any
 		contains string
 	}{
-		{
-			name: "occurs depending on has no static layout",
-			src: `01 R.
-   05 N PIC 9(2).
-   05 A PIC X(3) OCCURS 1 TO 5 TIMES DEPENDING ON N.
-`,
-			dialect:  IBMEnterprise(),
-			target:   &OccursError{},
-			contains: "OCCURS DEPENDING ON",
-		},
 		{
 			name: "occurs with a range and no depending on has no fixed length",
 			src: `01 R.
