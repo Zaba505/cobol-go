@@ -7,6 +7,7 @@ package cobol
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -44,6 +45,7 @@ const (
 	TokenNumber                      // e.g. 123, 45.67
 	TokenPicture                     // e.g. S9(4)V99, X(10) (the SPEC's PictureString)
 	TokenDebug                       // a fixed-format column-7 'D'/'d' debugging line
+	TokenPseudoText                  // e.g. ==:TAG:==, the COPY REPLACING operand form
 )
 
 func (tt TokenType) String() string {
@@ -62,6 +64,8 @@ func (tt TokenType) String() string {
 		return "Picture"
 	case TokenDebug:
 		return "Debug"
+	case TokenPseudoText:
+		return "PseudoText"
 	default:
 		panic(fmt.Sprintf("unknown token type: %d", tt))
 	}
@@ -354,7 +358,8 @@ func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction 
 // This recognizes COBOL words, alphanumeric literals, numeric literals, the
 // separator period, the readability separators comma and semicolon, the
 // parenthesis and colon separators, the special-character operators
-// (+ - * / ** = < > <= >= <>), the concatenation operator & (the free-format
+// (+ - * / ** = < > <= >= <>), the pseudo-text delimiter == (SPEC
+// §"COPY and Pseudo-Text"), the concatenation operator & (the free-format
 // literal-continuation mechanism), and the inline/full-line comment introducer
 // *>. The compiler-directive introducer >> is tokenized by a later story; until
 // then >> lexes as two > operators.
@@ -362,7 +367,16 @@ func dispatchRune(t *tokenizer, yield func(Token, error) bool, pos Pos, r rune) 
 	switch {
 	case r == '.':
 		return tokenizeSeparatorPeriod(pos)
-	case r == '(' || r == ')' || r == ':' || r == '=' || r == '/' || r == '&':
+	case r == '(' || r == ')' || r == ':' || r == '/' || r == '&':
+		return yieldSymbol(pos, utf8.AppendRune(nil, r))
+	case r == '=':
+		// == opens pseudo-text (the COPY REPLACING operand form); a lone = is
+		// the relation character. == is not a valid operator, so the two-rune
+		// form is unambiguous and is matched greedily.
+		if b, ok := t.peekByte(); ok && b == '=' {
+			_, _ = t.next()
+			return tokenizePseudoText(pos)
+		}
 		return yieldSymbol(pos, utf8.AppendRune(nil, r))
 	case r == ',' || r == ';':
 		return tokenizeSeparatorPunct(pos, r)
@@ -563,6 +577,57 @@ func (t *tokenizer) fixedAdvanceToContinuation() bool {
 				continue
 			}
 			return false
+		}
+	}
+}
+
+// fixedAdvanceToContentLine positions a fixed-format token that may span records
+// without a continuation indicator — pseudo-text is the only one — at the start
+// of the content area (column 8) of the next line that carries content. It
+// consumes the rest of the current line, then skips blank lines and full-line
+// comment lines ('*' or '/' in the indicator column), consuming the indicator of
+// the line it settles on. Any other indicator, continuation hyphen included, is
+// accepted as a content line: unlike a continued word or literal, pseudo-text is
+// a sequence of whole text words, so the next record simply continues it. It
+// reports false at end of input, with no content line found.
+func (t *tokenizer) fixedAdvanceToContentLine() bool {
+	if !t.fixedConsumeToLineEnd() {
+		return false
+	}
+	for {
+		// Skip the sequence area (columns 1–6). A terminator here marks a blank
+		// or short line, which carries no content.
+		blank := false
+		for t.pos.Column < fixedIndicatorColumn {
+			r, err := t.next()
+			if err != nil {
+				return false
+			}
+			if r == '\n' {
+				blank = true
+				break
+			}
+		}
+		if blank {
+			continue
+		}
+		// At the indicator column (7).
+		r, ok := t.peekRune()
+		if !ok {
+			return false
+		}
+		switch r {
+		case '\n', '\r':
+			_, _ = t.next() // blank line through the indicator column
+		case '*', '/':
+			// A full-line comment interrupting pseudo-text is skipped, not
+			// emitted: the pseudo-text operand resumes on the line after it.
+			if !t.fixedConsumeToLineEnd() {
+				return false
+			}
+		default:
+			_, _ = t.next() // consume the indicator; the reader is now at column 8.
+			return true
 		}
 	}
 }
@@ -1013,6 +1078,121 @@ func tokenizeString(start Pos, delim rune) tokenizerAction {
 	}
 }
 
+// tokenizePseudoText accumulates a pseudo-text literal — the == … == form that
+// supplies both operands of a COPY statement's REPLACING phrase — into a single
+// [TokenPseudoText]. The opening == was consumed at start; scanning runs to the
+// closing ==, which may be on a later line: pseudo-text is a sequence of text
+// words, and nothing about it is confined to one line.
+//
+// Unlike [tokenizeString], which keeps its delimiters in the token value, the
+// value here is the text *between* the delimiters, normalized: every run of
+// whitespace outside an alphanumeric literal collapses to a single space and
+// leading and trailing whitespace is dropped. The delimiters carry no
+// information the token type does not already give, and the normalization is
+// what makes a pseudo-text operand written across two lines — or across two
+// fixed-format records — compare equal to the same one written on a single
+// line. Whitespace inside an alphanumeric literal is preserved verbatim, so
+// == "A  B" == still matches the literal it names.
+//
+// In fixed format the scan honors the column areas: it stops at column 72 and
+// resumes in the content area of the next non-comment line, which is why a
+// pseudo-text operand may straddle records without a continuation indicator.
+// Reaching end of input with no closing == is an [UnterminatedPseudoTextError].
+func tokenizePseudoText(start Pos) tokenizerAction {
+	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		var value []byte
+		fail := func(err error) tokenizerAction {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				err = UnterminatedPseudoTextError{Pos: start}
+			}
+			yield(Token{}, err)
+			return nil
+		}
+		// appendSpace collapses a run of whitespace to one space and drops it
+		// entirely at the start of the value, so the normalization never has to
+		// re-scan what was accumulated.
+		appendSpace := func() {
+			if len(value) > 0 && value[len(value)-1] != ' ' {
+				value = append(value, ' ')
+			}
+		}
+		for {
+			if t.fixed && (t.pos.Column > fixedAreaBEndColumn || t.peekIsLineEnd()) {
+				if !t.fixedAdvanceToContentLine() {
+					return fail(UnterminatedPseudoTextError{Pos: start})
+				}
+				appendSpace()
+				continue
+			}
+			r, err := t.next()
+			if err != nil {
+				return fail(err)
+			}
+			switch {
+			case unicode.IsSpace(r):
+				appendSpace()
+			case r == '=':
+				if b, ok := t.peekByte(); ok && b == '=' {
+					_, _ = t.next()
+					tok := Token{
+						Pos:   start,
+						Type:  TokenPseudoText,
+						Value: bytes.TrimSuffix(value, []byte(" ")),
+					}
+					return yieldTokenThen(tok, tokenizeCOBOL)
+				}
+				value = utf8.AppendRune(value, r)
+			case r == '"' || r == '\'':
+				// An alphanumeric literal is one text word: copy it verbatim,
+				// delimiters and interior spacing included, so the normalization
+				// above cannot rewrite its content.
+				value = utf8.AppendRune(value, r)
+				lit, err := t.scanPseudoTextLiteral(&value, r)
+				if err != nil {
+					return fail(err)
+				}
+				if !lit {
+					return fail(UnterminatedPseudoTextError{Pos: start})
+				}
+			default:
+				value = utf8.AppendRune(value, r)
+			}
+		}
+	}
+}
+
+// scanPseudoTextLiteral copies an alphanumeric literal inside pseudo-text into
+// value, from just after its opening delim through its closing delim, treating a
+// doubled delimiter as an escaped one exactly as [tokenizeString] does. It
+// reports false when the literal does not close before the end of the line (in
+// fixed format, before column 73) — a pseudo-text operand may span lines, but a
+// literal inside one may not, since the continuation indicator that would join it
+// belongs to the record and not to the pseudo-text.
+func (t *tokenizer) scanPseudoTextLiteral(value *[]byte, delim rune) (bool, error) {
+	for {
+		if t.fixed && (t.pos.Column > fixedAreaBEndColumn || t.peekIsLineEnd()) {
+			return false, nil
+		}
+		r, err := t.next()
+		if err != nil {
+			return false, err
+		}
+		if r == '\n' || r == '\r' {
+			return false, nil
+		}
+		*value = utf8.AppendRune(*value, r)
+		if r != delim {
+			continue
+		}
+		if b, ok := t.peekByte(); ok && rune(b) == delim {
+			escaped, _ := t.next()
+			*value = utf8.AppendRune(*value, escaped)
+			continue
+		}
+		return true, nil
+	}
+}
+
 // tokenizeComment accumulates a free-format inline or full-line comment into a
 // single [TokenComment]. The comment is introduced by *> (SPEC §Comments) and
 // runs to the end of the physical line; value already holds the *> introducer,
@@ -1095,4 +1275,17 @@ type UnterminatedStringError struct {
 // Error implements the [error] interface.
 func (e UnterminatedStringError) Error() string {
 	return fmt.Sprintf("unterminated string literal starting at line %d, column %d", e.Pos.Line, e.Pos.Column)
+}
+
+// UnterminatedPseudoTextError is returned by the tokenizer when a pseudo-text
+// literal opened with == is not closed by a matching == before end of input, or
+// when an alphanumeric literal inside it is not closed before the end of its
+// line.
+type UnterminatedPseudoTextError struct {
+	Pos Pos // position of the opening ==
+}
+
+// Error implements the [error] interface.
+func (e UnterminatedPseudoTextError) Error() string {
+	return fmt.Sprintf("unterminated pseudo-text starting at line %d, column %d", e.Pos.Line, e.Pos.Column)
 }

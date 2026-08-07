@@ -1596,6 +1596,10 @@ type parseConfig struct {
 	// description entries only) rather than as a sequence of programs. False —
 	// a whole source file — is the default.
 	fragment bool
+	// copyBooks supplies the library text of COPY statements. Nil — no
+	// expansion, and a COPY statement in the source is an error — is the
+	// default.
+	copyBooks CopyBookResolver
 }
 
 // WithSourceFormat selects the reference format [Parse] uses to tokenize the
@@ -1637,6 +1641,33 @@ func WithFragment() ParseOption {
 	return func(c *parseConfig) { c.fragment = true }
 }
 
+// WithCopyBooks gives [Parse] the [CopyBookResolver] it expands COPY statements
+// with. COPY is COBOL's text-manipulation facility: the library text the
+// statement names logically replaces the statement — the COPY word through its
+// terminating period, inclusive — before the source is compiled, so a resolver
+// is the one thing needed to read a program whose record layouts live in
+// copybooks.
+//
+// A copybook is read in the same reference format as the source that copies it,
+// so a fixed-format program's copybooks need no configuration of their own, and
+// it may itself contain COPY statements; a copybook that copies itself, directly
+// or through others, is a [CopyBookCycleError] rather than an expansion that
+// never ends. A REPLACING phrase is applied to the copybook's text before that
+// text is tokenized, which is what lets ==:TAG:== BY ==CUST== turn
+// :TAG:-CUSTOMER-ID into the single word CUST-CUSTOMER-ID.
+//
+// [FSCopyBooks] serves copybooks from any [fs.FS] — a directory through
+// os.DirFS, or an embed.FS — and [MapCopyBooks] serves them from memory; any
+// other lookup is a [CopyBookFunc].
+//
+// Nothing of the COPY statement survives into the [File]: the AST holds the
+// copied entries themselves, and their positions are positions within the
+// copybook. Without this option a COPY statement in the source is a
+// [MissingCopyBookResolverError].
+func WithCopyBooks(r CopyBookResolver) ParseOption {
+	return func(c *parseConfig) { c.copyBooks = r }
+}
+
 // Parse the COBOL source from the given reader into a [File].
 //
 // It pulls tokens from [Tokenize] with [iter.Pull2] and runs the top-level
@@ -1649,6 +1680,11 @@ func WithFragment() ParseOption {
 // By default the source is read as a whole source file: one or more programs,
 // each beginning with an IDENTIFICATION DIVISION. Pass [WithFragment] to read a
 // standalone copybook — data description entries alone — instead.
+//
+// COPY statements are expanded before the token stream reaches the parser, so
+// nothing of them appears in the [File]. Pass [WithCopyBooks] to supply the
+// copybooks; a source that copies without one is a
+// [MissingCopyBookResolverError].
 func Parse(r io.Reader, opts ...ParseOption) (*File, error) {
 	cfg := parseConfig{} // zero value => FreeFormat
 	for _, opt := range opts {
@@ -1665,7 +1701,19 @@ func Parse(r io.Reader, opts ...ParseOption) (*File, error) {
 		panic(fmt.Sprintf("unknown source format: %d", cfg.format))
 	}
 
-	next, stop := iter.Pull2(Tokenize(r, topts...))
+	// COPY is a text-manipulation statement, not a construct of the grammar: the
+	// expansion pass sits between the tokenizer and the parser so every division,
+	// section and entry parser below sees only the copied text. It runs even when
+	// no resolver was configured, so that a COPY met without one is reported as
+	// the missing resolver it is rather than as a stray word in whatever
+	// construct happened to be open.
+	tokens := expandCopy(
+		Tokenize(r, topts...),
+		copyConfig{resolver: cfg.copyBooks, tokenizeOptions: topts},
+		nil,
+	)
+
+	next, stop := iter.Pull2(tokens)
 	defer stop()
 
 	p := &parser{pull: next}
