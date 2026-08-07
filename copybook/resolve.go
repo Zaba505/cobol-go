@@ -284,7 +284,7 @@ func readCount(f *Field, control *Item, data []byte) (int, error) {
 	case UsageDisplay:
 		value, err = zonedValue(control.Field, data[control.Offset:end])
 	case UsagePackedDecimal, UsageComp3:
-		value, err = packedValue(data[control.Offset:end])
+		value, err = packedValue(data[control.Offset:end], control.Field.Picture.Digits)
 	default:
 		return fail("controlling item %s is a USAGE %s item, whose value depends on the byte order of the file it came from: read it with the codec package and call ResolveCounts",
 			describe(control.Field), control.Field.Usage)
@@ -301,18 +301,29 @@ func readCount(f *Field, control *Item, data []byte) (int, error) {
 // zoned digit and sign zones, the high nibble of a USAGE DISPLAY digit byte.
 //
 // A digit byte is F0–F9 in EBCDIC and 30–39 in ASCII, so a zone of F or 3 is a
-// plain digit under either charset. The last byte of a signed non-separate item
-// carries the sign in that nibble instead, and the positive zones are C in
-// EBCDIC, 4 in a translated-EBCDIC file, and 3 under the ASCII conventions —
-// which is the plain digit zone (codec/SPEC.md, "Zoned Sign Conventions"). The
-// negative zones are deliberately absent: an occurrence count is never negative,
-// so a byte carrying one is an error and not a value to take the absolute value
-// of.
+// plain digit under either charset. The digit byte a signed non-separate item
+// overpunches its sign into carries the sign in that nibble instead, and the
+// positive zones are C in EBCDIC, 4 in a translated-EBCDIC file, and 3 under the
+// ASCII conventions — which is the plain digit zone (codec/SPEC.md, "Zoned Sign
+// Conventions"). The negative zones are deliberately absent: an occurrence count
+// is never negative, so a byte carrying one is an error and not a value to take
+// the absolute value of.
 const (
 	zoneEBCDIC          = 0xF
 	zoneASCII           = 0x3
 	zonePositiveEBCDIC  = 0xC
 	zonePositiveTranslt = 0x4
+)
+
+// separate sign bytes: '+' and '-' as SIGN IS ... SEPARATE CHARACTER writes them,
+// 2B/2D in ASCII and 4E/60 in EBCDIC (codec/SPEC.md, "Charset as a First-Class
+// Axis"). Neither charset's pair collides with the other's, so the byte says
+// which sign it is without the charset being declared.
+const (
+	signPlusASCII   = 0x2B
+	signPlusEBCDIC  = 0x4E
+	signMinusASCII  = 0x2D
+	signMinusEBCDIC = 0x60
 )
 
 // zonedValue reads the unsigned integer value of a USAGE DISPLAY item.
@@ -323,9 +334,22 @@ const (
 // is checked all the same, so that a blank field or a negative one is an error
 // rather than a plausible count.
 func zonedValue(f *Field, b []byte) (int64, error) {
-	signed := f.Picture.Signed
-	if signed && separateSign(f) {
-		if clause := inheritedSign(f); clause != nil && clause.Position == "LEADING" {
+	sign := inheritedSign(f)
+	leading := sign != nil && sign.Position == "LEADING"
+
+	// SIGN IS ... SEPARATE CHARACTER spends a byte of its own on the sign,
+	// at whichever end the clause names. It is checked rather than merely
+	// skipped: a '-' there is a negative count, and dropping the byte
+	// unread would turn it into a positive one.
+	if f.Picture.Signed && sign != nil && sign.Separate {
+		at := len(b) - 1
+		if leading {
+			at = 0
+		}
+		if err := checkSeparateSign(b[at], at); err != nil {
+			return 0, err
+		}
+		if leading {
 			b = b[1:]
 		} else {
 			b = b[:len(b)-1]
@@ -335,11 +359,22 @@ func zonedValue(f *Field, b []byte) (int64, error) {
 		return 0, fmt.Errorf("holds no digit positions")
 	}
 
+	// A signed item with no separate sign byte overpunches the sign into the
+	// zone of one digit byte: the first under SIGN IS LEADING and the last
+	// otherwise, TRAILING being the default.
+	signAt := -1
+	if f.Picture.Signed && (sign == nil || !sign.Separate) {
+		signAt = len(b) - 1
+		if leading {
+			signAt = 0
+		}
+	}
+
 	var value int64
 	for i, c := range b {
 		zone, digit := c>>4, int64(c&0x0f)
 		ok := zone == zoneEBCDIC || zone == zoneASCII
-		if !ok && signed && i == len(b)-1 {
+		if !ok && i == signAt {
 			ok = zone == zonePositiveEBCDIC || zone == zonePositiveTranslt
 		}
 		if !ok || digit > 9 {
@@ -350,42 +385,81 @@ func zonedValue(f *Field, b []byte) (int64, error) {
 	return value, nil
 }
 
-// packedValue reads the unsigned integer value of a PACKED-DECIMAL / COMP-3 item:
-// two digits per byte, most significant first, with the sign in the low nibble of
-// the last byte.
+// checkSeparateSign reports whether a SIGN IS ... SEPARATE CHARACTER byte is the
+// '+' of a positive value. A '-' is named as such, because a negative occurrence
+// count is a record that does not match the copybook rather than a count to take
+// the absolute value of.
+func checkSeparateSign(c byte, at int) error {
+	switch c {
+	case signPlusASCII, signPlusEBCDIC:
+		return nil
+	case signMinusASCII, signMinusEBCDIC:
+		return fmt.Errorf("byte %d is %#02x, a negative sign", at, c)
+	}
+	return fmt.Errorf("byte %d is %#02x, which is no separate sign", at, c)
+}
+
+// packedValue reads the unsigned integer value of a PACKED-DECIMAL / COMP-3 item
+// of the given digit count: two digits per byte, most significant first, with the
+// sign in the low nibble of the last byte.
 //
 // Packed decimal is nibbles rather than characters, so it reads the same whatever
 // charset the file uses, and it has no byte order to get wrong.
-func packedValue(b []byte) (int64, error) {
+//
+// An even digit count leaves one nibble over at the front, because the item is
+// one nibble per digit plus a sign nibble rounded up to a whole byte. That pad
+// nibble is written as zero, and a non-zero one is checked rather than read as a
+// leading digit: it means the bytes in hand do not line up with the copybook, and
+// reading it would turn a slipped offset into a plausible count.
+func packedValue(b []byte, digits int) (int64, error) {
 	if len(b) == 0 {
 		return 0, fmt.Errorf("holds no digit positions")
 	}
 
-	var value int64
-	for i, c := range b {
-		hi, lo := int64(c>>4), int64(c&0x0f)
-		if hi > 9 {
-			return 0, fmt.Errorf("byte %d is %#02x, whose high nibble is no digit", i, c)
-		}
-		value = value*10 + hi
+	pad := 2*len(b) - 1 - digits
+	if pad < 0 || pad > 1 {
+		return 0, fmt.Errorf("holds %d bytes, which is no %d-digit packed value", len(b), digits)
+	}
+	if pad == 1 && b[0]>>4 != 0 {
+		return 0, fmt.Errorf("byte 0 is %#02x, whose high nibble pads a %d-digit value and is not zero", b[0], digits)
+	}
 
-		if i == len(b)-1 {
-			// D and B are the negative sign nibbles; C, F, A and E are
-			// the positive and unsigned ones.
-			if lo == 0xD || lo == 0xB {
-				return 0, fmt.Errorf("byte %d is %#02x, whose sign nibble is negative", i, c)
-			}
-			if lo < 0xA {
-				return 0, fmt.Errorf("byte %d is %#02x, whose low nibble is no sign", i, c)
-			}
-			break
+	var value int64
+	for i := pad; i < 2*len(b)-1; i++ {
+		d := nibbleAt(b, i)
+		if d > 9 {
+			return 0, fmt.Errorf("byte %d is %#02x, whose %s nibble is no digit", i/2, b[i/2], nibbleHalf(i))
 		}
-		if lo > 9 {
-			return 0, fmt.Errorf("byte %d is %#02x, whose low nibble is no digit", i, c)
-		}
-		value = value*10 + lo
+		value = value*10 + int64(d)
+	}
+
+	// D and B are the negative sign nibbles; C, F, A and E are the positive
+	// and unsigned ones.
+	last := b[len(b)-1]
+	switch sign := last & 0x0f; {
+	case sign == 0xD || sign == 0xB:
+		return 0, fmt.Errorf("byte %d is %#02x, whose sign nibble is negative", len(b)-1, last)
+	case sign < 0xA:
+		return 0, fmt.Errorf("byte %d is %#02x, whose low nibble is no sign", len(b)-1, last)
 	}
 	return value, nil
+}
+
+// nibbleAt returns nibble i of b, counting the high nibble of the first byte as
+// nibble zero.
+func nibbleAt(b []byte, i int) byte {
+	if i%2 == 0 {
+		return b[i/2] >> 4
+	}
+	return b[i/2] & 0x0f
+}
+
+// nibbleHalf names which half of its byte nibble i is, for an error message.
+func nibbleHalf(i int) string {
+	if i%2 == 0 {
+		return "high"
+	}
+	return "low"
 }
 
 // DependingError is returned for an OCCURS ... DEPENDING ON phrase that cannot be

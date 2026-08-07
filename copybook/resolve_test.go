@@ -211,6 +211,25 @@ func TestLayoutResolve(t *testing.T) {
 			length: 26,
 		},
 		{
+			name: "a leading sign is overpunched into the first digit byte",
+			src: `01 R.
+   05 N PIC S9(2) SIGN LEADING.
+   05 A PIC X(2) OCCURS 1 TO 20 TIMES DEPENDING ON N.
+`,
+			// EBCDIC C1 F2: a positive 12, the sign overpunched
+			// into the zone of the *first* digit.
+			data: append([]byte{0xC1, 0xF2}, make([]byte, 32)...),
+			want: []span{
+				{name: "R", offset: 0, length: 26},
+				{name: "N", offset: 0, length: 2},
+				{
+					name: "A", offset: 2, length: 2, occurs: 12,
+					minOccurs: 1, maxOccurs: 20, dependsOn: "N",
+				},
+			},
+			length: 26,
+		},
+		{
 			name: "a separate sign byte is not a digit of the count",
 			src: `01 R.
    05 N PIC S9(2) SIGN LEADING SEPARATE.
@@ -245,6 +264,25 @@ func TestLayoutResolve(t *testing.T) {
 				{name: "TAIL", offset: 10, length: 1},
 			},
 			length: 11,
+		},
+		{
+			name: "an even packed digit count pads its leading nibble",
+			src: `01 R.
+   05 N PIC 9(4) COMP-3.
+   05 A PIC X(2) OCCURS 1 TO 9 TIMES DEPENDING ON N.
+`,
+			// PIC 9(4) COMP-3 is three bytes: a pad nibble, four
+			// digit nibbles and a sign nibble.
+			data: append([]byte{0x00, 0x00, 0x3F}, make([]byte, 32)...),
+			want: []span{
+				{name: "R", offset: 0, length: 9},
+				{name: "N", offset: 0, length: 3},
+				{
+					name: "A", offset: 3, length: 2, occurs: 3,
+					minOccurs: 1, maxOccurs: 9, dependsOn: "N",
+				},
+			},
+			length: 9,
 		},
 		{
 			name: "the fields of a resolved group table sit under every occurrence",
@@ -540,6 +578,59 @@ func TestLayoutResolveErrors(t *testing.T) {
 			data:     append([]byte{0x00, 0x2D}, make([]byte, 32)...),
 			target:   &DependingError{},
 			contains: "whose sign nibble is negative",
+		},
+		{
+			name: "a negative separate sign is not a count",
+			src: `01 R.
+   05 N PIC S9(2) SIGN LEADING SEPARATE.
+   05 A PIC X(3) OCCURS 1 TO 5 TIMES DEPENDING ON N.
+`,
+			data:     append([]byte("-03"), make([]byte, 32)...),
+			target:   &DependingError{},
+			contains: "byte 0 is 0x2d, a negative sign",
+		},
+		{
+			name: "a trailing separate sign is checked at its own end",
+			src: `01 R.
+   05 N PIC S9(2) SIGN TRAILING SEPARATE.
+   05 A PIC X(3) OCCURS 1 TO 5 TIMES DEPENDING ON N.
+`,
+			// EBCDIC 60 is the '-' of a separate sign.
+			data:     append([]byte{0xF0, 0xF3, 0x60}, make([]byte, 32)...),
+			target:   &DependingError{},
+			contains: "byte 2 is 0x60, a negative sign",
+		},
+		{
+			name: "a separate sign byte that is neither plus nor minus is not a count",
+			src: `01 R.
+   05 N PIC S9(2) SIGN LEADING SEPARATE.
+   05 A PIC X(3) OCCURS 1 TO 5 TIMES DEPENDING ON N.
+`,
+			data:     append([]byte("x03"), make([]byte, 32)...),
+			target:   &DependingError{},
+			contains: "which is no separate sign",
+		},
+		{
+			name: "a leading overpunched sign is not accepted at the other end",
+			src: `01 R.
+   05 N PIC S9(2) SIGN LEADING.
+   05 A PIC X(3) OCCURS 1 TO 5 TIMES DEPENDING ON N.
+`,
+			// F0 C3 overpunches the last byte, which is where a
+			// TRAILING sign goes and not a LEADING one.
+			data:     append([]byte{0xF0, 0xC3}, make([]byte, 32)...),
+			target:   &DependingError{},
+			contains: "which is no unsigned digit",
+		},
+		{
+			name: "a packed pad nibble holding a digit is not a count",
+			src: `01 R.
+   05 N PIC 9(4) COMP-3.
+   05 A PIC X(3) OCCURS 1 TO 5 TIMES DEPENDING ON N.
+`,
+			data:     append([]byte{0x10, 0x00, 0x3F}, make([]byte, 32)...),
+			target:   &DependingError{},
+			contains: "whose high nibble pads a 4-digit value and is not zero",
 		},
 		{
 			name: "a packed controlling field holding no sign nibble is not a count",
