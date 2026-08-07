@@ -80,11 +80,15 @@ field **starts** at rather than the one it ends at, for the same reason: a
 binary field is several bytes wide and a range error is a statement about the
 whole field, most often that `Encoding.ByteOrder` is wrong.
 
+The third is `FloatRangeError`, stamped by `Reader.ReadFloat32` with the offset
+the field **starts** at for the same reason as `BinaryRangeError`.
+
 Leaves are typed values (`EncodingError`, `FieldWidthError`,
 `FieldTooLongError`, `UnrepresentableRuneError`, `JustificationError`,
 `SignednessError`, `PackedDigitCountError`, `PackedPadError`,
 `PackedDigitError`, `PackedSignError`, `PackedRangeError`,
-`BinaryDigitCountError`, `BinaryRangeError`) or stdlib sentinels
+`BinaryDigitCountError`, `BinaryRangeError`, `FloatRangeError`) or stdlib
+sentinels
 (`io.EOF`, `io.ErrUnexpectedEOF`, `io.ErrShortWrite`, `ErrNilValue`). Callers
 use `errors.Is` for the cause and `errors.As` for the offset; tests assert both.
 
@@ -123,6 +127,41 @@ wrongly, which the SPEC classifies as loud-indirectly.
 Signedness on the read side is the *method name* (`ReadBinaryUint64` is the
 unsigned reading of the same bytes); on the write side it is the `Signedness`
 argument, as it is for packed.
+
+## Floating point: one axis, and one exception to every other rule
+
+`COMP-1` (4 bytes) and `COMP-2` (8) take **no PICTURE**, so `ReadFloat32`,
+`ReadFloat64`, `WriteFloat32` and `WriteFloat64` take **no `digits` and no
+`Signedness`** — the two arguments every other numeric accessor requires. Do not
+add either "for consistency": there is no digit count to declare, no scale, and
+no `S` clause to select a sign convention from.
+
+`Encoding.Float` is the whole of the fork, and it is the package's cleanest
+example of a silent failure: every bit pattern is valid in both formats. IEEE
+`1.0` is `3F 80 00 00` and reads as `0.03125` under HFP; HFP `1.0` is
+`41 10 00 00` and reads as `9.0` under IEEE.
+
+**HFP ignores `Encoding.ByteOrder`** and is always big-endian — it predates any
+little-endian IBM platform. IEEE follows the axis. The float tests state the
+byte order axis as little-endian in the HFP cases precisely so that a reader or
+writer that started consulting it would fail them.
+
+The conversion lives in `hfpFromFloat` / `floatFromHFP` in `types.go`:
+sign-magnitude, a 7-bit excess-64 **base-16** exponent, and a normalized base-16
+fraction with **no implied leading one**. Three consequences worth keeping in
+mind:
+
+- Normalizing to a hex digit boundary costs up to 3 bits of fraction. A float64
+  survives HFP long exactly (56 bits leave room for the 3); a float32 may not
+  survive HFP short (24 leave none), so round-trip fixtures use values with at
+  most three significant hex digits.
+- HFP has no NaN, no infinity and no negative zero, and its range (16^±64) is
+  neither a subset nor a superset of a float64's. Anything unrepresentable is a
+  `FloatRangeError` and writes nothing — never an infinity, never a flush to
+  zero.
+- The reader accepts **unnormalized** fields (z/OS arithmetic produces them);
+  the writer emits only normalized ones. That asymmetry is deliberate and is why
+  byte-equality fixtures use patterns the writer would have produced.
 
 ## Charsets
 

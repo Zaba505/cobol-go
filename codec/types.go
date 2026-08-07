@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -674,6 +675,127 @@ func signExtend(raw uint64, width int) int64 {
 	return int64(raw<<shift) >> shift
 }
 
+// comp1Width and comp2Width are the storage widths of the two floating point
+// usages. Neither takes a PICTURE — the usage alone fixes the format — so
+// unlike every other numeric item their width is not a function of a digit
+// count, and there is no digit count to pass an accessor.
+const (
+	comp1Width = 4
+	comp2Width = 8
+)
+
+// hfpExponentBias is the bias of an IBM hexadecimal floating point exponent.
+// The stored seven-bit field holds the exponent plus 64, base 16, so 0x41
+// denotes 16^1 and 0x40 denotes 16^0.
+const hfpExponentBias = 64
+
+// hfpMaxExponent is the largest stored exponent a seven-bit field holds, and
+// therefore the top of HFP's range: 16^63, since a fraction is always below 1.
+const hfpMaxExponent = 0x7F
+
+// hfpFracBits reports the width in bits of the fraction of an HFP field of
+// width bytes. The sign takes one bit and the exponent seven; all the rest is
+// fraction, which is 24 bits for the short (COMP-1) form and 56 for the long
+// (COMP-2) one.
+func hfpFracBits(width int) uint { return uint(8*width - 8) }
+
+// floatFromHFP decodes the big-endian bit pattern of an IBM hexadecimal
+// floating point field of width bytes to the number it denotes.
+//
+// The value is ±0.fraction₁₆ × 16^(exponent − 64). The fraction is a base-16
+// fraction with an implied radix point to its left and — unlike IEEE — no
+// implied leading one, which is why the two formats read each other's bytes as
+// plausible wrong numbers rather than as errors.
+//
+// A zero fraction is zero whatever the exponent and whatever the sign bit,
+// which is what makes the all-zero field the true zero. HFP has no negative
+// zero, no NaN and no infinity: every bit pattern denotes an ordinary number.
+//
+// An unnormalized field — one whose leading hex digit is zero — denotes exactly
+// what the formula gives and is decoded rather than rejected. Nothing here
+// writes one, but z/OS arithmetic produces them.
+func floatFromHFP(raw uint64, width int) float64 {
+	fracBits := hfpFracBits(width)
+	frac := raw & (1<<fracBits - 1)
+	if frac == 0 {
+		return 0
+	}
+	exp := int(raw>>fracBits) & hfpMaxExponent
+	v := math.Ldexp(float64(frac), 4*(exp-hfpExponentBias)-int(fracBits))
+	if (raw>>(fracBits+7))&1 != 0 {
+		v = -v
+	}
+	return v
+}
+
+// hfpFromFloat encodes v as the big-endian bit pattern of an IBM hexadecimal
+// floating point field of width bytes, normalized so that the leading hex digit
+// of the fraction is non-zero.
+//
+// It reports a [FloatRangeError] rather than storing an approximation in the
+// two cases where HFP has nothing to store:
+//
+//   - A NaN or an infinity. HFP encodes neither, and every pattern it does
+//     have already denotes an ordinary number, so there is no bit pattern that
+//     would read back as anything but a plausible finite value.
+//   - A magnitude outside 16^-65 to 16^63. A float64 reaches far past both
+//     ends, and clamping to an infinity or flushing to a zero would be the
+//     same silent wrong number one step later.
+//
+// Normalizing to a hex digit boundary costs up to three bits of fraction —
+// HFP's "wobbling precision" — so the fraction is rounded rather than
+// truncated. A float64 survives the long form exactly, because 56 bits of
+// fraction leave room for the three a 53-bit significand can lose; a float32
+// written to the short form may not, since its 24 bits leave none.
+func hfpFromFloat(v float64, width int) (uint64, error) {
+	rangeErr := func(reason string) error {
+		return FloatRangeError{
+			Value:  strconv.FormatFloat(v, 'g', -1, 64),
+			Format: FloatHFP,
+			Width:  width,
+			Reason: reason,
+		}
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, rangeErr("is not a finite number, and HFP encodes neither NaN nor infinity")
+	}
+	if v == 0 {
+		// True zero is the all-zero field, negative zero included: HFP has no
+		// signed zero to preserve one as.
+		return 0, nil
+	}
+
+	fracBits := hfpFracBits(width)
+	f, e := math.Frexp(math.Abs(v)) // |v| = f × 2^e, with f in [0.5, 1)
+	// The hex exponent is ceil(e/4), the smallest power of 16 that leaves the
+	// fraction below one and so at least 1/16, which is normalization. The
+	// shift floors towards minus infinity, which is what a negative e needs.
+	hexExp := e >> 2
+	if e&3 != 0 {
+		hexExp++
+	}
+	frac := uint64(math.Round(math.Ldexp(f, int(fracBits)+e-4*hexExp)))
+	if frac == 1<<fracBits {
+		// Rounding carried out of the top hex digit, leaving the fraction at
+		// its smallest normalized value one exponent up.
+		frac >>= 4
+		hexExp++
+	}
+
+	exp := hexExp + hfpExponentBias
+	if exp > hfpMaxExponent {
+		return 0, rangeErr("magnitude is above 16^63, the largest HFP value")
+	}
+	if exp < 0 {
+		return 0, rangeErr("magnitude is below 16^-65, the smallest HFP value")
+	}
+	raw := uint64(exp)<<fracBits | frac
+	if math.Signbit(v) {
+		raw |= 1 << (fracBits + 7)
+	}
+	return raw, nil
+}
+
 // Marshaler is implemented by a value that can write itself to a data file.
 // Generated record types implement it; the [Writer] it is handed already knows
 // the [Encoding], so an implementation never chooses one.
@@ -953,5 +1075,43 @@ func (e BinaryRangeError) Error() string {
 	return fmt.Sprintf(
 		"value %s does not fit a %d-digit %s binary field of %d bytes under %s",
 		e.Value, e.Digits, e.Signedness, e.Width, e.Truncation,
+	)
+}
+
+// FloatRangeError is returned when a floating point value and the field it was
+// given have no number in common. Like [BinaryRangeError] it arises in both
+// directions, and every one of its cases belongs to [FloatHFP]:
+//
+//   - Writing a NaN or an infinity. HFP has no encoding for either — every one
+//     of its bit patterns denotes an ordinary number — so there is nothing to
+//     store that would not read back as a plausible finite value.
+//   - Writing a magnitude outside HFP's range, which is 16^-65 to 16^63.
+//   - Reading a COMP-1 field into a float32. HFP's exponent range is far wider
+//     than binary32's, so a field may legitimately hold a value that overflows
+//     a float32 to infinity or underflows it to zero. Both are reported rather
+//     than returned, because HFP produces neither an infinity nor a spurious
+//     zero of its own and a caller has no way to tell such a reading from a
+//     real one.
+//
+// [FloatIEEE] never produces one. binary32 and binary64 hold every float32 and
+// float64 there is, NaNs and infinities included, so nothing in either
+// direction is out of range.
+type FloatRangeError struct {
+	// Value is the decimal spelling of the value that did not fit.
+	Value string
+	// Format is the floating point format of the field.
+	Format FloatFormat
+	// Width is the storage width of the field, in bytes: 4 for COMP-1 and 8
+	// for COMP-2.
+	Width int
+	// Reason says which of the cases above applies.
+	Reason string
+}
+
+// Error implements the [error] interface.
+func (e FloatRangeError) Error() string {
+	return fmt.Sprintf(
+		"%s floating point value %s in a field of %d bytes: %s",
+		e.Format, e.Value, e.Width, e.Reason,
 	)
 }

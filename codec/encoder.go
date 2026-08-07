@@ -7,6 +7,7 @@ package codec
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"math"
 	"math/big"
@@ -435,6 +436,63 @@ func (w *Writer) writeBinaryBig(v *big.Int, digits int, s Signedness, t Truncati
 	field := make([]byte, width)
 	copy(field[width-len(b):], b)
 	orderBinaryBytes(w.enc.ByteOrder, field)
+	return w.write(field)
+}
+
+// WriteFloat32 writes v as a floating point (COMP-1) field, exactly 4 bytes
+// wide. It is the counterpart of [Reader.ReadFloat32].
+//
+// There is no digit count and no [Signedness] to pass: COMP-1 takes no PICTURE,
+// so there is no digit count to declare and no S clause to select a sign
+// convention from — a floating point item always carries its own sign.
+//
+// The bytes written come entirely from [Encoding.Float]. Under [FloatIEEE] they
+// are binary32 in the order [Encoding.ByteOrder] declares; under [FloatHFP]
+// they are IBM hexadecimal floating point and big-endian regardless of that
+// axis, for the reason [Reader.ReadFloat32] gives.
+//
+// Under [FloatHFP] a NaN or an infinity is a [FloatRangeError] and writes
+// nothing: HFP has no encoding for either, so there is no bit pattern that
+// would read back as anything but a plausible finite number. Every finite
+// float32 is in range, since binary32 reaches neither end of HFP's. It may lose
+// up to three bits of precision to hex normalization, which is HFP's own
+// wobble and not this package's rounding; see [hfpFromFloat].
+func (w *Writer) WriteFloat32(v float32) error {
+	field := make([]byte, comp1Width)
+	if w.enc.Float == FloatIEEE {
+		w.enc.ByteOrder.PutUint32(field, math.Float32bits(v))
+		return w.write(field)
+	}
+	raw, err := hfpFromFloat(float64(v), comp1Width)
+	if err != nil {
+		return &OffsetError{Offset: w.off, Err: err}
+	}
+	binary.BigEndian.PutUint32(field, uint32(raw))
+	return w.write(field)
+}
+
+// WriteFloat64 writes v as a floating point (COMP-2) field, exactly 8 bytes
+// wide. It is [Writer.WriteFloat32] one width up and takes the same arguments —
+// which is to say only the value — for the same reasons.
+//
+// Under [FloatHFP] a NaN, an infinity, or a magnitude outside 16^-65 to 16^63
+// is a [FloatRangeError] and writes nothing. Unlike the COMP-1 case the range
+// bounds are reachable here: a float64 runs to 1.8e308 where HFP stops at about
+// 7.2e75, and down to 5e-324 where HFP stops at about 5.4e-79. Every float64
+// that is in range is stored exactly, since HFP long's 56 bits of fraction
+// leave room for the three that hex normalization can cost a 53-bit
+// significand.
+func (w *Writer) WriteFloat64(v float64) error {
+	field := make([]byte, comp2Width)
+	if w.enc.Float == FloatIEEE {
+		w.enc.ByteOrder.PutUint64(field, math.Float64bits(v))
+		return w.write(field)
+	}
+	raw, err := hfpFromFloat(v, comp2Width)
+	if err != nil {
+		return &OffsetError{Offset: w.off, Err: err}
+	}
+	binary.BigEndian.PutUint64(field, raw)
 	return w.write(field)
 }
 
