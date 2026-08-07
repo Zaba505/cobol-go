@@ -41,11 +41,33 @@
 //
 // # Scope of this package as it stands
 //
-// [Reader] and [Writer] currently cover alphanumeric fields, raw byte fields
-// and packed decimal (COMP-3). Zoned decimal, binary and floating-point
-// accessors, and the charset axis beyond [ASCII] and [CP037], arrive in later
-// stories; the [Encoding] axes they need are already declared here so that no
-// field of it ever has to acquire a default retroactively.
+// [Reader] and [Writer] currently cover alphanumeric fields, raw byte fields,
+// packed decimal (COMP-3) and binary (COMP, COMP-4, BINARY, COMP-5). Zoned
+// decimal and floating-point accessors, and the charset axis beyond [ASCII] and
+// [CP037], arrive in later stories; the [Encoding] axes they need are already
+// declared here so that no field of it ever has to acquire a default
+// retroactively.
+//
+// # Binary items: width, byte order and range
+//
+// A binary item's width is a staircase in its digit count and not the digit
+// count itself: 2 bytes through 4 digits, 4 through 9, 8 through 18 and 16
+// beyond. PIC 9(5) COMP is four bytes, not five, and a wrong step shifts every
+// later field in the record.
+//
+// Byte order comes from [Encoding.ByteOrder] and is never inferred, because a
+// swapped reading is a plausible number rather than an error. What the digit
+// count *means* is a second fork, and it is a property of the compiler rather
+// than of the file, so it is selected by which accessor is called rather than
+// by an [Encoding] axis: [Reader.ReadBinaryInt16] and its family are TRUNC(STD),
+// where a PIC S9(4) COMP item holds -9999 to 9999, and [Reader.ReadComp5Int16]
+// and its family are TRUNC(BIN), where the same two bytes hold -32768 to 32767.
+// See [Truncation].
+//
+// The TRUNC(STD) family validates what it reads, which is the one detector this
+// package has for a misdeclared byte order: a byte-swapped small number usually
+// overflows the PICTURE's decimal range and is reported as a
+// [BinaryRangeError].
 //
 // # Numeric items carry digits, not scale
 //

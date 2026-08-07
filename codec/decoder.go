@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"io"
 	"math/big"
+	"strconv"
 	"strings"
 )
 
@@ -255,6 +256,251 @@ func (r *Reader) readPackedDigits(digits, max int) ([]byte, bool, error) {
 		return nil, false, &OffsetError{Offset: nibbleAt(len(nibbles) - 1), Err: err}
 	}
 	return ds, negative, nil
+}
+
+// ReadBinaryInt16 reads the next binary (COMP, COMP-4, BINARY) field of digits
+// digits as a signed int16, consuming 2 bytes.
+//
+// digits must be between 1 and 4, the digit counts a 2-byte item carries. The
+// bytes are two's complement in the order [Encoding.ByteOrder] declares, which
+// is required and never inferred: a wrong byte order yields a plausible wrong
+// number and never an error.
+//
+// Range semantics are TRUNC(STD): a stored value whose magnitude the PICTURE
+// cannot express is a [BinaryRangeError] rather than a silently over-wide
+// reading. That check is what turns a wrong byte order into a first-record
+// failure most of the time. Read a COMP-5 field, or a COMP field compiled under
+// TRUNC(BIN), with [Reader.ReadComp5Int16] instead; see [Truncation].
+//
+// As with every numeric accessor the return is the unscaled integer, since a
+// PICTURE's V occupies no storage; see [Reader.ReadPackedInt32].
+func (r *Reader) ReadBinaryInt16(digits int) (int16, error) {
+	v, err := r.readBinaryInt(digits, maxBinaryInt16Digits, TruncStd)
+	return int16(v), err
+}
+
+// ReadBinaryInt32 reads the next binary field of digits digits as a signed
+// int32, consuming 2 bytes for 1 to 4 digits and 4 bytes for 5 to 9.
+//
+// digits must be between 1 and 9. PIC 9(5) COMP is four bytes and not five —
+// the width is a staircase, not the digit count. Range semantics are
+// TRUNC(STD); see [Reader.ReadBinaryInt16].
+func (r *Reader) ReadBinaryInt32(digits int) (int32, error) {
+	v, err := r.readBinaryInt(digits, maxBinaryInt32Digits, TruncStd)
+	return int32(v), err
+}
+
+// ReadBinaryInt64 reads the next binary field of digits digits as a signed
+// int64, consuming 2, 4 or 8 bytes by the digit count.
+//
+// digits must be between 1 and 18. The 19-to-31 digit range an ARITH(EXTEND)
+// item may declare is 16 bytes wide and is read with [Reader.ReadBinaryBig].
+// Range semantics are TRUNC(STD); see [Reader.ReadBinaryInt16].
+func (r *Reader) ReadBinaryInt64(digits int) (int64, error) {
+	return r.readBinaryInt(digits, maxBinaryInt64Digits, TruncStd)
+}
+
+// ReadBinaryUint64 reads the next binary field of digits digits as an unsigned
+// uint64, consuming 2, 4 or 8 bytes by the digit count.
+//
+// This is the accessor for an item whose PICTURE has no S. The distinction is
+// not cosmetic and is not recoverable from the bytes: FF FF is 65535 read as an
+// unsigned 2-byte item and -1 read as a signed one, so which accessor is called
+// is what says which the copybook declared.
+//
+// digits must be between 1 and 18. Range semantics are TRUNC(STD); see
+// [Reader.ReadBinaryInt16]. A PIC 9(4) COMP-5 item holding 65535 is outside the
+// four-digit decimal range and is read with [Reader.ReadComp5Uint64].
+func (r *Reader) ReadBinaryUint64(digits int) (uint64, error) {
+	return r.readBinaryUint(digits, maxBinaryInt64Digits, TruncStd)
+}
+
+// ReadBinaryBig reads the next binary field of digits digits as a
+// [math/big.Int], consuming 2, 4, 8 or 16 bytes by the digit count.
+//
+// digits must be between 1 and 31. This is the accessor for the 19-to-31 digit
+// range that IBM Enterprise COBOL allows under ARITH(EXTEND) and that no Go
+// integer type holds; below 19 digits the fixed-width accessors say the same
+// thing without allocating. Range semantics are TRUNC(STD); see
+// [Reader.ReadBinaryInt16].
+//
+// The bytes are read as two's complement, so the value is signed. An unsigned
+// item of that width reads identically under TRUNC(STD), because 10^31 is far
+// below the 2^127 at which the sign bit of a 16-byte field turns on; the
+// readings part company only for a COMP-5 field, which is what
+// [Reader.ReadComp5Big] documents.
+func (r *Reader) ReadBinaryBig(digits int) (*big.Int, error) {
+	return r.readBinaryBig(digits, TruncStd)
+}
+
+// ReadComp5Int16 reads the next COMP-5 field of digits digits as a signed
+// int16, consuming 2 bytes.
+//
+// It is [Reader.ReadBinaryInt16] with TRUNC(BIN) range semantics: the value may
+// use the full -32768 to 32767 range of the storage rather than the decimal
+// range of the PICTURE, so no range validation is performed at all. Use it for
+// USAGE COMP-5, which always means this, and for COMP or COMP-4 compiled under
+// TRUNC(BIN) or GnuCOBOL's binary-truncate: no. See [Truncation].
+//
+// COMP-5 is defined as *native* byte order on the platform that wrote it, which
+// is a fact about the file and is declared through [Encoding.ByteOrder] like
+// any other: this accessor does not assume one.
+func (r *Reader) ReadComp5Int16(digits int) (int16, error) {
+	v, err := r.readBinaryInt(digits, maxBinaryInt16Digits, TruncBin)
+	return int16(v), err
+}
+
+// ReadComp5Int32 reads the next COMP-5 field of digits digits as a signed
+// int32, consuming 2 or 4 bytes. It is [Reader.ReadBinaryInt32] with TRUNC(BIN)
+// range semantics; see [Reader.ReadComp5Int16].
+func (r *Reader) ReadComp5Int32(digits int) (int32, error) {
+	v, err := r.readBinaryInt(digits, maxBinaryInt32Digits, TruncBin)
+	return int32(v), err
+}
+
+// ReadComp5Int64 reads the next COMP-5 field of digits digits as a signed
+// int64, consuming 2, 4 or 8 bytes. It is [Reader.ReadBinaryInt64] with
+// TRUNC(BIN) range semantics; see [Reader.ReadComp5Int16].
+func (r *Reader) ReadComp5Int64(digits int) (int64, error) {
+	return r.readBinaryInt(digits, maxBinaryInt64Digits, TruncBin)
+}
+
+// ReadComp5Uint64 reads the next COMP-5 field of digits digits as an unsigned
+// uint64, consuming 2, 4 or 8 bytes. It is [Reader.ReadBinaryUint64] with
+// TRUNC(BIN) range semantics; see [Reader.ReadComp5Int16].
+//
+// This is the accessor a PIC 9(4) COMP-5 item holding 65535 needs: those two
+// FF bytes are legal there and are outside the range TRUNC(STD) allows.
+func (r *Reader) ReadComp5Uint64(digits int) (uint64, error) {
+	return r.readBinaryUint(digits, maxBinaryInt64Digits, TruncBin)
+}
+
+// ReadComp5Big reads the next COMP-5 field of digits digits as a
+// [math/big.Int], consuming 2, 4, 8 or 16 bytes. It is [Reader.ReadBinaryBig]
+// with TRUNC(BIN) range semantics; see [Reader.ReadComp5Int16].
+//
+// The bytes are read as two's complement over the full storage width, so a
+// 16-byte field with its top bit set reads as a negative number. An unsigned
+// 16-byte COMP-5 item carrying a value that large has no accessor here; below
+// 8 bytes, [Reader.ReadComp5Uint64] is the unsigned reading.
+func (r *Reader) ReadComp5Big(digits int) (*big.Int, error) {
+	return r.readBinaryBig(digits, TruncBin)
+}
+
+// readBinaryField reads one binary field of at most 8 bytes, returning its
+// bytes as a raw unsigned integer together with the field's width and the
+// offset it began at.
+func (r *Reader) readBinaryField(digits, max int) (raw uint64, width int, start int64, err error) {
+	if digits < 1 || digits > max {
+		return 0, 0, r.off, &OffsetError{
+			Offset: r.off,
+			Err:    BinaryDigitCountError{Digits: digits, Max: max},
+		}
+	}
+	width = binaryWidth(digits)
+	start = r.off
+	b, err := r.read(width)
+	if err != nil {
+		return 0, 0, start, err
+	}
+	switch width {
+	case 2:
+		raw = uint64(r.enc.ByteOrder.Uint16(b))
+	case 4:
+		raw = uint64(r.enc.ByteOrder.Uint32(b))
+	default:
+		raw = r.enc.ByteOrder.Uint64(b)
+	}
+	return raw, width, start, nil
+}
+
+// readBinaryInt is the shared body of the signed fixed-width accessors, whose
+// only differences are the digit count they accept and the truncation mode they
+// validate under.
+func (r *Reader) readBinaryInt(digits, max int, t Truncation) (int64, error) {
+	raw, width, start, err := r.readBinaryField(digits, max)
+	if err != nil {
+		return 0, err
+	}
+	v := signExtend(raw, width)
+	// TRUNC(BIN) confines a value to its storage width and nothing else, and
+	// the width is what was just read, so there is nothing left to check.
+	if t == TruncStd {
+		limit := int64(pow10[digits] - 1)
+		if v < -limit || v > limit {
+			return 0, &OffsetError{
+				Offset: start,
+				Err: BinaryRangeError{
+					Value:      strconv.FormatInt(v, 10),
+					Digits:     digits,
+					Width:      width,
+					Signedness: Signed,
+					Truncation: t,
+				},
+			}
+		}
+	}
+	return v, nil
+}
+
+// readBinaryUint is readBinaryInt for an item whose PICTURE has no S: the same
+// bytes read as an unsigned magnitude rather than as two's complement.
+func (r *Reader) readBinaryUint(digits, max int, t Truncation) (uint64, error) {
+	raw, width, start, err := r.readBinaryField(digits, max)
+	if err != nil {
+		return 0, err
+	}
+	if t == TruncStd && raw > pow10[digits]-1 {
+		return 0, &OffsetError{
+			Offset: start,
+			Err: BinaryRangeError{
+				Value:      strconv.FormatUint(raw, 10),
+				Digits:     digits,
+				Width:      width,
+				Signedness: Unsigned,
+				Truncation: t,
+			},
+		}
+	}
+	return raw, nil
+}
+
+// readBinaryBig is the shared body of the two [math/big.Int] accessors. It is
+// separate from readBinaryInt because [binary.ByteOrder] has no 16-byte
+// accessor: the widest fields are ordered a byte at a time.
+func (r *Reader) readBinaryBig(digits int, t Truncation) (*big.Int, error) {
+	if digits < 1 || digits > maxBinaryDigits {
+		return nil, &OffsetError{
+			Offset: r.off,
+			Err:    BinaryDigitCountError{Digits: digits, Max: maxBinaryDigits},
+		}
+	}
+	width := binaryWidth(digits)
+	start := r.off
+	b, err := r.read(width)
+	if err != nil {
+		return nil, err
+	}
+	orderBinaryBytes(r.enc.ByteOrder, b)
+
+	v := new(big.Int).SetBytes(b)
+	if b[0]&0x80 != 0 {
+		// Two's complement: the stored bits are the value plus 2^(8*width).
+		v.Sub(v, new(big.Int).Lsh(big.NewInt(1), uint(8*width)))
+	}
+	if t == TruncStd && v.CmpAbs(decimalLimit(digits)) > 0 {
+		return nil, &OffsetError{
+			Offset: start,
+			Err: BinaryRangeError{
+				Value:      v.String(),
+				Digits:     digits,
+				Width:      width,
+				Signedness: Signed,
+				Truncation: t,
+			},
+		}
+	}
+	return v, nil
 }
 
 // Unmarshal reads data into v under the given encoding.

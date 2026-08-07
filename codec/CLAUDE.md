@@ -47,10 +47,11 @@ here. Numeric accessors take `digits` but **not** `scale`: byte width never
 depends on scale, so the return is the unscaled integer and the generator emits
 the scale as a constant.
 
-Their `digits` bound belongs to the **accessor**, not to the field: 9 for the
-int32 accessors, 18 for the int64 ones, 31 — the IBM maximum — for the
-`math/big.Int` ones. A wider count is a `PackedDigitCountError` rather than a
-silent overflow.
+Their `digits` bound belongs to the **accessor**, not to the field: 4 for the
+int16 accessors, 9 for the int32 ones, 18 for the int64 and uint64 ones, 31 —
+the IBM maximum — for the `math/big.Int` ones. A wider count is a
+`PackedDigitCountError` or a `BinaryDigitCountError` rather than a silent
+overflow.
 
 Numeric **writers** additionally take a `Signedness` (`Signed`/`Unsigned`) with
 an invalid zero value. Whether the PICTURE carries `S` selects the stored sign
@@ -74,10 +75,16 @@ holding it**, computed from the field's start offset in a single `nibbleAt`
 helper. A packed field is several bytes wide, and "the field ended at offset N"
 does not say which byte was corrupt.
 
+The second such exception is `BinaryRangeError`, stamped with the offset the
+field **starts** at rather than the one it ends at, for the same reason: a
+binary field is several bytes wide and a range error is a statement about the
+whole field, most often that `Encoding.ByteOrder` is wrong.
+
 Leaves are typed values (`EncodingError`, `FieldWidthError`,
 `FieldTooLongError`, `UnrepresentableRuneError`, `JustificationError`,
 `SignednessError`, `PackedDigitCountError`, `PackedPadError`,
-`PackedDigitError`, `PackedSignError`, `PackedRangeError`) or stdlib sentinels
+`PackedDigitError`, `PackedSignError`, `PackedRangeError`,
+`BinaryDigitCountError`, `BinaryRangeError`) or stdlib sentinels
 (`io.EOF`, `io.ErrUnexpectedEOF`, `io.ErrShortWrite`, `ErrNilValue`). Callers
 use `errors.Is` for the cause and `errors.As` for the offset; tests assert both.
 
@@ -90,6 +97,32 @@ setting rather than coercing them.
 A rejected field writes **nothing**. Validate first, build the whole field, then
 write it, so a failure cannot leave a half-field behind and desynchronize the
 record.
+
+## Binary items: two families, one axis each
+
+Binary (COMP, COMP-4, BINARY, COMP-5) has two forks and they are **not** the
+same kind of thing, so they are declared in two different places:
+
+- **Byte order** is a property of the *file* and comes from
+  `Encoding.ByteOrder`. Never hard-code big-endian, never default it, never
+  infer it from the bytes.
+- **Range semantics** (`TRUNC(STD)` vs `TRUNC(BIN)`/`COMP-5`) is a property of
+  the *compiler*, so it is not an `Encoding` axis. It is selected by which
+  accessor is called: `ReadBinaryInt16` and friends are `TRUNC(STD)` and
+  validate what they read against the PICTURE's decimal range, `ReadComp5Int16`
+  and friends are `TRUNC(BIN)` and validate nothing beyond the storage width.
+  That read-side validation is deliberate — it is the only detector the package
+  has for a wrong byte order — and it must not be dropped to make a value
+  "just read".
+
+Width is `binaryWidth`, a staircase (2/4/8/16) in the digit count and never the
+digit count itself. GnuCOBOL's `binary-size: 1-2-4-8` one-byte variant is not
+implemented; a copybook compiled under it desynchronizes rather than reading
+wrongly, which the SPEC classifies as loud-indirectly.
+
+Signedness on the read side is the *method name* (`ReadBinaryUint64` is the
+unsigned reading of the same bytes); on the write side it is the `Signedness`
+argument, as it is for packed.
 
 ## Charsets
 

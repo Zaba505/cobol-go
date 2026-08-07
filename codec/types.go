@@ -9,6 +9,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/big"
+	"slices"
 	"strconv"
 )
 
@@ -497,6 +499,166 @@ func packedSignIsNegative(nibble byte) (bool, error) {
 	return false, PackedSignError{Nibble: nibble}
 }
 
+// Truncation is the range semantics of a binary (COMP, COMP-4, BINARY,
+// COMP-5) item: what the digit count in its PICTURE says about the values the
+// item may hold.
+//
+// It is the IBM TRUNC compiler option, spelled binary-truncate by GnuCOBOL, and
+// it is the one binary setting that is a property of the *compiler* rather than
+// of the file in hand — which is why it is not an [Encoding] axis. Byte order
+// is: the bytes were written by whatever wrote them and are read by something
+// else, so it must be declared per file.
+//
+// Truncation is never passed to an accessor. It is selected by which accessor
+// is called, because the two readings are the two families of methods on
+// [Reader] and [Writer]:
+//
+//   - [Reader.ReadBinaryInt16] and friends are TRUNC(STD), the
+//     standard-conforming reading: a PIC S9(4) COMP item holds -9999 to 9999
+//     and a value outside that range is a [BinaryRangeError].
+//   - [Reader.ReadComp5Int16] and friends are TRUNC(BIN): the same two bytes,
+//     the full -32768 to 32767 range of the storage. This is what USAGE COMP-5
+//     always means and what COMP and COMP-4 mean under TRUNC(BIN) or
+//     binary-truncate: no.
+//
+// Truncation does not change the byte layout, so it never changes how a field
+// is decoded — only which decoded values are accepted. That validation is worth
+// having: under TRUNC(STD) it is the strongest available detector of a wrong
+// [Encoding.ByteOrder], since a byte-swapped value usually overflows the
+// PICTURE's decimal range. See codec/SPEC.md, "Range semantics: TRUNC".
+type Truncation int
+
+const (
+	// TruncUnset is the zero value. It names no semantics; it appears only in
+	// a zero-valued [BinaryRangeError], since no accessor takes a Truncation.
+	TruncUnset Truncation = iota
+	// TruncStd is TRUNC(STD), binary-truncate: yes: the item's range is the
+	// decimal range of its PICTURE digit count.
+	TruncStd
+	// TruncBin is TRUNC(BIN), binary-truncate: no, and USAGE COMP-5: the
+	// item's range is the full range of its storage width.
+	TruncBin
+)
+
+// String implements the [fmt.Stringer] interface.
+func (t Truncation) String() string {
+	switch t {
+	case TruncStd:
+		return "trunc-std"
+	case TruncBin:
+		return "trunc-bin"
+	case TruncUnset:
+		return "unset"
+	}
+	return "Truncation(" + strconv.Itoa(int(t)) + ")"
+}
+
+// Digit counts a binary accessor accepts. As with the packed accessors the
+// limit is the range of the Go type the accessor returns and not a property of
+// the field: 4 digits is the most a 2-byte item holds, and a 2-byte item under
+// TRUNC(BIN) is the most that always fits an int16. 31 is the IBM Enterprise
+// COBOL maximum under ARITH(EXTEND), reachable through [Reader.ReadBinaryBig]
+// and [Writer.WriteBinaryBig].
+const (
+	maxBinaryInt16Digits = 4
+	maxBinaryInt32Digits = 9
+	maxBinaryInt64Digits = 18
+	maxBinaryDigits      = 31
+)
+
+// binaryWidth reports the byte width of a binary field holding digits digits:
+// 2 bytes through 4 digits, 4 through 9, 8 through 18 and 16 beyond. It is the
+// whole of the binary size model, and like [packedWidth] it does not depend on
+// scale.
+//
+// The width is a staircase and not the digit count: PIC 9(5) COMP is *four*
+// bytes, not five. Getting the step wrong shifts every field after it in the
+// record, which is why the 4/5 and 9/10 boundaries carry their own tests.
+//
+// This is the IBM Enterprise COBOL table, which is also Micro Focus's and
+// GnuCOBOL's binary-size: 2-4-8. A GnuCOBOL build left on its default
+// binary-size: 1-2-4-8 gives a 1-2 digit item **one** byte instead of two;
+// this package does not implement that variant, and a copybook compiled under
+// it desynchronizes at the first such field rather than reading wrongly. See
+// codec/SPEC.md, "Binary widths by digit count".
+func binaryWidth(digits int) int {
+	switch {
+	case digits <= 4:
+		return 2
+	case digits <= 9:
+		return 4
+	case digits <= 18:
+		return 8
+	}
+	return 16
+}
+
+// pow10 holds 10^i for every digit count the fixed-width binary accessors
+// reach. 10^18 is the largest power of ten that fits a uint64, which is why
+// those accessors stop at 18 digits and the [math/big.Int] ones compute their
+// own bound.
+var pow10 = func() [maxBinaryInt64Digits + 1]uint64 {
+	var t [maxBinaryInt64Digits + 1]uint64
+	t[0] = 1
+	for i := 1; i < len(t); i++ {
+		t[i] = t[i-1] * 10
+	}
+	return t
+}()
+
+// decimalLimit reports 10^digits - 1, the largest magnitude a digits-digit
+// item holds under [TruncStd].
+func decimalLimit(digits int) *big.Int {
+	ten := big.NewInt(10)
+	v := new(big.Int).Exp(ten, big.NewInt(int64(digits)), nil)
+	return v.Sub(v, big.NewInt(1))
+}
+
+// isBigEndian reports whether bo puts the most significant byte first.
+//
+// The order is probed rather than compared against [binary.BigEndian], because
+// [binary.NativeEndian] is a distinct type from both of the named orders and a
+// caller may supply an implementation of its own.
+func isBigEndian(bo binary.ByteOrder) bool {
+	return bo.Uint16([]byte{0x01, 0x00}) == 0x0100
+}
+
+// orderBinaryBytes converts b between big-endian order and the order bo
+// declares, in place. It is its own inverse — the conversion is a reversal in
+// both directions — so the reader and the writer share it.
+//
+// It exists because [binary.ByteOrder] has no 16-byte accessor: the 19-to-31
+// digit fields the [math/big.Int] accessors read and write cannot go through
+// Uint64 or PutUint64 the way the narrower ones do.
+func orderBinaryBytes(bo binary.ByteOrder, b []byte) {
+	if isBigEndian(bo) {
+		return
+	}
+	slices.Reverse(b)
+}
+
+// putBinaryUint writes the low 8*len(field) bits of raw into field in the
+// order bo declares. field must be 2, 4 or 8 bytes; the 16-byte case belongs
+// to the [math/big.Int] writers and goes through [orderBinaryBytes].
+func putBinaryUint(bo binary.ByteOrder, field []byte, raw uint64) {
+	switch len(field) {
+	case 2:
+		bo.PutUint16(field, uint16(raw))
+	case 4:
+		bo.PutUint32(field, uint32(raw))
+	default:
+		bo.PutUint64(field, raw)
+	}
+}
+
+// signExtend reinterprets the low 8*width bits of raw as a two's complement
+// signed integer, which is what a signed binary item stores over the whole of
+// its storage width.
+func signExtend(raw uint64, width int) int64 {
+	shift := uint(64 - 8*width)
+	return int64(raw<<shift) >> shift
+}
+
 // Marshaler is implemented by a value that can write itself to a data file.
 // Generated record types implement it; the [Writer] it is handed already knows
 // the [Encoding], so an implementation never chooses one.
@@ -716,4 +878,65 @@ type PackedRangeError struct {
 // Error implements the [error] interface.
 func (e PackedRangeError) Error() string {
 	return fmt.Sprintf("value %s does not fit a %d-digit %s packed decimal field", e.Value, e.Digits, e.Signedness)
+}
+
+// BinaryDigitCountError is returned when a binary decimal digit count is
+// outside the range the accessor accepts.
+//
+// The upper bound belongs to the accessor rather than to the field, exactly as
+// it does for [PackedDigitCountError]: 4 digits for the int16 accessors, 9 for
+// the int32 ones, 18 for the int64 and uint64 ones and 31 — the IBM Enterprise
+// COBOL maximum under ARITH(EXTEND) — for the [math/big.Int] ones. The bound is
+// what the accessor's return type always holds over the *full* storage width,
+// so that a COMP-5 field cannot silently overflow it.
+type BinaryDigitCountError struct {
+	// Digits is the digit count that was asked for.
+	Digits int
+	// Max is the largest digit count this accessor accepts.
+	Max int
+}
+
+// Error implements the [error] interface.
+func (e BinaryDigitCountError) Error() string {
+	return fmt.Sprintf("invalid binary digit count %d: must be between 1 and %d", e.Digits, e.Max)
+}
+
+// BinaryRangeError is returned when a binary value lies outside the range of
+// the field it was given.
+//
+// It arises in both directions, which is not true of [PackedRangeError]:
+//
+//   - On write, the value does not fit — it has more digits than the PICTURE
+//     allows under [TruncStd], it exceeds the storage width under [TruncBin],
+//     or it is negative and the field is [Unsigned].
+//   - On read under [TruncStd], the *stored* value exceeds the decimal range
+//     the PICTURE can express. That is a real signal rather than pedantry: it
+//     is the strongest available evidence that [Encoding.ByteOrder] is wrong,
+//     since a byte-swapped small number is usually a very large one. A file
+//     that legitimately carries such values is a COMP-5 or TRUNC(BIN) file and
+//     is read with the [Reader.ReadComp5Int16] family instead.
+//
+// The offset it is wrapped in is the offset the field *starts* at rather than
+// the one it ends at, for the reason a packed nibble error carries the byte
+// holding the nibble: a binary field is several bytes wide, and a range error
+// is a statement about the whole field.
+type BinaryRangeError struct {
+	// Value is the decimal spelling of the value that did not fit.
+	Value string
+	// Digits is the number of digits the field's PICTURE declares.
+	Digits int
+	// Width is the storage width of the field, in bytes.
+	Width int
+	// Signedness is whether the field carries a sign.
+	Signedness Signedness
+	// Truncation is the range semantics the accessor applied.
+	Truncation Truncation
+}
+
+// Error implements the [error] interface.
+func (e BinaryRangeError) Error() string {
+	return fmt.Sprintf(
+		"value %s does not fit a %d-digit %s binary field of %d bytes under %s",
+		e.Value, e.Digits, e.Signedness, e.Width, e.Truncation,
+	)
 }
