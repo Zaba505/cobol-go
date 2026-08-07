@@ -85,7 +85,8 @@ the field **starts** at for the same reason as `BinaryRangeError`.
 
 Leaves are typed values (`EncodingError`, `FieldWidthError`,
 `FieldTooLongError`, `UnrepresentableRuneError`, `JustificationError`,
-`SignednessError`, `PackedDigitCountError`, `PackedPadError`,
+`SignednessError`, `ZonedDigitError`, `ZonedSignError`,
+`ZonedSeparateSignError`, `PackedDigitCountError`, `PackedPadError`,
 `PackedDigitError`, `PackedSignError`, `PackedRangeError`,
 `BinaryDigitCountError`, `BinaryRangeError`, `FloatRangeError`) or stdlib
 sentinels
@@ -168,7 +169,9 @@ mind:
 `Charset` is an interface, not an enum, because nil must be detectable and
 because EBCDIC is not one table — cp037, cp500, cp1047 and cp1140 differ in
 where they put brackets, currency and accents. `ASCII()` and `CP037()` ship
-here; more pages arrive with the charset story.
+here, and they are the **only** two that ever will: another page is a caller's
+own implementation (`encoding/charmap` wrapped, say), which is what keeps the
+std-only promise above from being a limitation.
 
 Both shipped tables are **bijective over all 256 bytes**, which is what lets
 alphanumeric data round-trip unchanged; `TestCharsetIsTotalAndBijective`
@@ -181,7 +184,41 @@ and routing them through a character translation makes the sign convention
 unrepresentable. The declared charset still matters to a numeric field: it says
 whether the digits are `F0`–`F9` or `30`–`39` and whether a separate sign is
 `4E`/`60` or `2B`/`2D`. Compare those byte values; do not call `ToUnicode` on
-them.
+them. `TestZonedDecodingNeverTranslatesThroughTheCharset` counts the
+translations a zoned field performs and requires zero.
+
+## Zoned bytes: two halves that must not merge
+
+The bytes of a `USAGE DISPLAY` field come from two independent places, and
+keeping them apart is the whole of why the four sign conventions are mutually
+detectable:
+
+- **Plain digit bytes are a charset fact.** `zonedBytesOf(cs)` derives them, and
+  the separate sign bytes, by asking the `Charset` for the bytes of `'0'`–`'9'`,
+  `'+'` and `'-'`. Derived, never switched on a known page — that is what lets a
+  plugged-in cp1047 work, and `oddballCharset` in the tests (digits at `B0`–`B9`)
+  is there to fail anything hard-coded.
+- **The sign-carrying byte is a sign-convention fact and is charset
+  independent.** `zonedSignTables` holds absolute byte values, one row per
+  convention, transcribed from `SPEC.md`'s digit-by-digit table.
+
+`signByte` / `signByteValue` are the byte-level pair, `zonedCodec.encodeField` /
+`decodeField` the field-level one; `signAt` is the index the sign is
+overpunched into, and `-1` means unsigned or `SEPARATE` (plain zone throughout).
+`decodeField` returns the **index within the field** of the offending byte
+alongside its error, for the caller to stamp as `start+at` — the same reason
+`readPackedDigits` reports the byte holding a bad nibble.
+
+Two asymmetries to preserve:
+
+- **Lenient reading is EBCDIC's alone.** Zones `A`, `C`, `E`, `F` read positive
+  and `B`, `D` negative, because z/Architecture accepts more than it generates;
+  a writer emits only `C`, `D`, `F`. All the lenient zones are above `0x9F`, so
+  this widens `SignEBCDIC` without overlapping any ASCII convention. Do **not**
+  add a lenient set to the ASCII three: that would destroy the mutual
+  detectability `TestZonedSignConventionsAreMutuallyDetectable` asserts.
+- **An unsigned-zone byte in the sign position is a non-negative value**, not a
+  corruption — a signed item holds one after a `MOVE` from an unsigned one.
 
 ## Testing style
 

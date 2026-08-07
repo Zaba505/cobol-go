@@ -43,10 +43,37 @@
 //
 // [Reader] and [Writer] currently cover alphanumeric fields, raw byte fields,
 // packed decimal (COMP-3), binary (COMP, COMP-4, BINARY, COMP-5) and floating
-// point (COMP-1, COMP-2). Zoned decimal accessors, and the charset axis beyond
-// [ASCII] and [CP037], arrive in later stories; the [Encoding] axes they need
-// are already declared here so that no field of it ever has to acquire a
-// default retroactively.
+// point (COMP-1, COMP-2). The zoned decimal (USAGE DISPLAY) accessors arrive in
+// a later story; the two axes they read — the charset and the sign convention —
+// are complete here, so that neither ever has to acquire a default
+// retroactively.
+//
+// # Character sets and sign conventions
+//
+// [Charset] is an interface rather than an enum, and [ASCII] and [CP037] are
+// the two tables that ship. Neither is a default and neither is special: cp500,
+// cp1047 and cp1140 are a caller's own implementation away — over
+// golang.org/x/text/encoding/charmap, say — and this package depends on nothing
+// outside the standard library to keep that a choice rather than an
+// inheritance.
+//
+// Charset translation applies to alphanumeric fields and to nothing else.
+// Numeric decoding compares raw byte values, because digit bytes (F0-F9 against
+// 30-39) and the overpunched sign zones are byte-level facts: translating one
+// would throw away the zone that carries the sign. The declared charset still
+// says what those bytes are — whether a digit is F5 or 35, and whether a
+// SIGN SEPARATE byte is 4E/60 or 2B/2D — and this package asks the [Charset]
+// for them rather than switching on a known page.
+//
+// [Encoding.Sign] is the second, independent axis, and EBCDIC and ASCII are not
+// symmetric on it: EBCDIC has one universal convention while ASCII has four
+// incompatible ones in production use, which is why [SignConvention] is a
+// selectable value with no default and no inference. Bytes invalid under the
+// declared convention are rejected rather than coerced — a sign byte of 7B read
+// under [SignASCIIZone37] is a [ZonedSignError], not a digit — and since the
+// four conventions are mutually detectable at that byte, the rejection is what
+// turns most wrong-convention mistakes into a loud failure at the first
+// negative value rather than into silently flipped signs.
 //
 // # Binary items: width, byte order and range
 //
