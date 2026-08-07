@@ -12,10 +12,17 @@ It is **distinct from the root [`SPEC.md`](../SPEC.md)**, which specifies COBOL
 *source syntax* — the tokens and grammar of a program. The root spec deliberately
 defers everything below:
 
-- `SPEC.md:1079` states that a PICTURE string's symbols fix the item's
-  *category*, but not how digits, scale, or sign are derived from it.
-- `SPEC.md:1088` states that `USAGE` "change[s] the stored encoding but not the
-  logical value" — without saying what any stored encoding actually is.
+- The **"PICTURE determines category"** bullet of the root spec's *Semantics*
+  section states that a PICTURE string's symbols fix the item's *category*, but
+  not how digits, scale, or sign are derived from it.
+- The **"`USAGE` default is `DISPLAY`"** bullet, immediately below it, states
+  that `USAGE` "change[s] the stored encoding but not the logical value" —
+  without saying what any stored encoding actually is.
+
+Both bullets now link here. They are cited by name rather than by line number
+because a line number into a 1200-line document rots the moment either file is
+edited — as the two references originally written here did, within this very
+commit.
 
 This document fills exactly that gap. Source syntax questions belong in the root
 spec; byte-layout questions belong here.
@@ -425,12 +432,16 @@ validate a convention guess against.
 
 That requirement is what makes most wrong-convention mistakes loud. The four
 conventions are **mutually detectable at the signed digit byte**: for every pair,
-each convention's negative digit bytes are invalid under the other.
+each convention's negative digit bytes are invalid under the other. Note that
+this holds under the lenient EBCDIC reading too — the
+[lenient set](#lenient-reading-ebcdic-only) admits extra *zone nibbles*
+(`A`, `B`, `E`) that no ASCII convention uses, so it widens what `SignEBCDIC`
+accepts without overlapping any of the other three.
 
 | Byte seen | `SignEBCDIC` | `SignASCIIZone37` | `SignTranslatedEBCDIC` | `SignRealia` |
 |---|---|---|---|---|
 | `D5` (EBCDIC −5) | −5 | **invalid** (zone `D`) | **invalid** | **invalid** |
-| `75` (`u`, zone37 −5) | +5 (lenient) / invalid (strict) | −5 | **invalid** | **invalid** |
+| `75` (`u`, zone37 −5) | **invalid** (zone `7`) | −5 | **invalid** | **invalid** |
 | `4E` (`N`, translated −5) | **invalid** (digit nibble `E`) | **invalid** (zone `4`) | −5 | **invalid** |
 | `25` (`%`, Realia −5) | **invalid** (zone `2`) | **invalid** (zone `2`) | **invalid** | −5 |
 | `35` (`5`) | **invalid** (zone `3`) | +5 | unsigned 5 | +5 |
@@ -446,11 +457,13 @@ Two consequences worth stating plainly:
    either. Indistinguishability is only harmful where the readings differ, and
    for these four they never do.
 
-The residual silent case is a signed field that happens to be **strictly
-positive throughout the file** under `SignEBCDIC` read as… nothing: `C0`–`C9`
-are invalid under all three ASCII conventions. The genuinely silent case is
-narrower still: an **unsigned** or **`SIGN SEPARATE`** field carries no
-convention-specific byte, so no reading of it can be wrong on this axis.
+The genuinely silent case is therefore narrow: an **unsigned** or
+**`SIGN SEPARATE`** field carries no convention-specific byte at all, so no
+reading of it can be wrong on this axis — and a signed field only reveals the
+convention once a **negative** value appears, since the three ASCII conventions
+all read `30`–`39` as a non-negative digit. A reader that has seen only
+positives has not yet confirmed anything; it has merely not yet been
+contradicted.
 
 ---
 
