@@ -212,6 +212,328 @@ func (s SignConvention) valid() bool {
 	return s >= SignEBCDIC && s <= SignRealia
 }
 
+// The bytes of a zoned decimal (USAGE DISPLAY) field come from two independent
+// places, and keeping them apart is the whole of why the four sign conventions
+// are mutually detectable:
+//
+//   - A plain digit byte is a *charset* fact — F0-F9 in EBCDIC, 30-39 in ASCII
+//     — and [zonedBytes] derives it from the declared [Charset], as it does the
+//     separate sign bytes 4E/60 and 2B/2D.
+//   - The sign-carrying byte of a signed field is a *sign convention* fact and
+//     is charset-independent, so [zonedSignTables] holds absolute byte values.
+//
+// Both are *compared* against a field's bytes, never translated through one.
+// Asking a [Charset] for the byte of a character this package names itself is
+// the encode direction applied to a constant; putting a file's numeric byte
+// through [Charset.ToUnicode] is what codec/SPEC.md, "Charset as a First-Class
+// Axis", forbids, because it would lose the overpunch zone that carries the
+// sign.
+
+// zonedBytes is the charset half of that split: the byte values the declared
+// [Charset] gives the ten digits and the two separate sign characters.
+//
+// It is derived from the charset rather than switched on a known page, which is
+// what lets a caller plug cp500, cp1047 or cp1140 in — as a wrapper around
+// golang.org/x/text/encoding/charmap, say — without this package shipping a
+// table for each, and without acquiring that dependency itself.
+type zonedBytes struct {
+	// charset is the charset's name, carried for the errors below.
+	charset string
+	// digits[d] is the byte spelling the plain (unsigned zone) digit d.
+	digits [10]byte
+	// plus and minus are the SIGN SEPARATE bytes, which are
+	// charset-sensitive and sign-convention-independent.
+	plus, minus byte
+}
+
+// zonedBytesOf derives the zoned decimal byte values of cs, reporting an
+// [UnrepresentableRuneError] naming the first character it has no byte for.
+//
+// Neither shipped charset can fail this, and no charset that describes a real
+// COBOL data file can: an encoding with no digits and no '+' cannot spell a
+// numeric item at all, so failing here is better than reading one wrongly.
+func zonedBytesOf(cs Charset) (zonedBytes, error) {
+	z := zonedBytes{charset: cs.Name()}
+	for d := range z.digits {
+		b, ok := cs.FromUnicode(rune('0' + d))
+		if !ok {
+			return zonedBytes{}, UnrepresentableRuneError{Rune: rune('0' + d), Charset: z.charset}
+		}
+		z.digits[d] = b
+	}
+	for _, sep := range []struct {
+		r   rune
+		dst *byte
+	}{{'+', &z.plus}, {'-', &z.minus}} {
+		b, ok := cs.FromUnicode(sep.r)
+		if !ok {
+			return zonedBytes{}, UnrepresentableRuneError{Rune: sep.r, Charset: z.charset}
+		}
+		*sep.dst = b
+	}
+	return z, nil
+}
+
+// digitByte returns the byte spelling plain digit d, which is every byte of an
+// unsigned field and every non-sign byte of a signed one.
+func (z zonedBytes) digitByte(d byte) (byte, error) {
+	if d > 9 {
+		return 0, errZonedDigitValue
+	}
+	return z.digits[d], nil
+}
+
+// digitValue reports the digit a plain digit byte spells, rejecting anything
+// that is not one rather than coercing it: an EBCDIC F5 read under an ASCII
+// charset is a wrong charset, and it is the first zoned field of the first
+// record that says so.
+func (z zonedBytes) digitValue(b byte) (byte, error) {
+	if d := slices.Index(z.digits[:], b); d >= 0 {
+		return byte(d), nil
+	}
+	return 0, ZonedDigitError{Byte: b, Charset: z.charset, Zero: z.digits[0], Nine: z.digits[9]}
+}
+
+// separateSignByte returns the SIGN SEPARATE byte for a value of the given
+// sign. A separate sign is charset-sensitive and convention-independent: 2B/2D
+// in ASCII, 4E/60 in EBCDIC.
+func (z zonedBytes) separateSignByte(negative bool) byte {
+	if negative {
+		return z.minus
+	}
+	return z.plus
+}
+
+// separateSignValue reports whether a SIGN SEPARATE byte means the value is
+// negative, rejecting any other byte.
+//
+// A separate-sign field is the one zoned form carrying no sign-convention
+// information at all, which makes it the safest form to write and the form that
+// gives a reader nothing to check a convention guess against — so this byte is
+// the only thing there is to validate, and it is validated.
+func (z zonedBytes) separateSignValue(b byte) (bool, error) {
+	switch b {
+	case z.plus:
+		return false, nil
+	case z.minus:
+		return true, nil
+	}
+	return false, ZonedSeparateSignError{Byte: b, Charset: z.charset, Plus: z.plus, Minus: z.minus}
+}
+
+// zonedSignTable is the sign convention half of the split: the absolute byte
+// values the sign-carrying digit of a signed zoned field takes under one
+// [SignConvention]. See codec/SPEC.md, "Zoned Sign Conventions".
+type zonedSignTable struct {
+	// positive, negative and unsigned are indexed by the digit 0-9 the byte
+	// carries. A writer emits from positive and negative; a reader accepts
+	// all three, since an unsigned-zone byte in a signed field is a
+	// non-negative value rather than a corruption.
+	positive, negative, unsigned [10]byte
+	// lenientPositiveZones and lenientNegativeZones are the extra high
+	// nibbles a reader accepts and a writer never emits, the low nibble
+	// then being the digit. They exist only for [SignEBCDIC], because
+	// z/Architecture decimal instructions accept more sign values than they
+	// generate; the three ASCII conventions have no equivalent, and
+	// admitting extra zones there would destroy the mutual detectability
+	// the table below rests on.
+	lenientPositiveZones, lenientNegativeZones []byte
+}
+
+// zonedSignTables is indexed by [SignConvention]; the [SignUnset] row is the
+// zero table and is unreachable, because every entry point checks the
+// convention first.
+//
+// The rows are what makes a wrong convention loud: for every pair of
+// conventions, each one's negative bytes are invalid under the other. 7B read
+// under [SignASCIIZone37] is a digit nibble of B, D5 under any ASCII convention
+// is a zone no ASCII convention uses, and the lenient EBCDIC zones A, B and E
+// are likewise untouched by all three.
+var zonedSignTables = [...]zonedSignTable{
+	SignEBCDIC: {
+		positive: [10]byte{0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9},
+		negative: [10]byte{0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9},
+		unsigned: [10]byte{0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9},
+		// A, C, E and F are positive and B and D negative to a z/Architecture
+		// decimal instruction; C, D and F are the three a writer emits.
+		lenientPositiveZones: []byte{0xA0, 0xE0},
+		lenientNegativeZones: []byte{0xB0},
+	},
+	SignASCIIZone37: {
+		positive: [10]byte{0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39},
+		negative: [10]byte{0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79},
+		unsigned: [10]byte{0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39},
+	},
+	SignTranslatedEBCDIC: {
+		// cp037 C0-C9 are '{ABCDEFGHI' and D0-D9 are '}JKLMNOPQR', so an
+		// EBCDIC-to-ASCII text conversion of SignEBCDIC data lands here.
+		positive: [10]byte{0x7B, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49},
+		negative: [10]byte{0x7D, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51, 0x52},
+		unsigned: [10]byte{0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39},
+	},
+	SignRealia: {
+		positive: [10]byte{0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39},
+		// Zone 2: a negative zero is a space, and -1 to -9 are '!' to ')'.
+		negative: [10]byte{0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29},
+		unsigned: [10]byte{0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39},
+	},
+}
+
+// signByte returns the byte spelling digit d in the sign-carrying position of a
+// signed zoned field whose value has the given sign, under convention s.
+//
+// It emits only the preferred encodings — the C and D zones under
+// [SignEBCDIC], never the lenient A, B and E that signByteValue accepts — just
+// as the packed writer emits only the C and D nibbles for a signed field. The
+// unsigned zone is not reachable from here at all: an item with no S in its
+// PICTURE has no sign-carrying byte, and every byte of it comes from
+// [zonedBytes.digitByte].
+func signByte(s SignConvention, d byte, negative bool) (byte, error) {
+	if !s.valid() {
+		return 0, EncodingError{Field: "Sign", Reason: "is required and has no default"}
+	}
+	if d > 9 {
+		return 0, errZonedDigitValue
+	}
+	t := zonedSignTables[s]
+	if negative {
+		return t.negative[d], nil
+	}
+	return t.positive[d], nil
+}
+
+// signByteValue reports the digit the sign-carrying byte b spells under
+// convention s and whether it makes the field negative.
+//
+// A byte that names no digit under s is a [ZonedSignError] and never a digit:
+// coercing it — reading 7B as a 1 because its low nibble is B, say — is what
+// turns a wrong convention from a first-record failure into silently wrong
+// signs. See codec/SPEC.md, "Validation and detectability".
+func signByteValue(s SignConvention, b byte) (digit byte, negative bool, err error) {
+	if !s.valid() {
+		return 0, false, EncodingError{Field: "Sign", Reason: "is required and has no default"}
+	}
+	t := zonedSignTables[s]
+	if d := slices.Index(t.negative[:], b); d >= 0 {
+		return byte(d), true, nil
+	}
+	if d := slices.Index(t.positive[:], b); d >= 0 {
+		return byte(d), false, nil
+	}
+	// An unsigned-zone byte in a signed field is a non-negative value: IBM
+	// reads an F zone as positive, and the three ASCII conventions all read
+	// 30-39 as one.
+	if d := slices.Index(t.unsigned[:], b); d >= 0 {
+		return byte(d), false, nil
+	}
+	if b&0x0F <= 9 {
+		if slices.Contains(t.lenientNegativeZones, b&0xF0) {
+			return b & 0x0F, true, nil
+		}
+		if slices.Contains(t.lenientPositiveZones, b&0xF0) {
+			return b & 0x0F, false, nil
+		}
+	}
+	return 0, false, ZonedSignError{Byte: b, Sign: s}
+}
+
+// zonedCodec is the byte-level half of zoned decimal: the charset facts and the
+// sign convention that together say what one field's bytes mean.
+//
+// It holds no position or width information, because those come from the
+// PICTURE and the SIGN clause rather than from the [Encoding] — the two axes
+// this type is made of are properties of the *file*. The zoned accessors layer
+// the sign position on top of it.
+type zonedCodec struct {
+	bytes zonedBytes
+	sign  SignConvention
+}
+
+// newZonedCodec builds the zoned codec of a validated [Encoding].
+func newZonedCodec(enc Encoding) (zonedCodec, error) {
+	if err := enc.Validate(); err != nil {
+		return zonedCodec{}, err
+	}
+	z, err := zonedBytesOf(enc.Charset)
+	if err != nil {
+		return zonedCodec{}, err
+	}
+	return zonedCodec{bytes: z, sign: enc.Sign}, nil
+}
+
+// encodeField writes the zoned decimal bytes of ds — one digit per element,
+// most significant first, each 0-9 — into dst, which must be the same length.
+//
+// signAt is the index of the byte the sign is overpunched into: the last byte
+// under SIGN IS TRAILING, the first under SIGN IS LEADING, and -1 for an
+// unsigned field or one whose sign is SEPARATE, both of which carry the plain
+// digit zone throughout. negative is ignored when signAt is negative, since an
+// unsigned field has nowhere to record a sign.
+//
+// dst is left untouched unless the whole field encodes, so a rejected field
+// writes nothing.
+func (c zonedCodec) encodeField(dst, ds []byte, signAt int, negative bool) error {
+	if len(dst) != len(ds) {
+		return errZonedFieldWidth
+	}
+	if signAt >= len(ds) {
+		return errZonedSignPosition
+	}
+	buf := make([]byte, len(ds))
+	for i, d := range ds {
+		var (
+			b   byte
+			err error
+		)
+		if i == signAt {
+			b, err = signByte(c.sign, d, negative)
+		} else {
+			b, err = c.bytes.digitByte(d)
+		}
+		if err != nil {
+			return err
+		}
+		buf[i] = b
+	}
+	copy(dst, buf)
+	return nil
+}
+
+// decodeField reads the digits of one zoned decimal field, returning them one
+// per element with values 0-9, most significant first, together with whether
+// the sign-carrying byte made the field negative.
+//
+// signAt selects the sign-carrying byte as it does for
+// [zonedCodec.encodeField], and -1 reads every byte as a plain digit and
+// reports a non-negative value.
+//
+// at is the index within src of the offending byte and is meaningful only
+// alongside a non-nil error. A zoned field is several bytes wide, so the caller
+// stamps start+at rather than the offset the field ended at — the same reason
+// [Reader.readPackedDigits] stamps the byte holding a bad nibble.
+func (c zonedCodec) decodeField(src []byte, signAt int) (ds []byte, negative bool, at int, err error) {
+	if signAt >= len(src) {
+		return nil, false, 0, errZonedSignPosition
+	}
+	ds = make([]byte, len(src))
+	for i, b := range src {
+		var (
+			d   byte
+			err error
+		)
+		if i == signAt {
+			d, negative, err = signByteValue(c.sign, b)
+		} else {
+			d, err = c.bytes.digitValue(b)
+		}
+		if err != nil {
+			return nil, false, i, err
+		}
+		ds[i] = d
+	}
+	return ds, negative, 0, nil
+}
+
 // FloatFormat is the representation of COMP-1 and COMP-2 items.
 //
 // The two formats are incompatible and neither is self-describing: an IBM
@@ -929,6 +1251,93 @@ type SignednessError struct {
 // Error implements the [error] interface.
 func (e SignednessError) Error() string {
 	return fmt.Sprintf("invalid signedness %d: an item is either Signed or Unsigned", int(e.Signedness))
+}
+
+// The three sentinels below guard internal contracts of the zoned helpers, and
+// none of them can reach a caller: a caller states a digit count and a sign
+// position, and it is this package that turns those into a digit slice, a field
+// width and an index. They are unexported and untyped for that reason — a
+// caller has nothing to assert on and no way to provoke one. The typed leaves a
+// caller does assert on are the three Zoned…Error types below, which describe
+// bytes that came out of a file.
+var (
+	// errZonedDigitValue guards the digit values handed to the zoned
+	// encoders being 0-9. They come from a decimal formatting of the number
+	// being written.
+	errZonedDigitValue = errors.New("invalid zoned decimal digit value: digits are 0-9")
+	// errZonedFieldWidth guards a field's byte slice being exactly as wide
+	// as its digit slice: a zoned item is one byte per digit.
+	errZonedFieldWidth = errors.New("zoned decimal field width does not match its digit count")
+	// errZonedSignPosition guards the overpunch index being an index into
+	// the field, or -1 for a field that carries no overpunched sign.
+	errZonedSignPosition = errors.New("invalid zoned decimal sign position: not an index into the field")
+)
+
+// ZonedDigitError is returned when a byte in a plain digit position of a zoned
+// decimal (USAGE DISPLAY) field is not a digit in the declared charset.
+//
+// It is the loudest signal the package has that [Encoding.Charset] is wrong: an
+// EBCDIC F5 is not an ASCII digit and an ASCII 35 is not an EBCDIC one, so the
+// first zoned field of the first record catches a swapped charset. The byte is
+// rejected rather than coerced to its low nibble, which is what would turn that
+// failure into a plausible wrong number.
+type ZonedDigitError struct {
+	// Byte is the offending byte.
+	Byte byte
+	// Charset is the name of the charset it is not a digit in.
+	Charset string
+	// Zero and Nine are the bytes that charset does spell 0 and 9 with,
+	// which are the ends of a contiguous range in every charset in use.
+	Zero, Nine byte
+}
+
+// Error implements the [error] interface.
+func (e ZonedDigitError) Error() string {
+	return fmt.Sprintf("invalid zoned decimal digit byte %#02X: %s digits are %#02X-%#02X", e.Byte, e.Charset, e.Zero, e.Nine)
+}
+
+// ZonedSignError is returned when the sign-carrying byte of a signed zoned
+// decimal field names no digit under the declared [SignConvention].
+//
+// The four conventions are mutually detectable at exactly this byte — each
+// one's negative bytes are invalid under the other three — so this is what
+// makes a wrong convention loud rather than silently wrong signs. A sign byte
+// of 7B read under [SignASCIIZone37] is this error and not a digit.
+//
+// A field that has only ever held non-negative values will not produce it,
+// since the three ASCII conventions agree on 30-39: a reader that has seen no
+// negative has not confirmed the convention, it has merely not been
+// contradicted.
+type ZonedSignError struct {
+	// Byte is the offending byte.
+	Byte byte
+	// Sign is the convention it is invalid under.
+	Sign SignConvention
+}
+
+// Error implements the [error] interface.
+func (e ZonedSignError) Error() string {
+	return fmt.Sprintf("invalid zoned decimal sign byte %#02X under sign convention %s", e.Byte, e.Sign)
+}
+
+// ZonedSeparateSignError is returned when the byte of a SIGN IS SEPARATE
+// CHARACTER field is neither the charset's '+' nor its '-'.
+//
+// The separate sign byte is charset-sensitive and convention-independent — 2B
+// and 2D in ASCII, 4E and 60 in EBCDIC — so this rejects a wrong charset and a
+// slipped field offset, the only two things it can be.
+type ZonedSeparateSignError struct {
+	// Byte is the offending byte.
+	Byte byte
+	// Charset is the name of the charset whose signs it is not one of.
+	Charset string
+	// Plus and Minus are the bytes that charset spells '+' and '-' with.
+	Plus, Minus byte
+}
+
+// Error implements the [error] interface.
+func (e ZonedSeparateSignError) Error() string {
+	return fmt.Sprintf("invalid separate sign byte %#02X: %s spells + as %#02X and - as %#02X", e.Byte, e.Charset, e.Plus, e.Minus)
 }
 
 // PackedDigitCountError is returned when a packed decimal digit count is
