@@ -600,6 +600,8 @@ func TestParseErrors(t *testing.T) {
 			{name: "CR with DB", src: "9CRDB", symbol: SymbolCredit},
 			{name: "plus with minus", src: "+99-", symbol: SymbolMinus},
 			{name: "plus with CR", src: "+99CR", symbol: SymbolPlus},
+			{name: "minus with CR", src: "-99CR", symbol: SymbolMinus},
+			{name: "minus with DB", src: "-99DB", symbol: SymbolMinus},
 		}
 
 		for _, tc := range testCases {

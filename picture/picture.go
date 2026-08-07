@@ -337,18 +337,24 @@ func validate(src string, symbols []Symbol) error {
 			Reason: "must not appear with CR; a picture has one sign-control symbol",
 		}
 	}
-	signs := count(symbols, SymbolPlus) + count(symbols, SymbolMinus)
-	if count(symbols, SymbolPlus) > 0 && count(symbols, SymbolMinus) > 0 {
+	plus, minus := count(symbols, SymbolPlus), count(symbols, SymbolMinus)
+	if plus > 0 && minus > 0 {
 		return SymbolPlacementError{
 			Source: src,
 			Symbol: SymbolMinus,
 			Reason: "must not appear with +; a picture has one sign-control symbol",
 		}
 	}
-	if signs > 0 && count(symbols, SymbolCredit)+count(symbols, SymbolDebit) > 0 {
+	if plus+minus > 0 && count(symbols, SymbolCredit)+count(symbols, SymbolDebit) > 0 {
+		// Report the sign-control symbol the picture actually holds: only one
+		// of the two can be present here, the pair having been rejected above.
+		sign := SymbolPlus
+		if minus > 0 {
+			sign = SymbolMinus
+		}
 		return SymbolPlacementError{
 			Source: src,
-			Symbol: SymbolPlus,
+			Symbol: sign,
 			Reason: "must not appear with CR or DB; a picture has one sign-control symbol",
 		}
 	}
