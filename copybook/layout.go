@@ -323,6 +323,12 @@ func MicroFocus() Dialect {
 // REDEFINES clause resolved against a preceding sibling. A redefining item
 // shares its target's Offset and adds nothing to the group's extent unless it is
 // longer and the dialect allows that.
+//
+// DependingOn is the item whose value gives the occurrence count of an
+// OCCURS ... DEPENDING ON table, and is nil for every other item. Occurs is the
+// count the layout was computed at — the declared maximum, MaxOccurs, in the
+// static layout [NewLayout] returns, and the count read from a record's own
+// bytes in the one [Layout.Resolve] returns.
 type Item struct {
 	// Field is the field this item lays out.
 	Field *Field
@@ -334,8 +340,17 @@ type Item struct {
 	// Stride is the bytes from the start of one occurrence to the start of
 	// the next; it equals Length when no trailing slack is inserted.
 	Stride int
-	// Occurs is the occurrence count: 1 for a field with no OCCURS clause.
+	// Occurs is the occurrence count the layout was computed at: 1 for a
+	// field with no OCCURS clause.
 	Occurs int
+	// MinOccurs and MaxOccurs are the bounds the OCCURS clause allows. They
+	// both equal Occurs for a fixed table and for a field with no OCCURS
+	// clause; they differ only for an OCCURS ... DEPENDING ON table.
+	MinOccurs int
+	MaxOccurs int
+	// DependingOn is the item holding the occurrence count of an
+	// OCCURS ... DEPENDING ON table, nil for every other item.
+	DependingOn *Item
 	// Slack is the number of slack bytes inserted immediately before Offset.
 	Slack int
 	// Redefines is the item this one redefines, nil when it redefines
@@ -375,15 +390,26 @@ func (i *Item) OccurrenceOffset(n int) (int, error) {
 // Layout is the storage layout of one record: every field's byte offset and byte
 // width, and the record's total length.
 //
-// It is a static layout, computed from the copybook alone. A record holding an
-// OCCURS ... DEPENDING ON table has no static layout — its length is a function
-// of its own data — and [NewLayout] reports one as an [OccursError] rather than
-// advertising a fixed length that is right only at the maximum occurrence count.
+// A record holding an OCCURS ... DEPENDING ON table is variable-length: its
+// length, and the offset of every field after the table, are functions of the
+// record's own data. [NewLayout] reports such a record as Variable with a Length
+// of zero rather than advertising a fixed length that is right only at one
+// occurrence count; MinLength and MaxLength bound it, and [Layout.Resolve] turns
+// one record's bytes into a layout with concrete offsets and a concrete length.
 type Layout struct {
 	// Record is the item for the record itself, root of the item tree.
 	Record *Item
-	// Length is the total record length in bytes: Record.Total().
+	// Length is the total record length in bytes: Record.Total(). It is zero
+	// when Variable is true, because such a record has no one length.
 	Length int
+	// Variable reports a record whose length depends on its own data: one
+	// holding an OCCURS ... DEPENDING ON table.
+	Variable bool
+	// MinLength and MaxLength are the record length at the smallest and
+	// largest occurrence counts its OCCURS ... DEPENDING ON tables allow.
+	// They both equal Length when Variable is false.
+	MinLength int
+	MaxLength int
 	// Dialect is the dialect the layout was computed under.
 	Dialect Dialect
 }
@@ -405,10 +431,16 @@ var ErrNilRecord = errors.New("nil record")
 // Level-88 condition-names and level-66 RENAMES entries occupy no storage of
 // their own and are not items.
 //
+// A record holding an OCCURS ... DEPENDING ON table is laid out at the declared
+// maximum occurrence count, which is the storage a compiler reserves for it, and
+// reported as [Layout.Variable] with no fixed Length. [Layout.Resolve] lays the
+// same record out at the count one record's bytes actually carry.
+//
 // It returns a [DialectError] for an incomplete dialect, a [LayoutError] for an
 // elementary item whose width cannot be determined, an [OccursError] for an
-// OCCURS clause that is not a fixed count, and a [RedefinesError] for a REDEFINES
-// clause that cannot be resolved or that the dialect rejects.
+// OCCURS clause whose occurrence counts cannot be read, a [DependingError] for a
+// DEPENDING ON phrase that cannot be resolved, and a [RedefinesError] for a
+// REDEFINES clause that cannot be resolved or that the dialect rejects.
 func NewLayout(record *Field, d Dialect) (*Layout, error) {
 	if record == nil {
 		return nil, ErrNilRecord
@@ -417,15 +449,51 @@ func NewLayout(record *Field, d Dialect) (*Layout, error) {
 		return nil, err
 	}
 
-	l := &layouter{dialect: d}
+	root, variable, err := layoutRecord(record, d, maxCount)
+	if err != nil {
+		return nil, err
+	}
+	total := root.Total()
+	if !variable {
+		return &Layout{
+			Record:    root,
+			Length:    total,
+			MinLength: total,
+			MaxLength: total,
+			Dialect:   d,
+		}, nil
+	}
+
+	// The bounds cost a second walk rather than being tracked alongside the
+	// first: a table's occurrence count changes the offset of everything
+	// after it, so the shortest record is a whole layout of its own and not
+	// an arithmetic adjustment to the longest.
+	least, _, err := layoutRecord(record, d, minCount)
+	if err != nil {
+		return nil, err
+	}
+	return &Layout{
+		Record:    root,
+		Variable:  true,
+		MinLength: least.Total(),
+		MaxLength: total,
+		Dialect:   d,
+	}, nil
+}
+
+// layoutRecord walks record under d, taking the occurrence count of every
+// OCCURS ... DEPENDING ON table from count. It reports whether the record holds
+// such a table at all, which is what makes its layout variable.
+func layoutRecord(record *Field, d Dialect, count counter) (*Item, bool, error) {
+	l := &layouter{dialect: d, count: count}
 	// A record's own REDEFINES clause names another record rather than a
 	// field of this one, so it is not a constraint on this layout: the
 	// record starts at offset zero either way.
 	root, err := l.place(record, nil, 0, false)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return &Layout{Record: root, Length: root.Total(), Dialect: d}, nil
+	return root, l.variable, nil
 }
 
 // Items returns every item of the layout in source order, outermost first: the
@@ -458,6 +526,17 @@ func (l *Layout) Find(name string) *Item {
 // layouter accumulates the item tree as the record is walked.
 type layouter struct {
 	dialect Dialect
+	// count supplies the occurrence count of an OCCURS ... DEPENDING ON
+	// table once its controlling item has been placed.
+	count counter
+	// placed is every item laid out so far, in the order they were finished.
+	// A DEPENDING ON phrase is resolved against it, which is what makes a
+	// controlling field written after the table it controls an error rather
+	// than a forward reference.
+	placed []*Item
+	// variable reports that the record holds an OCCURS ... DEPENDING ON
+	// table, whatever count the walk laid it out at.
+	variable bool
 }
 
 // place lays out f and its subordinate items at or after byte offset at,
@@ -465,7 +544,7 @@ type layouter struct {
 // case at is that sibling's offset and no slack may be inserted before it: the
 // two items are required to start at the same byte.
 func (l *layouter) place(f *Field, parent *Item, at int, redefining bool) (*Item, error) {
-	occurs, err := l.occurrences(f)
+	t, err := l.occurrences(f)
 	if err != nil {
 		return nil, err
 	}
@@ -480,11 +559,14 @@ func (l *layouter) place(f *Field, parent *Item, at int, redefining bool) (*Item
 
 	offset := roundUp(at, align)
 	item := &Item{
-		Field:  f,
-		Offset: offset,
-		Occurs: occurs,
-		Slack:  offset - at,
-		Parent: parent,
+		Field:       f,
+		Offset:      offset,
+		Occurs:      t.occurs,
+		MinOccurs:   t.min,
+		MaxOccurs:   t.max,
+		DependingOn: t.control,
+		Slack:       offset - at,
+		Parent:      parent,
 	}
 
 	if f.Kind == KindGroup {
@@ -506,10 +588,16 @@ func (l *layouter) place(f *Field, parent *Item, at int, redefining bool) (*Item
 	// field would report Slack 0 while starting later than its own alignment
 	// asked for — which matters wherever a width is not already a multiple of
 	// its boundary, as BinarySizeSmallest's 3, 5, 6 and 7-byte items are not.
+	//
+	// The test is on the declared maximum rather than on the count in hand,
+	// because the stride of a DEPENDING ON table is a property of the
+	// copybook: a record carrying one occurrence today must put the fields
+	// after the table where a record carrying five puts its second one.
 	item.Stride = item.Length
-	if occurs > 1 {
+	if t.max > 1 {
 		item.Stride = roundUp(item.Length, align)
 	}
+	l.placed = append(l.placed, item)
 	return item, nil
 }
 
@@ -579,31 +667,38 @@ func (l *layouter) redefinedBy(child *Field, group *Item) (*Item, error) {
 	}
 }
 
-// occurrences reports the occurrence count of a field: 1 when it carries no
-// OCCURS clause, and the clause's count when it carries a fixed one.
+// table is the occurrence shape of a field: how many times this walk lays it
+// out, the bounds its OCCURS clause allows, and the item its count is read from
+// where the clause has a DEPENDING ON phrase.
 //
-// An OCCURS ... DEPENDING ON table has no static occurrence count, so it is
-// reported rather than laid out at either bound.
-func (l *layouter) occurrences(f *Field) (int, error) {
+// A field with no OCCURS clause occurs once, and a fixed table as many times as
+// it says, so for both of those occurs, min and max are the same number and
+// control is nil.
+type table struct {
+	occurs  int
+	min     int
+	max     int
+	control *Item
+}
+
+// occurrences reports the occurrence shape of a field: once when it carries no
+// OCCURS clause, the clause's count when it carries a fixed one, and the count
+// the layouter's counter supplies when it carries a DEPENDING ON phrase.
+func (l *layouter) occurrences(f *Field) (table, error) {
 	clause := occursOf(f.Entry)
-	if clause == nil {
-		return 1, nil
-	}
 	switch {
+	case clause == nil:
+		return table{occurs: 1, min: 1, max: 1}, nil
 	case clause.DependingOn != nil:
-		return 0, OccursError{
-			Pos:    f.Pos,
-			Name:   f.Name,
-			Reason: "OCCURS DEPENDING ON makes the record variable-length; a static layout cannot place the fields after it",
-		}
+		return l.dependingTable(f, clause)
 	case clause.Max != nil:
-		return 0, OccursError{
+		return table{}, OccursError{
 			Pos:    f.Pos,
 			Name:   f.Name,
 			Reason: "OCCURS with a range of occurrence counts and no DEPENDING ON has no fixed length",
 		}
 	case clause.Min == nil:
-		return 0, OccursError{
+		return table{}, OccursError{
 			Pos:    f.Pos,
 			Name:   f.Name,
 			Reason: "OCCURS clause states no occurrence count",
@@ -612,13 +707,13 @@ func (l *layouter) occurrences(f *Field) (int, error) {
 
 	count, err := strconv.Atoi(clause.Min.Value)
 	if err != nil || count < 1 {
-		return 0, OccursError{
+		return table{}, OccursError{
 			Pos:    f.Pos,
 			Name:   f.Name,
 			Reason: fmt.Sprintf("occurrence count %q is not a positive whole number", clause.Min.Value),
 		}
 	}
-	return count, nil
+	return table{occurs: count, min: count, max: count}, nil
 }
 
 // width reports the byte width of one occurrence of an elementary item, as
@@ -710,12 +805,19 @@ func digitsOf(f *Field) (int, error) {
 // the same inheritance USAGE follows. Its absence is TRAILING, non-separate,
 // which overpunches the sign into a digit byte and costs nothing.
 func separateSign(f *Field) bool {
+	clause := inheritedSign(f)
+	return clause != nil && clause.Separate
+}
+
+// inheritedSign returns the SIGN clause that governs a field: its own, or the
+// nearest one on a group above it, and nil when neither states one.
+func inheritedSign(f *Field) *cobol.SignClause {
 	for item := f; item != nil; item = item.Parent {
 		if clause := signOf(item.Entry); clause != nil {
-			return clause.Separate
+			return clause
 		}
 	}
-	return false
+	return nil
 }
 
 // alignOf reports the boundary the field's storage must start on.
@@ -884,9 +986,10 @@ func (e LayoutError) Error() string {
 		quoteOrItem(e.Name), e.Pos.Line, e.Pos.Column, e.Reason)
 }
 
-// OccursError is returned for an OCCURS clause a static layout cannot place: an
-// OCCURS ... DEPENDING ON table, whose length is a function of the record's own
-// data, or an occurrence count that is not a positive whole number.
+// OccursError is returned for an OCCURS clause whose occurrence counts cannot be
+// read: a count that is not a positive whole number, a range of counts with no
+// DEPENDING ON phrase to choose between them, or a clause stating no count at
+// all. A DEPENDING ON phrase that cannot be resolved is a [DependingError].
 type OccursError struct {
 	Pos    cobol.Pos
 	Name   string

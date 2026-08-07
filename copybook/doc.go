@@ -45,10 +45,6 @@
 // REDEFINES overlays its target at the same offset, and SYNCHRONIZED inserts
 // slack bytes where the dialect honours it.
 //
-// The layout is *static*. A record holding an OCCURS ... DEPENDING ON table has
-// no static layout, and [NewLayout] reports one rather than advertising a fixed
-// length that is right only at one occurrence count.
-//
 // A [Dialect] is required and every field of it has an invalid zero value, for
 // the same reason [github.com/Zaba505/cobol-go/codec.Encoding] does: a wrong
 // layout setting shifts every following field, and surfaces — if at all —
@@ -58,9 +54,35 @@
 // [github.com/Zaba505/cobol-go/codec.Encoding] a property of the file in hand
 // (codec/SPEC.md, "By compiler vs by file").
 //
+// # Variable-length records
+//
+// A record holding an OCCURS ... DEPENDING ON table has no one length: the
+// table's occurrence count is a value in the record itself, and every field
+// after the table moves with it. [NewLayout] reports such a record as
+// [Layout.Variable] with a Length of zero — bounded by [Layout.MinLength] and
+// [Layout.MaxLength] — rather than advertising a fixed length that is right only
+// at one occurrence count, and lays the item tree out at the maximum, which is
+// the storage a compiler reserves for it.
+//
+// [Layout.Resolve] turns one record's bytes into a layout with concrete offsets:
+//
+//	l, err := copybook.NewLayout(records[0], copybook.IBMEnterprise())
+//	if l.Variable {
+//		l, err = l.Resolve(record)   // record is one record's bytes
+//	}
+//	tail := l.Find("TRAILER").Offset // where it sits in *this* record
+//
+// It reads a controlling field whose USAGE is DISPLAY or COMP-3, the two
+// representations whose digits are the same bytes under every charset and byte
+// order. A binary controlling field is not guessed at: read it with
+// [github.com/Zaba505/cobol-go/codec.Reader] and hand the count to
+// [Layout.ResolveCounts] instead.
+//
 // This package imports the root cobol package (for the AST) and picture (for the
 // parsed PICTURE character-string of each elementary item), and nothing else in
-// this module. In particular it does not import codec: nothing here reads or
-// writes a byte, and the byte-level rules it shares with codec are stated once in
+// this module. In particular it does not import codec: the only bytes it reads
+// are the digits of an OCCURS ... DEPENDING ON controlling field, which are the
+// same bytes under every charset and byte order and so need no encoding to be
+// declared. The byte-level rules it shares with codec are stated once in
 // codec/SPEC.md rather than in either package's code.
 package copybook
