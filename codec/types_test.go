@@ -1008,19 +1008,21 @@ func TestZonedFieldRejectsBytesOfAnotherConvention(t *testing.T) {
 	}
 }
 
-func TestZonedFieldWidthErrors(t *testing.T) {
+func TestZonedFieldShapeGuards(t *testing.T) {
 	t.Parallel()
 
 	c, err := newZonedCodec(MicroFocusASCII())
 	require.NoError(t, err)
 
-	var widthErr FieldWidthError
-
-	require.ErrorAs(t, c.encodeField(make([]byte, 2), []byte{1, 2, 3}, -1, false), &widthErr)
-	require.ErrorAs(t, c.encodeField(make([]byte, 3), []byte{1, 2, 3}, 3, false), &widthErr)
+	// A zoned item is one byte per digit, and the overpunch index is an index
+	// into the field or -1. Neither is a caller's to get wrong — the accessors
+	// derive both from the digit count and the SIGN clause — so these are
+	// unexported sentinels rather than typed leaves describing a file's bytes.
+	require.ErrorIs(t, c.encodeField(make([]byte, 2), []byte{1, 2, 3}, -1, false), errZonedFieldWidth)
+	require.ErrorIs(t, c.encodeField(make([]byte, 3), []byte{1, 2, 3}, 3, false), errZonedSignPosition)
 
 	_, _, _, err = c.decodeField([]byte("123"), 3)
-	require.ErrorAs(t, err, &widthErr)
+	require.ErrorIs(t, err, errZonedSignPosition)
 }
 
 func TestZonedFieldWritesNothingWhenRejected(t *testing.T) {

@@ -382,9 +382,12 @@ var zonedSignTables = [...]zonedSignTable{
 // signByte returns the byte spelling digit d in the sign-carrying position of a
 // signed zoned field whose value has the given sign, under convention s.
 //
-// It emits only the preferred encodings: C, D and F zones under [SignEBCDIC]
-// and never the lenient A, B and E that signByteValue accepts, exactly as the
-// packed writer emits only C, D and F nibbles.
+// It emits only the preferred encodings — the C and D zones under
+// [SignEBCDIC], never the lenient A, B and E that signByteValue accepts — just
+// as the packed writer emits only the C and D nibbles for a signed field. The
+// unsigned zone is not reachable from here at all: an item with no S in its
+// PICTURE has no sign-carrying byte, and every byte of it comes from
+// [zonedBytes.digitByte].
 func signByte(s SignConvention, d byte, negative bool) (byte, error) {
 	if !s.valid() {
 		return 0, EncodingError{Field: "Sign", Reason: "is required and has no default"}
@@ -471,10 +474,10 @@ func newZonedCodec(enc Encoding) (zonedCodec, error) {
 // writes nothing.
 func (c zonedCodec) encodeField(dst, ds []byte, signAt int, negative bool) error {
 	if len(dst) != len(ds) {
-		return FieldWidthError{Width: len(dst)}
+		return errZonedFieldWidth
 	}
 	if signAt >= len(ds) {
-		return FieldWidthError{Width: signAt}
+		return errZonedSignPosition
 	}
 	buf := make([]byte, len(ds))
 	for i, d := range ds {
@@ -510,7 +513,7 @@ func (c zonedCodec) encodeField(dst, ds []byte, signAt int, negative bool) error
 // [Reader.readPackedDigits] stamps the byte holding a bad nibble.
 func (c zonedCodec) decodeField(src []byte, signAt int) (ds []byte, negative bool, at int, err error) {
 	if signAt >= len(src) {
-		return nil, false, 0, FieldWidthError{Width: signAt}
+		return nil, false, 0, errZonedSignPosition
 	}
 	ds = make([]byte, len(src))
 	for i, b := range src {
@@ -1250,11 +1253,25 @@ func (e SignednessError) Error() string {
 	return fmt.Sprintf("invalid signedness %d: an item is either Signed or Unsigned", int(e.Signedness))
 }
 
-// errZonedDigitValue guards the internal contract that the digit values handed
-// to the zoned encoders are 0-9. It cannot reach a caller: those values come
-// from a decimal formatting of the number being written, never from the caller
-// directly.
-var errZonedDigitValue = errors.New("invalid zoned decimal digit value: digits are 0-9")
+// The three sentinels below guard internal contracts of the zoned helpers, and
+// none of them can reach a caller: a caller states a digit count and a sign
+// position, and it is this package that turns those into a digit slice, a field
+// width and an index. They are unexported and untyped for that reason — a
+// caller has nothing to assert on and no way to provoke one. The typed leaves a
+// caller does assert on are the three Zoned…Error types below, which describe
+// bytes that came out of a file.
+var (
+	// errZonedDigitValue guards the digit values handed to the zoned
+	// encoders being 0-9. They come from a decimal formatting of the number
+	// being written.
+	errZonedDigitValue = errors.New("invalid zoned decimal digit value: digits are 0-9")
+	// errZonedFieldWidth guards a field's byte slice being exactly as wide
+	// as its digit slice: a zoned item is one byte per digit.
+	errZonedFieldWidth = errors.New("zoned decimal field width does not match its digit count")
+	// errZonedSignPosition guards the overpunch index being an index into
+	// the field, or -1 for a field that carries no overpunched sign.
+	errZonedSignPosition = errors.New("invalid zoned decimal sign position: not an index into the field")
+)
 
 // ZonedDigitError is returned when a byte in a plain digit position of a zoned
 // decimal (USAGE DISPLAY) field is not a digit in the declared charset.
