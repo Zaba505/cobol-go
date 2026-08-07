@@ -606,13 +606,28 @@ var pow10 = func() [maxBinaryInt64Digits + 1]uint64 {
 	return t
 }()
 
-// decimalLimit reports 10^digits - 1, the largest magnitude a digits-digit
-// item holds under [TruncStd].
-func decimalLimit(digits int) *big.Int {
+// binaryDecimalLimits holds 10^i - 1 for every digit count a binary item may
+// declare. It is precomputed for the reason pow10 is: the 19-to-31 digit path
+// range-checks every field it reads or writes, and an exponentiation and two
+// allocations per field is a hot loop's worth of work for 31 constants.
+var binaryDecimalLimits = func() [maxBinaryDigits + 1]*big.Int {
+	var t [maxBinaryDigits + 1]*big.Int
 	ten := big.NewInt(10)
-	v := new(big.Int).Exp(ten, big.NewInt(int64(digits)), nil)
-	return v.Sub(v, big.NewInt(1))
-}
+	one := big.NewInt(1)
+	for i := range t {
+		v := new(big.Int).Exp(ten, big.NewInt(int64(i)), nil)
+		t[i] = v.Sub(v, one)
+	}
+	return t
+}()
+
+// decimalLimit reports 10^digits - 1, the largest magnitude a digits-digit
+// item holds under [TruncStd]. digits must already have been validated against
+// [maxBinaryDigits].
+//
+// The returned value is shared and must not be modified: every caller compares
+// with it and none of them owns it.
+func decimalLimit(digits int) *big.Int { return binaryDecimalLimits[digits] }
 
 // isBigEndian reports whether bo puts the most significant byte first.
 //
