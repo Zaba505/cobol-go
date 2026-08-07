@@ -36,8 +36,10 @@ that implements each one.
 > format via `WithSourceFormat` (passing `FreeFormat` or `FixedFormat`;
 > `Tokenize` via `WithFixedFormat()`), defaulting to free format. Honoring an in-source
 > `>>SOURCE FORMAT` directive and *round-trip fixtures* (#23) remain deferred.
-> Also out of scope:
-> the COPY/REPLACE text-manipulation facility (copybooks), the REPORT and SCREEN
+> The COPY half of the COPY/REPLACE text-manipulation facility — copybooks,
+> pseudo-text and `REPLACING` — is **implemented** (#81); see
+> [COPY and Pseudo-Text](#copy-and-pseudo-text). Still out of scope:
+> the `REPLACE` statement, the REPORT and SCREEN
 > sections beyond their headers, object-oriented (class/method) and
 > user-defined-function compilation units, and the full ~1130-word reserved word
 > list.
@@ -405,6 +407,7 @@ characters; a few are multi-character and must be recognized greedily.
 | `,` `;` | optional separators (followed by a space) |
 | `+` `-` `*` `/` `**` | arithmetic operators (`**` = exponentiation); `+`/`-` also unary sign |
 | `=` | relational equality; assignment target marker in `COMPUTE` |
+| `==` | [pseudo-text](#copy-and-pseudo-text) delimiter (a `PseudoText` token, not a `Symbol`) |
 | `>` `<` `>=` `<=` `<>` | relational operators (greater, less, ≥, ≤, not-equal) |
 | `&` | alphanumeric concatenation (literal continuation) |
 | `>>` | introduces a [compiler-directing](#compiler-directives) line |
@@ -416,7 +419,10 @@ tokens; the parser treats them as operators in conditions.
 > **Ambiguity (greedy lexing):** `**`, `>=`, `<=`, and `<>` must be matched
 > before their single-character prefixes (`*`, `>`, `<`), and `>>` before `>`.
 > A bare `*` is multiplication; a `*>` is a comment start — the tokenizer must
-> peek the following character to choose.
+> peek the following character to choose. `==` must likewise be matched before
+> `=`: it opens [pseudo-text](#copy-and-pseudo-text), and since `==` is not an
+> operator the greedy match is unambiguous. A single `=` *inside* pseudo-text is
+> content, not a delimiter.
 
 ### PICTURE Character-Strings
 
@@ -492,6 +498,77 @@ indicator area; in free format it may begin in any column. Relevant directives:
 > substitution) are out of scope for the core parser; recognize the directive
 > line as a token and, at minimum, honor `SOURCE FORMAT`. The AST may keep
 > directive lines verbatim for round-tripping.
+
+### COPY and Pseudo-Text
+
+`COPY` is COBOL's **text-manipulation** facility, not a statement of the
+grammar. The *library text* it names — a **copybook**, conventionally a `.cpy`
+file — logically replaces the whole statement, from the word `COPY` through its
+terminating separator period **inclusive**, before the source unit is compiled.
+Nothing of the statement therefore survives into the AST: the copied entries
+themselves do (*GnuCOBOL §2.1.18*).
+
+```ebnf
+CopyStatement  = "COPY" TextName [ ( "OF" | "IN" ) LibraryName ]
+                 [ "REPLACING" { Operand "BY" Operand }+ ] "." ;
+TextName       = Word | AlphanumericLiteral ;
+LibraryName    = Word | AlphanumericLiteral ;
+Operand        = PseudoText | Word | AlphanumericLiteral | NumericLiteral ;
+PseudoText     = "==" { TextWord } "==" ;
+```
+
+A **text word** is COBOL's lexical unit for text manipulation: a separator, or a
+character-string, never a space. The separators `(` `)` `:` are text words of
+their own always; `.` `,` `;` are only when a space or the end of the text
+follows, so the period in `PIC X(10).` is a text word while the one in `1.50` is
+not. An alphanumeric literal is one text word, delimiters and interior spacing
+included.
+
+**Pseudo-text** is a sequence of text words bracketed by `==`. It is a token
+class of its own (`PseudoText`), not two `=` symbols around other tokens, and its
+content is the text between the delimiters. Because it is a sequence of *whole*
+text words it may span source lines freely — in fixed format, straddling records
+with **no** column-7 continuation indicator, since nothing is being split. A
+full-line comment between the two halves is skipped. Whitespace runs outside an
+alphanumeric literal normalize to a single space, so an operand written across
+two lines matches the same text as one written on a single line.
+
+**REPLACING** substitutes over text words, and the *span* of the matched words is
+what gets replaced, so whatever surrounds the match keeps touching what goes in.
+That is what makes the pervasive parameterized-copybook idiom work:
+
+```cobol
+      *> in the copybook
+       05  :TAG:-CUSTOMER-ID   PIC X(8).
+
+      *> in the program
+       COPY CUSTREC REPLACING ==:TAG:== BY ==CUST==.
+
+      *> after replacement — one word, not two
+       05  CUST-CUSTOMER-ID    PIC X(8).
+```
+
+`:TAG:-CUSTOMER-ID` is four text words (`:`, `TAG`, `:`, `-CUSTOMER-ID`); the
+pattern matches the first three and their byte span alone is rewritten. Matching
+compares COBOL words without regard to case and alphanumeric literals exactly.
+An empty second operand (`== ==`) deletes the match. Scanning resumes *after*
+substituted text rather than re-reading it, so a replacement that produces its own
+pattern substitutes once.
+
+A copybook may itself contain `COPY` statements, to any depth. A copybook that
+copies itself, directly or around a longer loop, is an error rather than an
+expansion that never terminates.
+
+> **Implementation status:** `COPY` (#81) is **implemented**. `Parse` takes the
+> library through `WithCopyBooks(CopyBookResolver)`; `FSCopyBooks` serves any
+> `fs.FS` (a directory via `os.DirFS`, or an `embed.FS`) and `MapCopyBooks`
+> serves an in-memory map. Replacement is applied to the copybook's **text**
+> before that text is tokenized, and the copied text is read in the same
+> reference format as the source that copied it. Positions on copied nodes are
+> positions *within the copybook*, since `Pos` has no field naming a file. The
+> `REPLACE` **statement** (which manipulates the source unit's own text rather
+> than library text) and the COBOL 2002 `REPLACING LEADING`/`TRAILING` phrases
+> remain deferred.
 
 ## Structure (Grammar)
 
@@ -1247,8 +1324,12 @@ round-trip fixtures are added in #23; this snippet is illustrative.)
   defaulting to free format. *Honoring* an in-source `>>SOURCE FORMAT` directive
   (and content auto-detection) remains deferred — directive honoring needs the
   CDF directive token, which is not yet recognized.
-- **COPY / REPLACE** text manipulation (copybooks), **REPLACE** statement, and
-  pseudo-text (`== … ==`).
+- **COPY** text manipulation (copybooks) and **pseudo-text** (`== … ==`) are
+  **implemented** (#81) — see
+  [COPY and Pseudo-Text](#copy-and-pseudo-text). `Parse` expands `COPY` when
+  given a `CopyBookResolver` through `WithCopyBooks`. The **REPLACE** statement,
+  which rewrites the source unit's own text rather than library text, and the
+  COBOL 2002 `REPLACING LEADING` / `TRAILING` phrases remain deferred.
 - Full **statement grammar** for every verb; only the core verbs above are
   specified, with the rest named for the keyword table.
 - **REPORT SECTION** and **SCREEN SECTION** bodies (headers only).

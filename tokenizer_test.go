@@ -604,6 +604,77 @@ func TestTokenizer(t *testing.T) {
 				{Pos: Pos{Line: 2, Column: 7}, Type: TokenString, Value: []byte(`"spans two source lines."`)},
 			},
 		},
+		{
+			name: "pseudo-text",
+			src:  "==:TAG:==",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenPseudoText, Value: []byte(":TAG:")},
+			},
+		},
+		{
+			name: "empty pseudo-text",
+			src:  "====",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenPseudoText, Value: nil},
+			},
+		},
+		{
+			name: "pseudo-text holding only spaces is empty",
+			src:  "==   ==",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenPseudoText, Value: nil},
+			},
+		},
+		{
+			name: "pseudo-text whitespace is normalized",
+			src:  "==  05  CUST-ID   PIC  X(8)  ==",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenPseudoText, Value: []byte("05 CUST-ID PIC X(8)")},
+			},
+		},
+		{
+			name: "pseudo-text spanning two lines joins with one space",
+			src:  "==05 CUST-ID\n   PIC X(8)==",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenPseudoText, Value: []byte("05 CUST-ID PIC X(8)")},
+			},
+		},
+		{
+			name: "pseudo-text keeps spacing inside an alphanumeric literal",
+			src:  `==VALUE "A  B"==`,
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenPseudoText, Value: []byte(`VALUE "A  B"`)},
+			},
+		},
+		{
+			name: "a lone equals sign stays the relation character",
+			src:  "A = B",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("A")},
+				{Pos: Pos{Line: 1, Column: 3}, Type: TokenSymbol, Value: []byte("=")},
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenIdentifier, Value: []byte("B")},
+			},
+		},
+		{
+			name: "an equals sign inside pseudo-text is content",
+			src:  "==A = B==",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenPseudoText, Value: []byte("A = B")},
+			},
+		},
+		{
+			name: "a COPY statement with a REPLACING phrase",
+			src:  "COPY CUSTREC REPLACING ==:TAG:== BY ==CUST==.",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("COPY")},
+				{Pos: Pos{Line: 1, Column: 6}, Type: TokenIdentifier, Value: []byte("CUSTREC")},
+				{Pos: Pos{Line: 1, Column: 14}, Type: TokenIdentifier, Value: []byte("REPLACING")},
+				{Pos: Pos{Line: 1, Column: 24}, Type: TokenPseudoText, Value: []byte(":TAG:")},
+				{Pos: Pos{Line: 1, Column: 34}, Type: TokenIdentifier, Value: []byte("BY")},
+				{Pos: Pos{Line: 1, Column: 37}, Type: TokenPseudoText, Value: []byte("CUST")},
+				{Pos: Pos{Line: 1, Column: 45}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -783,6 +854,43 @@ func TestTokenizerErrors(t *testing.T) {
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, '.', target.R)
 				require.Equal(t, Pos{Line: 1, Column: 2}, target.Pos)
+			},
+		},
+		{
+			name: "unterminated pseudo-text",
+			src:  "COPY X REPLACING ==:TAG:",
+			assert: func(t *testing.T, err error) {
+				var target UnterminatedPseudoTextError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 1, Column: 18}, target.Pos)
+			},
+		},
+		{
+			name: "pseudo-text closed only by the opening delimiter of the next one",
+			src:  "==A",
+			assert: func(t *testing.T, err error) {
+				var target UnterminatedPseudoTextError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 1, Column: 1}, target.Pos)
+			},
+		},
+		{
+			name: "unterminated literal inside pseudo-text",
+			src:  "==VALUE \"abc==",
+			assert: func(t *testing.T, err error) {
+				var target UnterminatedPseudoTextError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 1, Column: 1}, target.Pos)
+			},
+		},
+		{
+			name: "fixed-format pseudo-text never closed",
+			src:  "           ==:TAG:\n",
+			opts: []TokenizeOption{WithFixedFormat()},
+			assert: func(t *testing.T, err error) {
+				var target UnterminatedPseudoTextError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, Pos{Line: 1, Column: 12}, target.Pos)
 			},
 		},
 	}
@@ -1131,6 +1239,43 @@ func TestTokenizerFixedFormat(t *testing.T) {
 			expected: []Token{
 				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte("PIC")},
 				{Pos: Pos{Line: 1, Column: 71}, Type: TokenIdentifier, Value: []byte("IS")},
+			},
+		},
+		{
+			// Pseudo-text within one record: no column rule applies beyond the
+			// Area B bounds the record already imposes.
+			name: "pseudo-text within one record",
+			src:  "000100     COPY CUSTREC REPLACING ==:TAG:== BY ==CUST==.\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 12}, Type: TokenIdentifier, Value: []byte("COPY")},
+				{Pos: Pos{Line: 1, Column: 17}, Type: TokenIdentifier, Value: []byte("CUSTREC")},
+				{Pos: Pos{Line: 1, Column: 25}, Type: TokenIdentifier, Value: []byte("REPLACING")},
+				{Pos: Pos{Line: 1, Column: 35}, Type: TokenPseudoText, Value: []byte(":TAG:")},
+				{Pos: Pos{Line: 1, Column: 45}, Type: TokenIdentifier, Value: []byte("BY")},
+				{Pos: Pos{Line: 1, Column: 48}, Type: TokenPseudoText, Value: []byte("CUST")},
+				{Pos: Pos{Line: 1, Column: 56}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// A pseudo-text operand is a sequence of whole text words, so it
+			// simply resumes in the content area of the next record — no
+			// column-7 continuation indicator, unlike a word or a literal.
+			name: "pseudo-text spanning two records",
+			src: "000100     ==05 CUST-ID\n" +
+				"000200     PIC X(8)==\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 12}, Type: TokenPseudoText, Value: []byte("05 CUST-ID PIC X(8)")},
+			},
+		},
+		{
+			// A full-line comment interrupting a pseudo-text operand is skipped,
+			// not emitted: it belongs to the record, not to the operand.
+			name: "pseudo-text spanning a comment line",
+			src: "000100     ==05 CUST-ID\n" +
+				"000200*    a note about the tag\n" +
+				"000300     PIC X(8)==\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 12}, Type: TokenPseudoText, Value: []byte("05 CUST-ID PIC X(8)")},
 			},
 		},
 	}

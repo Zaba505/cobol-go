@@ -6,9 +6,10 @@ text file library that reads, parses, and formats COBOL source. It follows a
 `go/parser` + `go/printer` in shape but specialized to one language.
 
 ```
-source ── Tokenize ─► iter.Seq2[Token, error] ── Parse ─► *File (AST) ── Print ─► source
-              │                                     │                       │
-         tokenizer.go                           parser.go               printer.go
+source ── Tokenize ─► iter.Seq2[Token, error] ─┬─► Parse ─► *File (AST) ── Print ─► source
+              │                                │      │                       │
+         tokenizer.go                   expandCopy   parser.go            printer.go
+                                          copy.go
 ```
 
 The whole pipeline is a state machine expressed as **recursive action
@@ -163,6 +164,33 @@ accrete states; a flat switch becomes unreadable and untestable, while small
 named action functions can be exercised directly. This is the single rule a fast
 implementer is most likely to break.
 
+## COPY expansion (`copy.go`)
+
+`COPY` is COBOL's text-manipulation facility, not a construct of the grammar:
+the library text replaces the statement — the word `COPY` through its
+terminating period, inclusive — before compilation. So it lives in its own pass
+between the tokenizer and the parser, `expandCopy`, and **no `COPY` node exists
+in the AST**. Every division, section and entry parser therefore sees only
+copied text and needs to know nothing about copybooks.
+
+- Callers supply library text through the `CopyBookResolver` interface
+  (`Parse(r, WithCopyBooks(…))`); `FSCopyBooks` covers `os.DirFS` and `embed.FS`
+  alike, `MapCopyBooks` covers in-memory, and `CopyBookFunc` covers anything
+  else.
+- The statement itself is parsed with the house action-loop pattern — one named
+  `copyAction` per state (`parseCopyName`, `parseCopyLibrary`,
+  `parseCopyReplacing`, …) — over the pull function the expander already holds.
+- `REPLACING` is applied to the copybook's **text**, over *text words*, before
+  that text is tokenized. Matching whole text words is what stops a pattern
+  matching part of a word; replacing the matched **byte span** is what keeps
+  `:TAG:` welded to the `-CUSTOMER-ID` after it. Neither property survives a
+  token-level substitution, which is why this pass is textual.
+- Copied text is re-tokenized in the same reference format and run through
+  `expandCopy` again, so copybooks nest; a stack of case-folded, library-
+  qualified names turns a loop into a `CopyBookCycleError`.
+- Positions on copied nodes are positions *within the copybook*. `Pos` has no
+  field naming a file, so this is a documented trade rather than an oversight.
+
 ## Printer (`printer.go`)
 
 `Print(w io.Writer, f *File) error` runs the action loop, checking `pr.err` each
@@ -215,6 +243,7 @@ Two shapes, both required for every printer method once real ones exist:
 
 ## Why this shape
 
-One format, one package, three files of production code, one action-loop pattern
-repeated three times, round-trip tests on every printer method. COBOL accretes
-constructs; this layout keeps the round-trip property auditable at a glance.
+One format, one package, a small set of production files, one action-loop
+pattern repeated in each of them, round-trip tests on every printer method.
+COBOL accretes constructs; this layout keeps the round-trip property auditable
+at a glance.
