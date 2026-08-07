@@ -25,6 +25,13 @@ type Reader struct {
 	r   io.Reader
 	enc Encoding
 	off int64
+	// zoned is the encoding's zoned decimal byte table, derived once rather
+	// than per field. zonedErr holds the failure of deriving it, which is
+	// reported by the first zoned accessor and by nothing else: a charset
+	// that cannot spell a digit or a '+' still reads alphanumeric fields
+	// perfectly well, so it is not a reason to refuse a Reader.
+	zoned    zonedCodec
+	zonedErr error
 }
 
 // NewReader returns a [Reader] that reads from r under the given encoding.
@@ -41,7 +48,8 @@ func NewReader(r io.Reader, enc Encoding) (*Reader, error) {
 	if err := enc.Validate(); err != nil {
 		return nil, err
 	}
-	return &Reader{r: r, enc: enc}, nil
+	zoned, zonedErr := newZonedCodec(enc)
+	return &Reader{r: r, enc: enc, zoned: zoned, zonedErr: zonedErr}, nil
 }
 
 // Encoding reports the encoding the [Reader] was constructed with.
@@ -130,6 +138,152 @@ func (r *Reader) ReadAlphanumericJustified(n int, j Justification) (string, erro
 		return strings.TrimLeft(sb.String(), " "), nil
 	}
 	return strings.TrimRight(sb.String(), " "), nil
+}
+
+// ReadZonedInt32 reads the next zoned decimal (USAGE DISPLAY) field of digits
+// digits as an int32, consuming digits bytes — or digits+1 when s is a
+// SEPARATE position, which is the one thing that changes the width.
+//
+// Zoned decimal is the default USAGE and the most common numeric encoding in
+// interchange files: one character byte per digit, most significant first. It
+// is a per-field usage and not a file-level mode, so a record routinely mixes
+// it with COMP-3, COMP and COMP-1 fields.
+//
+// s is required and has no default. It says whether the item's PICTURE carries
+// S and where the SIGN clause put the sign, neither of which is recoverable
+// from the bytes — see [SignPosition].
+//
+// digits must be between 1 and 9, the most that always fits an int32; a wider
+// field is a [ZonedDigitCountError] rather than a silent overflow, and is read
+// with [Reader.ReadZonedInt64] or [Reader.ReadZonedBig].
+//
+// Every byte is validated against the declared [Encoding.Charset] and
+// [Encoding.Sign]: a digit byte that is not one is a [ZonedDigitError], a sign
+// byte invalid under the convention is a [ZonedSignError], and a SEPARATE sign
+// byte that is neither '+' nor '-' is a [ZonedSeparateSignError]. All three
+// carry the offset of the *byte* at fault rather than the end of the field.
+//
+// The return is the unscaled integer. A PICTURE's V occupies no byte and is not
+// recoverable from the data, so scale is not a decoding input: PIC S9(3)V99
+// holding -123.45 is five bytes reading as -12345. A PICTURE containing an
+// actual decimal point is numeric-edited rather than DISPLAY numeric and is out
+// of scope here; see codec/SPEC.md, "Numeric-edited de-editing".
+func (r *Reader) ReadZonedInt32(digits int, s SignPosition) (int32, error) {
+	v, err := r.readZonedInt(digits, maxZonedInt32Digits, s)
+	return int32(v), err
+}
+
+// ReadZonedInt64 reads the next zoned decimal field of digits digits as an
+// int64, consuming digits bytes, or digits+1 under a SEPARATE sign position.
+//
+// digits must be between 1 and 18, the most that always fits an int64. The 19
+// to 31 digit range an IBM item may declare is read with
+// [Reader.ReadZonedBig]. s is required; see [Reader.ReadZonedInt32], which also
+// says why the return is the unscaled integer.
+func (r *Reader) ReadZonedInt64(digits int, s SignPosition) (int64, error) {
+	return r.readZonedInt(digits, maxZonedInt64Digits, s)
+}
+
+// ReadZonedBig reads the next zoned decimal field of digits digits as a
+// [math/big.Int], consuming digits bytes, or digits+1 under a SEPARATE sign
+// position.
+//
+// digits must be between 1 and 31, the IBM Enterprise COBOL maximum. This is
+// the accessor for the 19-to-31 digit range no Go integer type holds; below 19
+// digits the int32 and int64 accessors say the same thing without allocating.
+// s is required; see [Reader.ReadZonedInt32].
+func (r *Reader) ReadZonedBig(digits int, s SignPosition) (*big.Int, error) {
+	ds, negative, err := r.readZonedDigits(digits, maxZonedDigits, s)
+	if err != nil {
+		return nil, err
+	}
+	v := new(big.Int)
+	ten := big.NewInt(10)
+	d := new(big.Int)
+	for _, n := range ds {
+		v.Mul(v, ten)
+		v.Add(v, d.SetInt64(int64(n)))
+	}
+	if negative {
+		v.Neg(v)
+	}
+	return v, nil
+}
+
+// readZonedInt is the shared body of the two integer zoned accessors, whose
+// only difference is the digit count they accept.
+func (r *Reader) readZonedInt(digits, max int, s SignPosition) (int64, error) {
+	ds, negative, err := r.readZonedDigits(digits, max, s)
+	if err != nil {
+		return 0, err
+	}
+	var v int64
+	for _, d := range ds {
+		v = v*10 + int64(d)
+	}
+	if negative {
+		v = -v
+	}
+	return v, nil
+}
+
+// readZonedDigits reads one zoned decimal field and returns its digits, most
+// significant first and one per element with values 0-9, together with whether
+// the sign made it negative.
+//
+// It is the layer that turns a [SignPosition] into a width and an index: the
+// separate sign byte, when there is one, is split off here, and everything left
+// is the digit bytes [zonedCodec.decodeField] validates.
+//
+// Every error is stamped with the offset of the byte at fault rather than the
+// offset the field ended at, for the reason [Reader.readPackedDigits] stamps
+// the byte holding a bad nibble: a zoned field is several bytes wide, and "the
+// field ended at offset N" does not say which byte was wrong.
+func (r *Reader) readZonedDigits(digits, max int, s SignPosition) ([]byte, bool, error) {
+	if !s.valid() {
+		return nil, false, &OffsetError{Offset: r.off, Err: SignPositionError{SignPosition: s}}
+	}
+	if digits < 1 || digits > max {
+		return nil, false, &OffsetError{
+			Offset: r.off,
+			Err:    ZonedDigitCountError{Digits: digits, Max: max},
+		}
+	}
+	if r.zonedErr != nil {
+		return nil, false, &OffsetError{Offset: r.off, Err: r.zonedErr}
+	}
+	start := r.off
+	b, err := r.read(zonedWidth(digits, s))
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Split the separate sign byte, if there is one, off the digits. What
+	// remains is digits bytes either way, and first is where it begins.
+	var (
+		negative bool
+		first    int
+	)
+	switch s {
+	case SignLeadingSeparate:
+		first = 1
+		if negative, err = r.zoned.bytes.separateSignValue(b[0]); err != nil {
+			return nil, false, &OffsetError{Offset: start, Err: err}
+		}
+	case SignTrailingSeparate:
+		if negative, err = r.zoned.bytes.separateSignValue(b[digits]); err != nil {
+			return nil, false, &OffsetError{Offset: start + int64(digits), Err: err}
+		}
+	}
+
+	ds, overpunched, at, err := r.zoned.decodeField(b[first:first+digits], s.overpunchAt(digits))
+	if err != nil {
+		return nil, false, &OffsetError{Offset: start + int64(first+at), Err: err}
+	}
+	if !s.separate() {
+		negative = overpunched
+	}
+	return ds, negative, nil
 }
 
 // ReadPackedInt32 reads the next packed decimal (COMP-3, PACKED-DECIMAL) field

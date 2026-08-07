@@ -200,6 +200,470 @@ func TestWriterWriteBytes(t *testing.T) {
 	})
 }
 
+// TestWriterWriteZoned writes the test vectors of codec/SPEC.md, Appendix A.1
+// and A.2, which the matching reader test decodes: the same numbers, stated as
+// bytes in one direction and as values in the other.
+func TestWriterWriteZoned(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		v      int64
+		digits int
+		sign   SignPosition
+		enc    Encoding
+		want   []byte
+	}{
+		{
+			name:   "ebcdic trailing overpunch, positive",
+			v:      12345,
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xC5},
+		},
+		{
+			name:   "ebcdic trailing overpunch, negative",
+			v:      -12345,
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xD5},
+		},
+		{
+			name:   "ascii zone 3/7, positive",
+			v:      12345,
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    GnuCOBOLASCII(),
+			want:   []byte{0x31, 0x32, 0x33, 0x34, 0x35},
+		},
+		{
+			name:   "ascii zone 3/7, negative",
+			v:      -12345,
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    GnuCOBOLASCII(),
+			want:   []byte{0x31, 0x32, 0x33, 0x34, 0x75}, // "1234u"
+		},
+		{
+			name:   "translated ebcdic, positive",
+			v:      12345,
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    ConvertedFromEBCDIC(),
+			want:   []byte{0x31, 0x32, 0x33, 0x34, 0x45}, // "1234E"
+		},
+		{
+			name:   "translated ebcdic, negative",
+			v:      -12345,
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    ConvertedFromEBCDIC(),
+			want:   []byte{0x31, 0x32, 0x33, 0x34, 0x4E}, // "1234N"
+		},
+		{
+			name:   "realia, negative",
+			v:      -12345,
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    zonedEncoding(ASCII(), SignRealia),
+			want:   []byte{0x31, 0x32, 0x33, 0x34, 0x25}, // "1234%"
+		},
+		{
+			name:   "ebcdic leading overpunch, negative",
+			v:      -12345,
+			digits: 5,
+			sign:   SignLeading,
+			enc:    IBMEnterprise(),
+			want:   []byte{0xD1, 0xF2, 0xF3, 0xF4, 0xF5},
+		},
+		{
+			name:   "ebcdic unsigned",
+			v:      12345,
+			digits: 5,
+			sign:   SignUnsigned,
+			enc:    IBMEnterprise(),
+			want:   []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xF5},
+		},
+		{
+			name:   "ascii unsigned",
+			v:      12345,
+			digits: 5,
+			sign:   SignUnsigned,
+			enc:    GnuCOBOLASCII(),
+			want:   []byte{0x31, 0x32, 0x33, 0x34, 0x35},
+		},
+		{
+			name:   "ascii leading separate, negative",
+			v:      -12345,
+			digits: 5,
+			sign:   SignLeadingSeparate,
+			enc:    GnuCOBOLASCII(),
+			want:   []byte{0x2D, 0x31, 0x32, 0x33, 0x34, 0x35}, // "-12345"
+		},
+		{
+			name:   "ebcdic leading separate, negative",
+			v:      -12345,
+			digits: 5,
+			sign:   SignLeadingSeparate,
+			enc:    IBMEnterprise(),
+			want:   []byte{0x60, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5},
+		},
+		{
+			name:   "ascii trailing separate, positive",
+			v:      12345,
+			digits: 5,
+			sign:   SignTrailingSeparate,
+			enc:    GnuCOBOLASCII(),
+			want:   []byte{0x31, 0x32, 0x33, 0x34, 0x35, 0x2B}, // "12345+"
+		},
+		{
+			name:   "ebcdic trailing separate, positive",
+			v:      12345,
+			digits: 5,
+			sign:   SignTrailingSeparate,
+			enc:    IBMEnterprise(),
+			want:   []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0x4E},
+		},
+		{
+			name:   "high-order zero padding",
+			v:      42,
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   []byte{0xF0, 0xF0, 0xF0, 0xF4, 0xC2},
+		},
+		{
+			name:   "zero is written positive",
+			v:      0,
+			digits: 5,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   []byte{0xF0, 0xF0, 0xF0, 0xF0, 0xC0},
+		},
+		{
+			name:   "a separate sign of a zero is plus",
+			v:      0,
+			digits: 3,
+			sign:   SignTrailingSeparate,
+			enc:    GnuCOBOLASCII(),
+			want:   []byte{0x30, 0x30, 0x30, 0x2B}, // "000+"
+		},
+		{
+			name:   "single digit",
+			v:      7,
+			digits: 1,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   []byte{0xC7},
+		},
+		{
+			name:   "nine digits, the int32 maximum",
+			v:      -999999999,
+			digits: 9,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   []byte{0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xD9},
+		},
+		{
+			name:   "eighteen digits, the int64 maximum",
+			v:      999999999999999999,
+			digits: 18,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want: []byte{
+				0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9,
+				0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xF9, 0xC9,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, tc.enc)
+			require.NoError(t, err)
+
+			require.NoError(t, w.WriteZonedInt64(tc.v, tc.digits, tc.sign))
+			require.Equal(t, tc.want, buf.Bytes())
+			require.Equal(t, int64(len(tc.want)), w.Offset())
+			require.Equal(t, len(tc.want), zonedWidth(tc.digits, tc.sign))
+
+			if tc.digits <= maxZonedInt32Digits {
+				var buf32 bytes.Buffer
+				w32, err := NewWriter(&buf32, tc.enc)
+				require.NoError(t, err)
+
+				require.NoError(t, w32.WriteZonedInt32(int32(tc.v), tc.digits, tc.sign))
+				require.Equal(t, tc.want, buf32.Bytes())
+			}
+
+			var bufBig bytes.Buffer
+			wb, err := NewWriter(&bufBig, tc.enc)
+			require.NoError(t, err)
+
+			require.NoError(t, wb.WriteZonedBig(big.NewInt(tc.v), tc.digits, tc.sign))
+			require.Equal(t, tc.want, bufBig.Bytes())
+		})
+	}
+}
+
+func TestWriterWriteZonedBig(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		v      string
+		digits int
+		sign   SignPosition
+		enc    Encoding
+		want   []byte
+	}{
+		{
+			name:   "nineteen digits, one past int64",
+			v:      "-1234567890123456789",
+			digits: 19,
+			sign:   SignTrailing,
+			enc:    GnuCOBOLASCII(),
+			want:   []byte("123456789012345678" + "\x79"), // "…8y"
+		},
+		{
+			name:   "thirty-one digits, the COBOL maximum",
+			v:      "9999999999999999999999999999999",
+			digits: 31,
+			sign:   SignTrailing,
+			enc:    IBMEnterprise(),
+			want:   append(bytes.Repeat([]byte{0xF9}, 30), 0xC9),
+		},
+		{
+			name:   "thirty-one digits, leading separate",
+			v:      "-1234567890123456789012345678901",
+			digits: 31,
+			sign:   SignLeadingSeparate,
+			enc:    GnuCOBOLASCII(),
+			want:   append([]byte{0x2D}, []byte("1234567890123456789012345678901")...),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			v, ok := new(big.Int).SetString(tc.v, 10)
+			require.True(t, ok)
+
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, tc.enc)
+			require.NoError(t, err)
+
+			require.NoError(t, w.WriteZonedBig(v, tc.digits, tc.sign))
+			require.Equal(t, tc.want, buf.Bytes())
+		})
+	}
+}
+
+func TestWriterWriteZonedErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("value wider than the field", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, IBMEnterprise())
+		require.NoError(t, err)
+
+		err = w.WriteZonedInt64(123456, 5, SignTrailing)
+
+		var rangeErr ZonedRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, "123456", rangeErr.Value)
+		require.Equal(t, 5, rangeErr.Digits)
+		require.Equal(t, SignTrailing, rangeErr.Sign)
+
+		// A rejected field writes nothing, so it cannot leave a half-field
+		// behind to desynchronize the record.
+		require.Empty(t, buf.Bytes())
+		require.Zero(t, w.Offset())
+	})
+
+	t.Run("negative value into an unsigned field", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, IBMEnterprise())
+		require.NoError(t, err)
+
+		err = w.WriteZonedInt64(-1, 5, SignUnsigned)
+
+		var rangeErr ZonedRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, "-1", rangeErr.Value)
+		require.Equal(t, SignUnsigned, rangeErr.Sign)
+		require.Empty(t, buf.Bytes())
+	})
+
+	t.Run("the minus sign is not a digit of the value", func(t *testing.T) {
+		t.Parallel()
+
+		// -99999 is five digits and fits; a writer counting the '-' would
+		// reject it.
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, IBMEnterprise())
+		require.NoError(t, err)
+
+		require.NoError(t, w.WriteZonedInt64(-99999, 5, SignTrailing))
+		require.Equal(t, []byte{0xF9, 0xF9, 0xF9, 0xF9, 0xD9}, buf.Bytes())
+	})
+
+	t.Run("the most negative int64", func(t *testing.T) {
+		t.Parallel()
+
+		// Nineteen digits, so no int64 accessor holds it: the value is
+		// formatted rather than negated, and reports the range it missed
+		// instead of overflowing on its way out.
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		err = w.WriteZonedInt64(math.MinInt64, maxZonedInt64Digits, SignTrailing)
+
+		var rangeErr ZonedRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, "-9223372036854775808", rangeErr.Value)
+		require.Empty(t, buf.Bytes())
+
+		// The [math/big.Int] accessor reaches the digit count it needs.
+		var wide bytes.Buffer
+		wb, err := NewWriter(&wide, GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		require.NoError(t, wb.WriteZonedBig(big.NewInt(math.MinInt64), 19, SignTrailing))
+		require.Equal(t, []byte("922337203685477580"+"\x78"), wide.Bytes()) // "…0x"
+	})
+
+	t.Run("digit count outside the accessor's range", func(t *testing.T) {
+		t.Parallel()
+
+		testCases := []struct {
+			name    string
+			digits  int
+			write   func(*Writer, int) error
+			wantMax int
+		}{
+			{
+				name:   "zero digits",
+				digits: 0,
+				write: func(w *Writer, d int) error {
+					return w.WriteZonedInt64(1, d, SignTrailing)
+				},
+				wantMax: maxZonedInt64Digits,
+			},
+			{
+				name:   "ten digits into an int32",
+				digits: 10,
+				write: func(w *Writer, d int) error {
+					return w.WriteZonedInt32(1, d, SignTrailing)
+				},
+				wantMax: maxZonedInt32Digits,
+			},
+			{
+				name:   "nineteen digits into an int64",
+				digits: 19,
+				write: func(w *Writer, d int) error {
+					return w.WriteZonedInt64(1, d, SignTrailing)
+				},
+				wantMax: maxZonedInt64Digits,
+			},
+			{
+				name:   "thirty-two digits into a big.Int",
+				digits: 32,
+				write: func(w *Writer, d int) error {
+					return w.WriteZonedBig(big.NewInt(1), d, SignTrailing)
+				},
+				wantMax: maxZonedDigits,
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				var buf bytes.Buffer
+				w, err := NewWriter(&buf, GnuCOBOLASCII())
+				require.NoError(t, err)
+
+				err = tc.write(w, tc.digits)
+
+				var countErr ZonedDigitCountError
+				require.ErrorAs(t, err, &countErr)
+				require.Equal(t, tc.digits, countErr.Digits)
+				require.Equal(t, tc.wantMax, countErr.Max)
+				require.Empty(t, buf.Bytes())
+			})
+		}
+	})
+
+	t.Run("sign position is required", func(t *testing.T) {
+		t.Parallel()
+
+		for _, s := range []SignPosition{SignPositionUnset, SignPosition(99)} {
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, GnuCOBOLASCII())
+			require.NoError(t, err)
+
+			err = w.WriteZonedInt64(1, 5, s)
+
+			var posErr SignPositionError
+			require.ErrorAs(t, err, &posErr)
+			require.Equal(t, s, posErr.SignPosition)
+			require.Empty(t, buf.Bytes())
+		}
+	})
+
+	t.Run("nil big.Int", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		require.ErrorIs(t, w.WriteZonedBig(nil, 5, SignTrailing), ErrNilValue)
+		require.Empty(t, buf.Bytes())
+	})
+
+	t.Run("a charset that cannot spell a numeric field", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, zonedEncoding(partialCharset{}, SignASCIIZone37))
+		require.NoError(t, err)
+
+		require.NoError(t, w.WriteAlphanumeric("", 2))
+
+		err = w.WriteZonedInt64(1, 5, SignTrailing)
+
+		var runeErr UnrepresentableRuneError
+		require.ErrorAs(t, err, &runeErr)
+		require.Equal(t, '0', runeErr.Rune)
+	})
+
+	t.Run("a failing writer is reported with its offset", func(t *testing.T) {
+		t.Parallel()
+
+		w, err := NewWriter(&failingWriter{}, GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		err = w.WriteZonedInt64(12345, 5, SignTrailing)
+
+		var offErr *OffsetError
+		require.ErrorAs(t, err, &offErr)
+		require.ErrorIs(t, err, errWriteFailed)
+	})
+}
+
 func TestWriterWritePacked(t *testing.T) {
 	t.Parallel()
 
@@ -1410,21 +1874,25 @@ func TestMarshal(t *testing.T) {
 		t.Parallel()
 
 		got, err := Marshal(GnuCOBOLASCII(), &testRecord{
-			ID:     "A12345",
-			Name:   "WIDGET GRIP",
-			Code:   "42",
-			Raw:    []byte{0x00, 0x01, 0xFF},
-			Amount: 12345,
-			Qty:    42,
-			Seq:    1234,
-			Rate:   1.5,
-			Factor: 2.5,
+			ID:      "A12345",
+			Name:    "WIDGET GRIP",
+			Code:    "42",
+			Raw:     []byte{0x00, 0x01, 0xFF},
+			Amount:  12345,
+			Qty:     42,
+			Seq:     1234,
+			Rate:    1.5,
+			Factor:  2.5,
+			Balance: -12345,
+			Count:   42,
 		})
 		require.NoError(t, err)
 		// 3F C0 00 00 is RATE as binary32 and 40 04 … FACTOR as binary64,
-		// big-endian as GnuCOBOL writes them by default.
+		// big-endian as GnuCOBOL writes them by default; "1234u" is BALANCE
+		// with its sign overpunched into the last digit byte, and "042" is
+		// COUNT, an unsigned DISPLAY item padded with a high-order zero.
 		require.Equal(t, []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2"+
-			"\x3F\xC0\x00\x00"+"\x40\x04\x00\x00\x00\x00\x00\x00"), got)
+			"\x3F\xC0\x00\x00"+"\x40\x04\x00\x00\x00\x00\x00\x00"+"1234u"+"042"), got)
 	})
 
 	t.Run("incomplete encoding", func(t *testing.T) {
@@ -1462,8 +1930,9 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 			enc:  GnuCOBOLASCII(),
 			// … | 12 34 5C: AMOUNT +12345 | 00 04 2F: QTY 42 | 04 D2: SEQ 1234
 			// | 3F C0 00 00: RATE 1.5, binary32 | 40 04 …: FACTOR 2.5, binary64
+			// | "1234u": BALANCE -12345, zone 3/7 | "042": COUNT 42
 			src: []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2" +
-				"\x3F\xC0\x00\x00" + "\x40\x04\x00\x00\x00\x00\x00\x00"),
+				"\x3F\xC0\x00\x00" + "\x40\x04\x00\x00\x00\x00\x00\x00" + "1234u" + "042"),
 		},
 		{
 			name: "ascii record with empty fields",
@@ -1472,10 +1941,12 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 			// SEQ is zero, which is the one binary value this encoding's
 			// native byte order cannot reorder — and RATE and FACTOR are zero
 			// for the same reason, since their IEEE bytes follow that order
-			// too.
+			// too. A zoned zero is spelled out digit by digit, and under zone
+			// 3/7 a positive sign leaves the last one an ordinary '0'.
 			src: []byte("      " + "            " + "    " + "\x00\x00\x00" +
 				"\x00\x00\x0C" + "\x00\x00\x0F" + "\x00\x00" +
-				"\x00\x00\x00\x00" + "\x00\x00\x00\x00\x00\x00\x00\x00"),
+				"\x00\x00\x00\x00" + "\x00\x00\x00\x00\x00\x00\x00\x00" +
+				"00000" + "000"),
 		},
 		{
 			name: "ascii record with full fields",
@@ -1484,9 +1955,13 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 			// big-endian because the mainframe that wrote it was — and for the
 			// same reason RATE and FACTOR are HFP, C1 18 …: -1.5 and
 			// 42 FF …: 255. A converted file keeps the floating point format
-			// the compiler that wrote it used; only the characters changed.
+			// the compiler that wrote it used; only the characters changed —
+			// which is exactly what "9876N" is: BALANCE -98765 with the
+			// EBCDIC overpunch D5 translated to the letter N. "999" is COUNT,
+			// filling its three digits.
 			src: []byte("A12345WIDGETGRIP123456\xFF\xFE\xFD\x98\x76\x5D\x09\x99\x9F\xFB\x2E" +
-				"\xC1\x18\x00\x00" + "\x42\xFF\x00\x00\x00\x00\x00\x00"),
+				"\xC1\x18\x00\x00" + "\x42\xFF\x00\x00\x00\x00\x00\x00" +
+				"9876N" + "999"),
 		},
 		{
 			name: "ebcdic record",
@@ -1507,6 +1982,11 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 				0x04, 0xD2, // SEQ 1234, big-endian as z/OS writes it
 				0x41, 0x18, 0x00, 0x00, // RATE 1.5 as HFP short
 				0x41, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // FACTOR 2.5 as HFP long
+				// The zoned bytes are the ones that are *not* charset
+				// invariant: these spell the same numbers as the ASCII case
+				// above with EBCDIC digit zones and an EBCDIC overpunch.
+				0xF1, 0xF2, 0xF3, 0xF4, 0xD5, // BALANCE -12345
+				0xF0, 0xF4, 0xF2, // COUNT 42
 			),
 		},
 	}
@@ -1528,6 +2008,199 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 // TestRoundTripPacked walks a packed decimal field both ways at every digit
 // count COBOL allows, which is the cheapest check that the width formula, the
 // pad nibble and the digit placement agree between the reader and the writer.
+// TestRoundTripZoned walks a zoned decimal field both ways at every digit count
+// COBOL allows, in every sign position, under every sign convention and in both
+// charsets. It is the cheapest check that the width, the sign position and the
+// two halves of a zoned byte — the charset's digit zone and the convention's
+// sign zone — agree between the reader and the writer.
+func TestRoundTripZoned(t *testing.T) {
+	t.Parallel()
+
+	encodings := []struct {
+		name string
+		enc  Encoding
+	}{
+		{name: "ebcdic", enc: IBMEnterprise()},
+		{name: "ascii zone 3/7", enc: GnuCOBOLASCII()},
+		{name: "translated ebcdic", enc: ConvertedFromEBCDIC()},
+		{name: "realia", enc: zonedEncoding(ASCII(), SignRealia)},
+		// A charset no machine ever used, whose digits sit at B0-B9 and
+		// whose separate signs at 01 and 02: it fails anything that reached
+		// for a hard-coded code page instead of asking the charset.
+		{name: "oddball charset", enc: zonedEncoding(oddballCharset{}, SignASCIIZone37)},
+	}
+	positions := []SignPosition{
+		SignUnsigned,
+		SignTrailing,
+		SignLeading,
+		SignTrailingSeparate,
+		SignLeadingSeparate,
+	}
+
+	for digits := 1; digits <= maxZonedDigits; digits++ {
+		t.Run(strconv.Itoa(digits)+" digits", func(t *testing.T) {
+			t.Parallel()
+
+			// The widest value the field holds, its negation, a value with
+			// high-order zeros, and zero itself.
+			nines, ok := new(big.Int).SetString(strings.Repeat("9", digits), 10)
+			require.True(t, ok)
+			values := []*big.Int{
+				nines,
+				new(big.Int).Neg(nines),
+				big.NewInt(0),
+				big.NewInt(7),
+			}
+
+			for _, e := range encodings {
+				for _, s := range positions {
+					for _, v := range values {
+						if v.Sign() < 0 && s == SignUnsigned {
+							continue
+						}
+
+						var buf bytes.Buffer
+						w, err := NewWriter(&buf, e.enc)
+						require.NoError(t, err)
+						require.NoError(t, w.WriteZonedBig(v, digits, s))
+						require.Len(t, buf.Bytes(), zonedWidth(digits, s))
+
+						r, err := NewReader(bytes.NewReader(buf.Bytes()), e.enc)
+						require.NoError(t, err)
+						got, err := r.ReadZonedBig(digits, s)
+						require.NoError(t, err)
+						require.Equal(t, v.String(), got.String())
+
+						// The bytes a reader accepts are written back
+						// unchanged, which is the direction that catches
+						// a sign zone or a digit position drifting.
+						var back bytes.Buffer
+						w2, err := NewWriter(&back, e.enc)
+						require.NoError(t, err)
+						require.NoError(t, w2.WriteZonedBig(got, digits, s))
+						require.Equal(t, buf.Bytes(), back.Bytes())
+
+						if digits <= maxZonedInt64Digits {
+							r64, err := NewReader(bytes.NewReader(buf.Bytes()), e.enc)
+							require.NoError(t, err)
+							got64, err := r64.ReadZonedInt64(digits, s)
+							require.NoError(t, err)
+							require.Equal(t, v.Int64(), got64)
+						}
+						if digits <= maxZonedInt32Digits {
+							r32, err := NewReader(bytes.NewReader(buf.Bytes()), e.enc)
+							require.NoError(t, err)
+							got32, err := r32.ReadZonedInt32(digits, s)
+							require.NoError(t, err)
+							require.Equal(t, int32(v.Int64()), got32)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestRoundTripZonedNonCanonicalSigns is the zoned counterpart of
+// [TestRoundTripPackedLenientSigns], and it is the one place this round trip is
+// deliberately not byte-equal: a reader accepts sign bytes a writer never
+// emits, so such a field reads correctly and is written back in the canonical
+// spelling.
+func TestRoundTripZonedNonCanonicalSigns(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name      string
+		src       []byte
+		enc       Encoding
+		want      int64
+		wantBytes []byte
+	}{
+		{
+			name:      "lenient ebcdic zone A is written back as C",
+			src:       []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xA5},
+			enc:       IBMEnterprise(),
+			want:      12345,
+			wantBytes: []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xC5},
+		},
+		{
+			name:      "lenient ebcdic zone B is written back as D",
+			src:       []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xB5},
+			enc:       IBMEnterprise(),
+			want:      -12345,
+			wantBytes: []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xD5},
+		},
+		{
+			name:      "lenient ebcdic zone E is written back as C",
+			src:       []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xE5},
+			enc:       IBMEnterprise(),
+			want:      12345,
+			wantBytes: []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xC5},
+		},
+		{
+			name: "an unsigned zone in a signed field is written back signed",
+			src:  []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xF5},
+			enc:  IBMEnterprise(),
+			// What a signed item holds after a MOVE from an unsigned one:
+			// a non-negative value, and a writer states the sign it has.
+			want:      12345,
+			wantBytes: []byte{0xF1, 0xF2, 0xF3, 0xF4, 0xC5},
+		},
+		{
+			name:      "translated ebcdic keeps its own spelling",
+			src:       []byte{0x31, 0x32, 0x33, 0x34, 0x4E},
+			enc:       ConvertedFromEBCDIC(),
+			want:      -12345,
+			wantBytes: []byte{0x31, 0x32, 0x33, 0x34, 0x4E},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, err := NewReader(bytes.NewReader(tc.src), tc.enc)
+			require.NoError(t, err)
+			got, err := r.ReadZonedInt64(5, SignTrailing)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, tc.enc)
+			require.NoError(t, err)
+			require.NoError(t, w.WriteZonedInt64(got, 5, SignTrailing))
+			require.Equal(t, tc.wantBytes, buf.Bytes())
+		})
+	}
+}
+
+// TestZonedAccessorsNeverTranslateThroughTheCharset is the accessor-level half
+// of [TestZonedDecodingNeverTranslatesThroughTheCharset]: charset translation
+// belongs to alphanumeric fields, and a numeric byte put through it would lose
+// the overpunch zone that carries the sign.
+func TestZonedAccessorsNeverTranslateThroughTheCharset(t *testing.T) {
+	t.Parallel()
+
+	cs := &countingCharset{Charset: CP037()}
+	enc := zonedEncoding(cs, SignEBCDIC)
+
+	var buf bytes.Buffer
+	w, err := NewWriter(&buf, enc)
+	require.NoError(t, err)
+	require.NoError(t, w.WriteZonedInt64(-12345, 5, SignTrailing))
+	require.NoError(t, w.WriteZonedInt64(-12345, 5, SignLeadingSeparate))
+
+	r, err := NewReader(bytes.NewReader(buf.Bytes()), enc)
+	require.NoError(t, err)
+	for _, s := range []SignPosition{SignTrailing, SignLeadingSeparate} {
+		got, err := r.ReadZonedInt64(5, s)
+		require.NoError(t, err)
+		require.Equal(t, int64(-12345), got)
+	}
+
+	require.Zero(t, cs.toUnicode.Load(), "a zoned field was translated through the charset")
+}
+
 func TestRoundTripPacked(t *testing.T) {
 	t.Parallel()
 
@@ -2041,15 +2714,17 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 			name: "ascii",
 			enc:  GnuCOBOLASCII(),
 			rec: testRecord{
-				ID:     "A12345",
-				Name:   "WIDGET GRIP",
-				Code:   "42",
-				Raw:    []byte{0x00, 0x01, 0xFF},
-				Amount: 12345,
-				Qty:    42,
-				Seq:    1234,
-				Rate:   1.5,
-				Factor: 2.5,
+				ID:      "A12345",
+				Name:    "WIDGET GRIP",
+				Code:    "42",
+				Raw:     []byte{0x00, 0x01, 0xFF},
+				Amount:  12345,
+				Qty:     42,
+				Seq:     1234,
+				Rate:    1.5,
+				Factor:  2.5,
+				Balance: -12345,
+				Count:   42,
 			},
 		},
 		{
@@ -2065,8 +2740,10 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Seq:    -1234,
 				// HFP, so both are values whose fraction survives being
 				// normalized to a hex digit boundary.
-				Rate:   -1.5,
-				Factor: -0.03125,
+				Rate:    -1.5,
+				Factor:  -0.03125,
+				Balance: 99999,
+				Count:   999,
 			},
 		},
 		{
@@ -2080,6 +2757,9 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Amount: 0,
 				Qty:    0,
 				Seq:    0,
+				// A translated-EBCDIC negative one, which is the letter J.
+				Balance: -1,
+				Count:   0,
 			},
 		},
 		{
@@ -2094,8 +2774,10 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Qty:    9999,
 				Seq:    9999,
 				// IEEE, so the widest value each width holds is in range.
-				Rate:   math.MaxFloat32,
-				Factor: math.MaxFloat64,
+				Rate:    math.MaxFloat32,
+				Factor:  math.MaxFloat64,
+				Balance: -99999,
+				Count:   999,
 			},
 		},
 		{
@@ -2111,8 +2793,10 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Seq:    -1,
 				// A value binary32 cannot spell exactly still round-trips,
 				// because it is the same format on the way back.
-				Rate:   -0.1,
-				Factor: 0.1,
+				Rate:    -0.1,
+				Factor:  0.1,
+				Balance: -1,
+				Count:   1,
 			},
 		},
 	}

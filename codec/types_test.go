@@ -175,6 +175,65 @@ func TestSignConventionString(t *testing.T) {
 	}
 }
 
+func TestSignPositionString(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		s    SignPosition
+		want string
+	}{
+		{name: "unset", s: SignPositionUnset, want: "unset"},
+		{name: "unsigned", s: SignUnsigned, want: "unsigned"},
+		{name: "trailing", s: SignTrailing, want: "trailing"},
+		{name: "leading", s: SignLeading, want: "leading"},
+		{name: "trailing separate", s: SignTrailingSeparate, want: "trailing-separate"},
+		{name: "leading separate", s: SignLeadingSeparate, want: "leading-separate"},
+		{name: "out of range", s: SignPosition(99), want: "SignPosition(99)"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tc.want, tc.s.String())
+			require.Equal(t, tc.s != SignPositionUnset && tc.s != SignPosition(99), tc.s.valid())
+		})
+	}
+}
+
+// TestZonedWidth pins the whole of the zoned size model: one byte per digit,
+// and one more only when the sign has a byte of its own. Getting the SEPARATE
+// step wrong shifts every field after it in the record.
+func TestZonedWidth(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name        string
+		sign        SignPosition
+		wantWidth   int
+		wantOverpun int
+	}{
+		{name: "unsigned", sign: SignUnsigned, wantWidth: 5, wantOverpun: -1},
+		{name: "trailing overpunch", sign: SignTrailing, wantWidth: 5, wantOverpun: 4},
+		{name: "leading overpunch", sign: SignLeading, wantWidth: 5, wantOverpun: 0},
+		{name: "trailing separate", sign: SignTrailingSeparate, wantWidth: 6, wantOverpun: -1},
+		{name: "leading separate", sign: SignLeadingSeparate, wantWidth: 6, wantOverpun: -1},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// PIC S9(5), or PIC S9(3)V99: a V occupies no byte, so scale
+			// never enters the width.
+			require.Equal(t, tc.wantWidth, zonedWidth(5, tc.sign))
+			require.Equal(t, tc.wantOverpun, tc.sign.overpunchAt(5))
+			require.Equal(t, tc.wantWidth > 5, tc.sign.separate())
+		})
+	}
+}
+
 func TestFloatFormatString(t *testing.T) {
 	t.Parallel()
 

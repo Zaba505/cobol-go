@@ -42,11 +42,35 @@
 // # Scope of this package as it stands
 //
 // [Reader] and [Writer] currently cover alphanumeric fields, raw byte fields,
-// packed decimal (COMP-3), binary (COMP, COMP-4, BINARY, COMP-5) and floating
-// point (COMP-1, COMP-2). The zoned decimal (USAGE DISPLAY) accessors arrive in
-// a later story; the two axes they read — the charset and the sign convention —
-// are complete here, so that neither ever has to acquire a default
-// retroactively.
+// zoned decimal (USAGE DISPLAY), packed decimal (COMP-3), binary (COMP, COMP-4,
+// BINARY, COMP-5) and floating point (COMP-1, COMP-2).
+//
+// USAGE is a property of each item and not a mode of the file, so those
+// families coexist inside one record: a record holding a DISPLAY field, a
+// COMP-3 field and a COMP field is ordinary, and each field's width comes from
+// its own usage.
+//
+// What remains out of scope is numeric-edited de-editing — a PICTURE carrying
+// an actual '.', a currency sign or insertion characters, whose bytes are a
+// presentation of a number rather than the number. See codec/SPEC.md,
+// "Numeric-edited de-editing".
+//
+// # Zoned decimal: two independent facts about the sign
+//
+// A USAGE DISPLAY item spends one character byte per digit, and its sign — if
+// its PICTURE carries S — is normally *overpunched* into the zone nibble of a
+// digit byte rather than given a byte of its own. Reading one takes two facts
+// that come from different places and are named apart for that reason:
+//
+//   - [SignPosition] comes from the copybook: whether there is an S at all, and
+//     what the SIGN clause says. It is passed to every zoned accessor, it is
+//     what makes a SEPARATE field digits+1 bytes wide, and it takes the place
+//     of the [Signedness] the other numeric writers require.
+//   - [SignConvention] comes from the file, through [Encoding.Sign], and says
+//     how the sign-carrying byte is spelled.
+//
+// Neither is recoverable from the bytes and neither implies the other, so
+// neither has a default: [SignPositionUnset] and [SignUnset] are both invalid.
 //
 // # Character sets and sign conventions
 //
@@ -133,7 +157,10 @@
 //
 // The writers additionally take a [Signedness], because whether an item's
 // PICTURE carries S selects the sign value stored with it and cannot be
-// recovered from the value being written.
+// recovered from the value being written. The zoned accessors are the exception
+// and are stricter rather than looser: their [SignPosition] already says
+// whether there is an S, so it is required on the *reading* side too, where it
+// also fixes the field's width.
 //
 // Floating point is the exception to both, and to the width model above: a
 // COMP-1 or COMP-2 item has no PICTURE to carry digits, a scale, or an S.

@@ -50,8 +50,8 @@ the scale as a constant.
 Their `digits` bound belongs to the **accessor**, not to the field: 4 for the
 int16 accessors, 9 for the int32 ones, 18 for the int64 and uint64 ones, 31 —
 the IBM maximum — for the `math/big.Int` ones. A wider count is a
-`PackedDigitCountError` or a `BinaryDigitCountError` rather than a silent
-overflow.
+`PackedDigitCountError`, a `BinaryDigitCountError` or a `ZonedDigitCountError`
+rather than a silent overflow.
 
 Numeric **writers** additionally take a `Signedness` (`Signed`/`Unsigned`) with
 an invalid zero value. Whether the PICTURE carries `S` selects the stored sign
@@ -59,6 +59,11 @@ value and is not recoverable from the value being written, so it is stated per
 call and never defaulted — the same argument as the `Encoding` axes, one level
 down. A negative value written into an `Unsigned` field is a `PackedRangeError`,
 not a silent absolute value.
+
+The zoned accessors are the exception and are stricter rather than looser: a
+`SignPosition` takes the place of the `Signedness` and is required on the
+**reading** side too, because it is also what says whether the field is `digits`
+bytes wide or `digits+1`. See below.
 
 ## Errors: one wrapper, typed leaves
 
@@ -85,8 +90,9 @@ the field **starts** at for the same reason as `BinaryRangeError`.
 
 Leaves are typed values (`EncodingError`, `FieldWidthError`,
 `FieldTooLongError`, `UnrepresentableRuneError`, `JustificationError`,
-`SignednessError`, `ZonedDigitError`, `ZonedSignError`,
-`ZonedSeparateSignError`, `PackedDigitCountError`, `PackedPadError`,
+`SignednessError`, `SignPositionError`, `ZonedDigitError`, `ZonedSignError`,
+`ZonedSeparateSignError`, `ZonedDigitCountError`, `ZonedRangeError`,
+`PackedDigitCountError`, `PackedPadError`,
 `PackedDigitError`, `PackedSignError`, `PackedRangeError`,
 `BinaryDigitCountError`, `BinaryRangeError`, `FloatRangeError`) or stdlib
 sentinels
@@ -185,7 +191,9 @@ unrepresentable. The declared charset still matters to a numeric field: it says
 whether the digits are `F0`–`F9` or `30`–`39` and whether a separate sign is
 `4E`/`60` or `2B`/`2D`. Compare those byte values; do not call `ToUnicode` on
 them. `TestZonedDecodingNeverTranslatesThroughTheCharset` counts the
-translations a zoned field performs and requires zero.
+translations a zoned field performs and requires zero, and
+`TestZonedAccessorsNeverTranslateThroughTheCharset` does the same one layer up,
+through `Reader` and `Writer`.
 
 ## Zoned bytes: two halves that must not merge
 
@@ -219,6 +227,30 @@ Two asymmetries to preserve:
   detectability `TestZonedSignConventionsAreMutuallyDetectable` asserts.
 - **An unsigned-zone byte in the sign position is a non-negative value**, not a
   corruption — a signed item holds one after a `MOVE` from an unsigned one.
+
+## Zoned accessors: position is the copybook's half
+
+`SignPosition` (`SignUnsigned`, `SignTrailing`, `SignLeading`,
+`SignTrailingSeparate`, `SignLeadingSeparate`, with an invalid
+`SignPositionUnset` zero) is the *copybook* half of a zoned field, where
+`SignConvention` is the *file* half. It is passed to every zoned accessor in
+both directions, and it does three things at once: it says whether the PICTURE
+carries `S` — so it replaces `Signedness` here rather than joining it — it
+selects the overpunched byte through `SignPosition.overpunchAt`, and it fixes
+the width through `zonedWidth`, which is `digits` plus one only for a `SEPARATE`
+sign. Do not give it a default: assuming `TRAILING` for a field that was
+`SEPARATE` shifts every later field of the record by a byte.
+
+`Reader.readZonedDigits` and `Writer.writeZoned` are the two field-level bodies.
+They split the separate sign byte off, hand the rest to `zonedCodec`, and stamp
+`start+first+at` so an error names the byte at fault — `first` being 1 under
+`SignLeadingSeparate`, which is the one offset arithmetic worth re-checking when
+this code changes.
+
+The `zonedCodec` itself is derived **once**, in `NewReader`/`NewWriter`, and any
+failure of deriving it is held in `zonedErr` and reported by the first zoned
+accessor. Deriving it cannot fail the constructor: a charset with no `'+'`
+cannot spell a numeric field but reads `PIC X` ones perfectly well.
 
 ## Testing style
 
