@@ -460,6 +460,53 @@ func TestNewLayout(t *testing.T) {
 			wantLength: 29,
 		},
 		{
+			// A width that is not a multiple of its own boundary — as
+			// BinarySizeSmallest's 3, 5, 6 and 7-byte items are not —
+			// is where trailing slack would show up if it were applied
+			// to a field that occurs once. It must not be: alignment
+			// is bytes skipped *before* an item, and padding a single
+			// occurrence would push C out by a byte that no item's
+			// Slack accounts for.
+			name: "a single occurrence takes no trailing slack",
+			src: `01 R.
+   05 A PIC X.
+   05 B PIC S9(6) COMP SYNC.
+   05 C PIC X.
+`,
+			dialect: Dialect{
+				Binary: BinarySizeSmallest, Sync: SyncAligned, Redefines: RedefinesStrict,
+				IndexWidth: 4, PointerWidth: 8,
+			},
+			want: []span{
+				{name: "R", offset: 0, length: 8},
+				{name: "A", offset: 0, length: 1},
+				{name: "B", offset: 4, length: 3, slack: 3},
+				{name: "C", offset: 7, length: 1},
+			},
+			wantLength: 8,
+		},
+		{
+			// The same item under OCCURS does take it, because every
+			// occurrence after the first has to start on the boundary.
+			name: "several occurrences of an odd width take trailing slack",
+			src: `01 R.
+   05 A PIC X.
+   05 B PIC S9(6) COMP SYNC OCCURS 3 TIMES.
+   05 C PIC X.
+`,
+			dialect: Dialect{
+				Binary: BinarySizeSmallest, Sync: SyncAligned, Redefines: RedefinesStrict,
+				IndexWidth: 4, PointerWidth: 8,
+			},
+			want: []span{
+				{name: "R", offset: 0, length: 17},
+				{name: "A", offset: 0, length: 1},
+				{name: "B", offset: 4, length: 3, stride: 4, occurs: 3, slack: 3},
+				{name: "C", offset: 16, length: 1},
+			},
+			wantLength: 17,
+		},
+		{
 			name: "floating point, index and pointer widths come from the usage",
 			src: `01 R.
    05 A COMP-1.

@@ -309,9 +309,11 @@ func MicroFocus() Dialect {
 // for, and is the offset of the field's *first* occurrence. Length is the bytes
 // one occurrence occupies; for a group it is the extent of its subordinate
 // items, including any slack between them. Stride is the distance from one
-// occurrence to the next — Length plus the trailing slack a SYNCHRONIZED item
-// inside a group under OCCURS forces — so the whole field occupies
-// Stride × Occurs bytes, which is what [Item.Total] returns.
+// occurrence to the next — Length plus the trailing slack that brings the next
+// occurrence back onto its boundary — so the whole field occupies
+// Stride × Occurs bytes, which is what [Item.Total] returns. A field that occurs
+// once has no next occurrence and so no trailing slack: its Stride is its
+// Length, whatever it is aligned to.
 //
 // Slack is the number of bytes skipped immediately before Offset to bring the
 // item onto its boundary. It is part of the record and belongs to no field, so
@@ -497,7 +499,17 @@ func (l *layouter) place(f *Field, parent *Item, at int, redefining bool) (*Item
 		item.Length = width
 	}
 
-	item.Stride = roundUp(item.Length, align)
+	// Trailing slack exists only to bring the *next* occurrence back onto the
+	// boundary, so a field that occurs once never has any: alignment is
+	// bytes skipped before an item, and the item's own width is what it is.
+	// Rounding a single occurrence up would pad it invisibly — the following
+	// field would report Slack 0 while starting later than its own alignment
+	// asked for — which matters wherever a width is not already a multiple of
+	// its boundary, as BinarySizeSmallest's 3, 5, 6 and 7-byte items are not.
+	item.Stride = item.Length
+	if occurs > 1 {
+		item.Stride = roundUp(item.Length, align)
+	}
 	return item, nil
 }
 
@@ -567,8 +579,8 @@ func (l *layouter) redefinedBy(child *Field, group *Item) (*Item, error) {
 	}
 }
 
-// occursOf reports the occurrence count of a field: 1 when it carries no OCCURS
-// clause, and the clause's count when it carries a fixed one.
+// occurrences reports the occurrence count of a field: 1 when it carries no
+// OCCURS clause, and the clause's count when it carries a fixed one.
 //
 // An OCCURS ... DEPENDING ON table has no static occurrence count, so it is
 // reported rather than laid out at either bound.
