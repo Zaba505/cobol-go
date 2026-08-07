@@ -574,6 +574,399 @@ func TestWriterWritePackedErrors(t *testing.T) {
 	})
 }
 
+// TestWriterWriteBinary writes a signed binary field in both byte orders, at
+// every width and at both width boundaries. It is the mirror of
+// TestReaderReadBinary and shares its vectors.
+func TestWriterWriteBinary(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		v      int64
+		digits int
+		want   []byte // big-endian; the little-endian case is its reversal
+	}{
+		{
+			name:   "four digits, positive",
+			v:      1234,
+			digits: 4,
+			want:   []byte{0x04, 0xD2},
+		},
+		{
+			name:   "four digits, negative",
+			v:      -1234,
+			digits: 4,
+			want:   []byte{0xFB, 0x2E},
+		},
+		{
+			name:   "four digits, zero",
+			v:      0,
+			digits: 4,
+			want:   []byte{0x00, 0x00},
+		},
+		{
+			name:   "four digits, the widest value TRUNC(STD) allows",
+			v:      9999,
+			digits: 4,
+			want:   []byte{0x27, 0x0F},
+		},
+		{
+			name:   "four digits, the widest negative value",
+			v:      -9999,
+			digits: 4,
+			want:   []byte{0xD8, 0xF1},
+		},
+		{
+			name:   "one digit still occupies two bytes",
+			v:      7,
+			digits: 1,
+			want:   []byte{0x00, 0x07},
+		},
+		{
+			name:   "five digits steps up to four bytes",
+			v:      42,
+			digits: 5,
+			want:   []byte{0x00, 0x00, 0x00, 0x2A},
+		},
+		{
+			name:   "nine digits is the last four-byte width",
+			v:      123456789,
+			digits: 9,
+			want:   []byte{0x07, 0x5B, 0xCD, 0x15},
+		},
+		{
+			name:   "nine digits, negative",
+			v:      -123456789,
+			digits: 9,
+			want:   []byte{0xF8, 0xA4, 0x32, 0xEB},
+		},
+		{
+			name:   "ten digits steps up to eight bytes",
+			v:      123456789,
+			digits: 10,
+			want:   []byte{0x00, 0x00, 0x00, 0x00, 0x07, 0x5B, 0xCD, 0x15},
+		},
+		{
+			name:   "eighteen digits, the widest an int64 holds",
+			v:      999999999999999999,
+			digits: 18,
+			want:   []byte{0x0D, 0xE0, 0xB6, 0xB3, 0xA7, 0x63, 0xFF, 0xFF},
+		},
+		{
+			name:   "eighteen digits, negative",
+			v:      -999999999999999999,
+			digits: 18,
+			want:   []byte{0xF2, 0x1F, 0x49, 0x4C, 0x58, 0x9C, 0x00, 0x01},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, bo := range binaryOrders {
+				enc := binaryEncoding(bo)
+				want := inByteOrder(bo, tc.want)
+
+				var buf bytes.Buffer
+				w, err := NewWriter(&buf, enc)
+				require.NoError(t, err)
+				require.NoError(t, w.WriteBinaryInt64(tc.v, tc.digits, Signed))
+				require.Equal(t, want, buf.Bytes())
+				require.Equal(t, int64(binaryWidth(tc.digits)), w.Offset())
+
+				if tc.digits <= maxBinaryInt32Digits {
+					var buf32 bytes.Buffer
+					w32, err := NewWriter(&buf32, enc)
+					require.NoError(t, err)
+					require.NoError(t, w32.WriteBinaryInt32(int32(tc.v), tc.digits, Signed))
+					require.Equal(t, want, buf32.Bytes())
+				}
+				if tc.digits <= maxBinaryInt16Digits {
+					var buf16 bytes.Buffer
+					w16, err := NewWriter(&buf16, enc)
+					require.NoError(t, err)
+					require.NoError(t, w16.WriteBinaryInt16(int16(tc.v), tc.digits, Signed))
+					require.Equal(t, want, buf16.Bytes())
+				}
+				if tc.v >= 0 {
+					var bufu bytes.Buffer
+					wu, err := NewWriter(&bufu, enc)
+					require.NoError(t, err)
+					require.NoError(t, wu.WriteBinaryUint64(uint64(tc.v), tc.digits, Unsigned))
+					require.Equal(t, want, bufu.Bytes())
+				}
+
+				var bufBig bytes.Buffer
+				wb, err := NewWriter(&bufBig, enc)
+				require.NoError(t, err)
+				require.NoError(t, wb.WriteBinaryBig(big.NewInt(tc.v), tc.digits, Signed))
+				require.Equal(t, want, bufBig.Bytes())
+
+				// TRUNC(BIN) changes which values are accepted and never
+				// the bytes a value is written as.
+				var bufComp5 bytes.Buffer
+				wc, err := NewWriter(&bufComp5, enc)
+				require.NoError(t, err)
+				require.NoError(t, wc.WriteComp5Int64(tc.v, tc.digits, Signed))
+				require.Equal(t, want, bufComp5.Bytes())
+			}
+		})
+	}
+}
+
+// TestWriterWriteBinaryUnsigned covers the values only an unsigned item holds,
+// which is the half of the storage range TRUNC(BIN) opens up.
+func TestWriterWriteBinaryUnsigned(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the full two-byte unsigned range under COMP-5", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		// PIC 9(4) COMP-5 holding 65535, SPEC Appendix A.5's last row.
+		require.NoError(t, w.WriteComp5Uint64(65535, 4, Unsigned))
+		require.Equal(t, []byte{0xFF, 0xFF}, buf.Bytes())
+	})
+
+	t.Run("the same value is out of range signed", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		err = w.WriteComp5Uint64(65535, 4, Signed)
+
+		var rangeErr BinaryRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, Signed, rangeErr.Signedness)
+		require.Empty(t, buf.Bytes())
+	})
+
+	t.Run("a negative value is refused by an unsigned field", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		// A COBOL MOVE would have stored the absolute value; this is loud.
+		err = w.WriteBinaryInt16(-1, 4, Unsigned)
+
+		var rangeErr BinaryRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, "-1", rangeErr.Value)
+		require.Equal(t, Unsigned, rangeErr.Signedness)
+		require.Empty(t, buf.Bytes())
+	})
+}
+
+// TestWriterWriteBinaryBig covers the 19-to-31 digit range, which is 16 bytes
+// wide and which no Go integer type holds.
+func TestWriterWriteBinaryBig(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		v      string
+		digits int
+		want   []byte
+	}{
+		{
+			name:   "nineteen digits, one past int64",
+			v:      "1234567890123456789",
+			digits: 19,
+			want:   []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x22, 0x10, 0xF4, 0x7D, 0xE9, 0x81, 0x15},
+		},
+		{
+			name:   "thirty-one digits, the COBOL maximum",
+			v:      "9999999999999999999999999999999",
+			digits: 31,
+			want:   []byte{0x00, 0x00, 0x00, 0x7E, 0x37, 0xBE, 0x20, 0x22, 0xC0, 0x91, 0x4B, 0x26, 0x7F, 0xFF, 0xFF, 0xFF},
+		},
+		{
+			name:   "thirty-one digits, negative",
+			v:      "-9999999999999999999999999999999",
+			digits: 31,
+			want:   []byte{0xFF, 0xFF, 0xFF, 0x81, 0xC8, 0x41, 0xDF, 0xDD, 0x3F, 0x6E, 0xB4, 0xD9, 0x80, 0x00, 0x00, 0x01},
+		},
+		{
+			name:   "a small value still fills sixteen bytes",
+			v:      "1234",
+			digits: 19,
+			want:   []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0xD2},
+		},
+		{
+			name:   "a small negative value is sign-extended to sixteen bytes",
+			v:      "-1234",
+			digits: 19,
+			want:   []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFB, 0x2E},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			v, ok := new(big.Int).SetString(tc.v, 10)
+			require.True(t, ok)
+
+			for _, bo := range binaryOrders {
+				var buf bytes.Buffer
+				w, err := NewWriter(&buf, binaryEncoding(bo))
+				require.NoError(t, err)
+
+				require.NoError(t, w.WriteBinaryBig(v, tc.digits, Signed))
+				require.Equal(t, inByteOrder(bo, tc.want), buf.Bytes())
+			}
+		})
+	}
+}
+
+func TestWriterWriteBinaryErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("value with more digits than the picture", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		// 10000 fits the two bytes but not the four digits, which is what
+		// TRUNC(STD) means and what the compiler would have truncated.
+		err = w.WriteBinaryInt16(10000, 4, Signed)
+
+		var rangeErr BinaryRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, "10000", rangeErr.Value)
+		require.Equal(t, 4, rangeErr.Digits)
+		require.Equal(t, 2, rangeErr.Width)
+		require.Equal(t, TruncStd, rangeErr.Truncation)
+
+		var offErr *OffsetError
+		require.ErrorAs(t, err, &offErr)
+		require.Zero(t, offErr.Offset)
+		// Nothing was written: a rejected field must not desynchronize the
+		// record it sits in.
+		require.Empty(t, buf.Bytes())
+		require.Zero(t, w.Offset())
+	})
+
+	t.Run("the same value is in range under TRUNC(BIN)", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		require.NoError(t, w.WriteComp5Int16(10000, 4, Signed))
+		require.Equal(t, []byte{0x27, 0x10}, buf.Bytes())
+	})
+
+	t.Run("value beyond the storage width under TRUNC(BIN)", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		// Two bytes signed stop at 32767, whatever the truncation mode.
+		err = w.WriteComp5Int32(40000, 4, Signed)
+
+		var rangeErr BinaryRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, TruncBin, rangeErr.Truncation)
+		require.Empty(t, buf.Bytes())
+	})
+
+	t.Run("digit count above the accessor's maximum", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		err = w.WriteBinaryInt32(1, 10, Signed)
+
+		var countErr BinaryDigitCountError
+		require.ErrorAs(t, err, &countErr)
+		require.Equal(t, 10, countErr.Digits)
+		require.Equal(t, maxBinaryInt32Digits, countErr.Max)
+		require.Empty(t, buf.Bytes())
+	})
+
+	t.Run("digit count of zero", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		err = w.WriteBinaryBig(big.NewInt(1), 0, Signed)
+
+		var countErr BinaryDigitCountError
+		require.ErrorAs(t, err, &countErr)
+		require.Equal(t, 0, countErr.Digits)
+	})
+
+	t.Run("unset signedness", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		// Whether the PICTURE carries S is not recoverable from the value,
+		// so it is stated per call and never defaulted.
+		err = w.WriteBinaryInt16(1, 4, SignednessUnset)
+
+		var signErr SignednessError
+		require.ErrorAs(t, err, &signErr)
+		require.Equal(t, SignednessUnset, signErr.Signedness)
+		require.Empty(t, buf.Bytes())
+	})
+
+	t.Run("unknown signedness", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		err = w.WriteBinaryUint64(1, 4, Signedness(9))
+
+		var signErr SignednessError
+		require.ErrorAs(t, err, &signErr)
+		require.Empty(t, buf.Bytes())
+	})
+
+	t.Run("nil big value", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		require.ErrorIs(t, w.WriteBinaryBig(nil, 19, Signed), ErrNilValue)
+		require.Empty(t, buf.Bytes())
+	})
+
+	t.Run("underlying writer fails", func(t *testing.T) {
+		t.Parallel()
+
+		w, err := NewWriter(&failingWriter{limit: 0}, binaryEncoding(binary.BigEndian))
+		require.NoError(t, err)
+
+		err = w.WriteBinaryInt16(1, 4, Signed)
+		require.ErrorIs(t, err, errWriteFailed)
+	})
+}
+
 func TestWriterOffset(t *testing.T) {
 	t.Parallel()
 
@@ -709,9 +1102,10 @@ func TestMarshal(t *testing.T) {
 			Raw:    []byte{0x00, 0x01, 0xFF},
 			Amount: 12345,
 			Qty:    42,
+			Seq:    1234,
 		})
 		require.NoError(t, err)
-		require.Equal(t, []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F"), got)
+		require.Equal(t, []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2"), got)
 	})
 
 	t.Run("incomplete encoding", func(t *testing.T) {
@@ -747,21 +1141,24 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 		{
 			name: "ascii record",
 			enc:  GnuCOBOLASCII(),
-			// … | 12 34 5C: AMOUNT +12345 | 00 04 2F: QTY 42
-			src: []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F"),
+			// … | 12 34 5C: AMOUNT +12345 | 00 04 2F: QTY 42 | 04 D2: SEQ 1234
+			src: []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2"),
 		},
 		{
 			name: "ascii record with empty fields",
 			enc:  MicroFocusASCII(),
 			// The zero of a signed packed field is C, of an unsigned one F.
+			// SEQ is zero, which is the one binary value this encoding's
+			// native byte order cannot reorder.
 			src: []byte("      " + "            " + "    " + "\x00\x00\x00" +
-				"\x00\x00\x0C" + "\x00\x00\x0F"),
+				"\x00\x00\x0C" + "\x00\x00\x0F" + "\x00\x00"),
 		},
 		{
 			name: "ascii record with full fields",
 			enc:  ConvertedFromEBCDIC(),
-			// 98 76 5D: AMOUNT -98765 | 09 99 9F: QTY 9999
-			src: []byte("A12345WIDGETGRIP123456\xFF\xFE\xFD\x98\x76\x5D\x09\x99\x9F"),
+			// 98 76 5D: AMOUNT -98765 | 09 99 9F: QTY 9999 | FB 2E: SEQ -1234,
+			// big-endian because the mainframe that wrote it was
+			src: []byte("A12345WIDGETGRIP123456\xFF\xFE\xFD\x98\x76\x5D\x09\x99\x9F\xFB\x2E"),
 		},
 		{
 			name: "ebcdic record",
@@ -777,6 +1174,7 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 				0x00, 0x01, 0xFF, // raw payload
 				0x12, 0x34, 0x5C, // AMOUNT +12345
 				0x00, 0x04, 0x2F, // QTY 42
+				0x04, 0xD2, // SEQ 1234, big-endian as z/OS writes it
 			),
 		},
 	}
@@ -928,6 +1326,145 @@ func TestRoundTripPackedLenientSigns(t *testing.T) {
 	}
 }
 
+// TestRoundTripBinary walks a binary field both ways at every digit count COBOL
+// allows, in both byte orders, under both truncation modes and both
+// signednesses. It is the cheapest check that the width staircase, the byte
+// order and the two's complement agree between the reader and the writer, and
+// it is what covers the 4/5 and 9/10 width boundaries at every value extreme.
+func TestRoundTripBinary(t *testing.T) {
+	t.Parallel()
+
+	for digits := 1; digits <= maxBinaryDigits; digits++ {
+		t.Run(strconv.Itoa(digits)+" digits", func(t *testing.T) {
+			t.Parallel()
+
+			width := binaryWidth(digits)
+			one := big.NewInt(1)
+			stdLimit := decimalLimit(digits)
+			binMax := new(big.Int).Sub(new(big.Int).Lsh(one, uint(8*width-1)), one)
+			binMin := new(big.Int).Neg(new(big.Int).Lsh(one, uint(8*width-1)))
+
+			// Each mode is exercised at the extremes of its own range: the
+			// PICTURE's decimal limits under TRUNC(STD), the storage width's
+			// under TRUNC(BIN).
+			modes := []struct {
+				name    string
+				values  []*big.Int
+				write   func(w *Writer, v *big.Int, s Signedness) error
+				read    func(r *Reader) (*big.Int, error)
+				read64  func(r *Reader) (int64, error)
+				readU64 func(r *Reader) (uint64, error)
+			}{
+				{
+					name:   "trunc-std",
+					values: []*big.Int{stdLimit, new(big.Int).Neg(stdLimit), big.NewInt(0), big.NewInt(7)},
+					write: func(w *Writer, v *big.Int, s Signedness) error {
+						return w.WriteBinaryBig(v, digits, s)
+					},
+					read:    func(r *Reader) (*big.Int, error) { return r.ReadBinaryBig(digits) },
+					read64:  func(r *Reader) (int64, error) { return r.ReadBinaryInt64(digits) },
+					readU64: func(r *Reader) (uint64, error) { return r.ReadBinaryUint64(digits) },
+				},
+				{
+					name:   "trunc-bin",
+					values: []*big.Int{binMax, binMin, big.NewInt(0), big.NewInt(7)},
+					write: func(w *Writer, v *big.Int, s Signedness) error {
+						return w.WriteComp5Big(v, digits, s)
+					},
+					read:    func(r *Reader) (*big.Int, error) { return r.ReadComp5Big(digits) },
+					read64:  func(r *Reader) (int64, error) { return r.ReadComp5Int64(digits) },
+					readU64: func(r *Reader) (uint64, error) { return r.ReadComp5Uint64(digits) },
+				},
+			}
+
+			for _, mode := range modes {
+				for _, s := range []Signedness{Signed, Unsigned} {
+					for _, v := range mode.values {
+						if v.Sign() < 0 && s == Unsigned {
+							continue
+						}
+						for _, bo := range binaryOrders {
+							enc := binaryEncoding(bo)
+
+							var buf bytes.Buffer
+							w, err := NewWriter(&buf, enc)
+							require.NoError(t, err, mode.name)
+							require.NoError(t, mode.write(w, v, s), mode.name)
+							require.Len(t, buf.Bytes(), width)
+
+							r, err := NewReader(bytes.NewReader(buf.Bytes()), enc)
+							require.NoError(t, err)
+							got, err := mode.read(r)
+							require.NoError(t, err, mode.name)
+							require.Equal(t, v.String(), got.String(), mode.name)
+
+							// The bytes a reader accepts are written back
+							// unchanged, which is the direction that catches
+							// a byte order or a sign extension drifting.
+							var back bytes.Buffer
+							w2, err := NewWriter(&back, enc)
+							require.NoError(t, err)
+							require.NoError(t, mode.write(w2, got, s))
+							require.Equal(t, buf.Bytes(), back.Bytes())
+
+							if digits <= maxBinaryInt64Digits {
+								r64, err := NewReader(bytes.NewReader(buf.Bytes()), enc)
+								require.NoError(t, err)
+								got64, err := mode.read64(r64)
+								require.NoError(t, err, mode.name)
+								require.Equal(t, v.Int64(), got64)
+							}
+							if digits <= maxBinaryInt64Digits && v.Sign() >= 0 {
+								ru, err := NewReader(bytes.NewReader(buf.Bytes()), enc)
+								require.NoError(t, err)
+								gotU, err := mode.readU64(ru)
+								require.NoError(t, err, mode.name)
+								require.Equal(t, v.Uint64(), gotU)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestRoundTripBinaryUnsignedFullWidth is the half of the storage range only an
+// unsigned COMP-5 item reaches: the values above the signed maximum, which the
+// uint64 accessors are the reading of.
+func TestRoundTripBinaryUnsignedFullWidth(t *testing.T) {
+	t.Parallel()
+
+	for digits := 1; digits <= maxBinaryInt64Digits; digits++ {
+		t.Run(strconv.Itoa(digits)+" digits", func(t *testing.T) {
+			t.Parallel()
+
+			width := binaryWidth(digits)
+			max := uint64(math.MaxUint64)
+			if width < 8 {
+				max = uint64(1)<<(8*width) - 1
+			}
+
+			for _, bo := range binaryOrders {
+				enc := binaryEncoding(bo)
+
+				var buf bytes.Buffer
+				w, err := NewWriter(&buf, enc)
+				require.NoError(t, err)
+				require.NoError(t, w.WriteComp5Uint64(max, digits, Unsigned))
+				require.Len(t, buf.Bytes(), width)
+				require.Equal(t, bytes.Repeat([]byte{0xFF}, width), buf.Bytes())
+
+				r, err := NewReader(bytes.NewReader(buf.Bytes()), enc)
+				require.NoError(t, err)
+				got, err := r.ReadComp5Uint64(digits)
+				require.NoError(t, err)
+				require.Equal(t, max, got)
+			}
+		})
+	}
+}
+
 // TestRoundTripEncodeDecode is the value-equality direction: a record written
 // and read back must compare equal to what went in.
 func TestRoundTripEncodeDecode(t *testing.T) {
@@ -948,6 +1485,7 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Raw:    []byte{0x00, 0x01, 0xFF},
 				Amount: 12345,
 				Qty:    42,
+				Seq:    1234,
 			},
 		},
 		{
@@ -960,6 +1498,7 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Raw:    []byte{0x00, 0x01, 0xFF},
 				Amount: -12345,
 				Qty:    42,
+				Seq:    -1234,
 			},
 		},
 		{
@@ -972,6 +1511,7 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Raw:    []byte{0x40, 0x20, 0x00},
 				Amount: 0,
 				Qty:    0,
+				Seq:    0,
 			},
 		},
 		{
@@ -984,6 +1524,7 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Raw:    []byte{0xFF, 0xFE, 0xFD},
 				Amount: -99999,
 				Qty:    9999,
+				Seq:    9999,
 			},
 		},
 		{
@@ -996,6 +1537,7 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Raw:    []byte{0x01, 0x02, 0x03},
 				Amount: -1,
 				Qty:    1,
+				Seq:    -1,
 			},
 		},
 	}

@@ -8,6 +8,7 @@ package codec
 import (
 	"bytes"
 	"io"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -222,6 +223,274 @@ func (w *Writer) writePacked(text string, negative bool, digits, max int, s Sign
 		field[i] = nibbles[2*i]<<4 | nibbles[2*i+1]
 	}
 	return w.write(field)
+}
+
+// WriteBinaryInt16 writes v as a binary (COMP, COMP-4, BINARY) field of digits
+// digits, exactly 2 bytes wide.
+//
+// digits must be between 1 and 4. The bytes are two's complement in the order
+// [Encoding.ByteOrder] declares, which is required and never inferred.
+//
+// s is required and says whether the item's PICTURE carries S, for the reason
+// it is required on [Writer.WritePackedInt32]: a negative value written into an
+// [Unsigned] field is a [BinaryRangeError] rather than a silent absolute value.
+//
+// Range semantics are TRUNC(STD): a value outside the decimal range of digits
+// digits is rejected, which is what the compiler's own store would have
+// truncated it to. Write a COMP-5 field, or a COMP field compiled under
+// TRUNC(BIN), with [Writer.WriteComp5Int16] instead; see [Truncation].
+//
+// v is the unscaled integer: a PIC S9(3)V99 COMP item holding -123.45 is
+// written as -12345 with digits 5, since V occupies no storage.
+func (w *Writer) WriteBinaryInt16(v int16, digits int, s Signedness) error {
+	return w.writeBinaryInt(int64(v), digits, maxBinaryInt16Digits, s, TruncStd)
+}
+
+// WriteBinaryInt32 writes v as a binary field of digits digits, 2 bytes wide
+// for 1 to 4 digits and 4 bytes wide for 5 to 9. digits must be between 1 and
+// 9, and s is required; see [Writer.WriteBinaryInt16].
+func (w *Writer) WriteBinaryInt32(v int32, digits int, s Signedness) error {
+	return w.writeBinaryInt(int64(v), digits, maxBinaryInt32Digits, s, TruncStd)
+}
+
+// WriteBinaryInt64 writes v as a binary field of digits digits, 2, 4 or 8 bytes
+// wide by the digit count. digits must be between 1 and 18; the 19-to-31 digit
+// range is written with [Writer.WriteBinaryBig]. s is required; see
+// [Writer.WriteBinaryInt16].
+func (w *Writer) WriteBinaryInt64(v int64, digits int, s Signedness) error {
+	return w.writeBinaryInt(v, digits, maxBinaryInt64Digits, s, TruncStd)
+}
+
+// WriteBinaryUint64 writes v as a binary field of digits digits, 2, 4 or 8
+// bytes wide by the digit count. digits must be between 1 and 18.
+//
+// s is required here too, and it is not implied by the argument type: a uint64
+// cannot be negative, but [Signed] still selects the narrower range, since a
+// signed 2-byte item stops at 32767 where an unsigned one runs to 65535. Under
+// TRUNC(STD) both are further confined to the PICTURE's decimal range; see
+// [Writer.WriteBinaryInt16].
+func (w *Writer) WriteBinaryUint64(v uint64, digits int, s Signedness) error {
+	return w.writeBinaryUint(v, digits, maxBinaryInt64Digits, s, TruncStd)
+}
+
+// WriteBinaryBig writes v as a binary field of digits digits, 2, 4, 8 or 16
+// bytes wide by the digit count. digits must be between 1 and 31, the IBM
+// Enterprise COBOL maximum under ARITH(EXTEND). s is required; see
+// [Writer.WriteBinaryInt16].
+//
+// A nil v is [ErrNilValue] rather than a zero, as it is on
+// [Writer.WritePackedBig]: an absent number and the number zero are different
+// things, and a field is not written from a guess.
+func (w *Writer) WriteBinaryBig(v *big.Int, digits int, s Signedness) error {
+	return w.writeBinaryBig(v, digits, s, TruncStd)
+}
+
+// WriteComp5Int16 writes v as a COMP-5 field of digits digits, exactly 2 bytes
+// wide.
+//
+// It is [Writer.WriteBinaryInt16] with TRUNC(BIN) range semantics: the value
+// may use the full range of the storage rather than the decimal range of the
+// PICTURE. Use it for USAGE COMP-5, and for COMP or COMP-4 compiled under
+// TRUNC(BIN) or GnuCOBOL's binary-truncate: no. See [Truncation].
+func (w *Writer) WriteComp5Int16(v int16, digits int, s Signedness) error {
+	return w.writeBinaryInt(int64(v), digits, maxBinaryInt16Digits, s, TruncBin)
+}
+
+// WriteComp5Int32 writes v as a COMP-5 field of digits digits, 2 or 4 bytes
+// wide. It is [Writer.WriteBinaryInt32] with TRUNC(BIN) range semantics; see
+// [Writer.WriteComp5Int16].
+func (w *Writer) WriteComp5Int32(v int32, digits int, s Signedness) error {
+	return w.writeBinaryInt(int64(v), digits, maxBinaryInt32Digits, s, TruncBin)
+}
+
+// WriteComp5Int64 writes v as a COMP-5 field of digits digits, 2, 4 or 8 bytes
+// wide. It is [Writer.WriteBinaryInt64] with TRUNC(BIN) range semantics; see
+// [Writer.WriteComp5Int16].
+func (w *Writer) WriteComp5Int64(v int64, digits int, s Signedness) error {
+	return w.writeBinaryInt(v, digits, maxBinaryInt64Digits, s, TruncBin)
+}
+
+// WriteComp5Uint64 writes v as a COMP-5 field of digits digits, 2, 4 or 8 bytes
+// wide. It is [Writer.WriteBinaryUint64] with TRUNC(BIN) range semantics; see
+// [Writer.WriteComp5Int16].
+//
+// This is what a PIC 9(4) COMP-5 item holding 65535 needs: FF FF is legal there
+// and outside the range TRUNC(STD) allows.
+func (w *Writer) WriteComp5Uint64(v uint64, digits int, s Signedness) error {
+	return w.writeBinaryUint(v, digits, maxBinaryInt64Digits, s, TruncBin)
+}
+
+// WriteComp5Big writes v as a COMP-5 field of digits digits, 2, 4, 8 or 16
+// bytes wide. It is [Writer.WriteBinaryBig] with TRUNC(BIN) range semantics;
+// see [Writer.WriteComp5Int16].
+//
+// An [Unsigned] field is written as a magnitude over the full storage width, so
+// a 16-byte one may carry a value with its top bit set. [Reader.ReadComp5Big]
+// reads two's complement and would report such a value as negative; below 8
+// bytes, [Reader.ReadComp5Uint64] is the unsigned reading that recovers it.
+func (w *Writer) WriteComp5Big(v *big.Int, digits int, s Signedness) error {
+	return w.writeBinaryBig(v, digits, s, TruncBin)
+}
+
+// binaryField validates the arguments every binary writer shares and reports
+// the field's storage width.
+func (w *Writer) binaryField(digits, max int, s Signedness) (int, error) {
+	if !s.valid() {
+		return 0, &OffsetError{Offset: w.off, Err: SignednessError{Signedness: s}}
+	}
+	if digits < 1 || digits > max {
+		return 0, &OffsetError{
+			Offset: w.off,
+			Err:    BinaryDigitCountError{Digits: digits, Max: max},
+		}
+	}
+	return binaryWidth(digits), nil
+}
+
+// writeBinaryInt is the shared body of the signed fixed-width writers, whose
+// only differences are the digit count they accept and the truncation mode they
+// range-check under.
+//
+// The value is checked and the whole field built before a byte of it is
+// written, so a rejected value writes nothing and cannot leave a half-field
+// behind to desynchronize the record.
+func (w *Writer) writeBinaryInt(v int64, digits, max int, s Signedness, t Truncation) error {
+	width, err := w.binaryField(digits, max, s)
+	if err != nil {
+		return err
+	}
+	if !binaryIntFits(v, digits, width, s, t) {
+		return &OffsetError{
+			Offset: w.off,
+			Err: BinaryRangeError{
+				Value:      strconv.FormatInt(v, 10),
+				Digits:     digits,
+				Width:      width,
+				Signedness: s,
+				Truncation: t,
+			},
+		}
+	}
+	field := make([]byte, width)
+	putBinaryUint(w.enc.ByteOrder, field, uint64(v))
+	return w.write(field)
+}
+
+// writeBinaryUint is writeBinaryInt for a value that cannot be negative. The
+// stored bytes are the same for any value both can express; what differs is the
+// upper bound, which for an [Unsigned] item under [TruncBin] is one bit wider.
+func (w *Writer) writeBinaryUint(v uint64, digits, max int, s Signedness, t Truncation) error {
+	width, err := w.binaryField(digits, max, s)
+	if err != nil {
+		return err
+	}
+	if !binaryUintFits(v, digits, width, s, t) {
+		return &OffsetError{
+			Offset: w.off,
+			Err: BinaryRangeError{
+				Value:      strconv.FormatUint(v, 10),
+				Digits:     digits,
+				Width:      width,
+				Signedness: s,
+				Truncation: t,
+			},
+		}
+	}
+	field := make([]byte, width)
+	putBinaryUint(w.enc.ByteOrder, field, v)
+	return w.write(field)
+}
+
+// writeBinaryBig is the shared body of the two [math/big.Int] writers. It is
+// separate from writeBinaryInt because [binary.ByteOrder] has no 16-byte
+// accessor: the widest fields are ordered a byte at a time.
+func (w *Writer) writeBinaryBig(v *big.Int, digits int, s Signedness, t Truncation) error {
+	if v == nil {
+		return &OffsetError{Offset: w.off, Err: ErrNilValue}
+	}
+	width, err := w.binaryField(digits, maxBinaryDigits, s)
+	if err != nil {
+		return err
+	}
+	if !binaryBigFits(v, digits, width, s, t) {
+		return &OffsetError{
+			Offset: w.off,
+			Err: BinaryRangeError{
+				Value:      v.String(),
+				Digits:     digits,
+				Width:      width,
+				Signedness: s,
+				Truncation: t,
+			},
+		}
+	}
+
+	// Two's complement: a negative value is stored as itself plus 2^(8*width),
+	// which is exactly the bit pattern the reader sign-extends back.
+	magnitude := v
+	if v.Sign() < 0 {
+		magnitude = new(big.Int).Add(v, new(big.Int).Lsh(big.NewInt(1), uint(8*width)))
+	}
+	b := magnitude.Bytes()
+	field := make([]byte, width)
+	copy(field[width-len(b):], b)
+	orderBinaryBytes(w.enc.ByteOrder, field)
+	return w.write(field)
+}
+
+// binaryIntFits reports whether v can be stored in a binary field of the given
+// digit count and width under the given signedness and truncation mode.
+func binaryIntFits(v int64, digits, width int, s Signedness, t Truncation) bool {
+	if s == Unsigned && v < 0 {
+		return false
+	}
+	if t == TruncStd {
+		limit := int64(pow10[digits] - 1)
+		return v >= -limit && v <= limit
+	}
+	if width >= 8 {
+		// Every int64 fits eight bytes, signed or not.
+		return true
+	}
+	if s == Unsigned {
+		return v <= int64(1)<<(8*width)-1
+	}
+	return v >= -(int64(1)<<(8*width-1)) && v <= int64(1)<<(8*width-1)-1
+}
+
+// binaryUintFits is binaryIntFits for a value that cannot be negative.
+func binaryUintFits(v uint64, digits, width int, s Signedness, t Truncation) bool {
+	if t == TruncStd {
+		return v <= pow10[digits]-1
+	}
+	if s == Signed {
+		if width >= 8 {
+			return v <= math.MaxInt64
+		}
+		return v <= uint64(1)<<(8*width-1)-1
+	}
+	if width >= 8 {
+		return true
+	}
+	return v <= uint64(1)<<(8*width)-1
+}
+
+// binaryBigFits is binaryIntFits for the widths no Go integer type covers.
+func binaryBigFits(v *big.Int, digits, width int, s Signedness, t Truncation) bool {
+	if s == Unsigned && v.Sign() < 0 {
+		return false
+	}
+	if t == TruncStd {
+		return v.CmpAbs(decimalLimit(digits)) <= 0
+	}
+	one := big.NewInt(1)
+	if s == Unsigned {
+		max := new(big.Int).Sub(new(big.Int).Lsh(one, uint(8*width)), one)
+		return v.Cmp(max) <= 0
+	}
+	max := new(big.Int).Sub(new(big.Int).Lsh(one, uint(8*width-1)), one)
+	min := new(big.Int).Neg(new(big.Int).Lsh(one, uint(8*width-1)))
+	return v.Cmp(min) >= 0 && v.Cmp(max) <= 0
 }
 
 // Marshal writes v under the given encoding and returns the bytes it produced.
