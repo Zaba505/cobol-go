@@ -511,13 +511,41 @@ func TestParserCopyErrors(t *testing.T) {
 			},
 		},
 		{
-			name:     "a replacement with no BY",
+			// Nothing of the right *type* stands where BY should, so the
+			// mismatch is reported as a token error, exactly as the AST
+			// parser's expectKeyword does.
+			name:     "a replacement with pseudo-text where BY should be",
 			src:      "COPY CUSTREC REPLACING ==A== ==B==.\n",
+			resolver: books,
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedTokenError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, TokenPseudoText, target.Actual.Type)
+				require.Equal(t, []TokenType{TokenIdentifier}, target.Expected)
+			},
+		},
+		{
+			// A word of the right type but the wrong spelling is the
+			// keyword error.
+			name:     "a replacement with the wrong word where BY should be",
+			src:      "COPY CUSTREC REPLACING ==A== WITH ==B==.\n",
 			resolver: books,
 			assert: func(t *testing.T, err error) {
 				var target UnexpectedKeywordError
 				require.ErrorAs(t, err, &target)
 				require.Equal(t, []string{"BY"}, target.Expected)
+			},
+		},
+		{
+			// The stream ending mid-statement reports what that state was
+			// waiting for, rather than one fixed guess for every state.
+			name:     "the stream ends where an operand should be",
+			src:      "COPY CUSTREC REPLACING ==A== BY\n",
+			resolver: books,
+			assert: func(t *testing.T, err error) {
+				var target UnexpectedEndOfTokensError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, copyOperandTokens, target.Expected)
 			},
 		},
 		{

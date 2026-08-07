@@ -22,10 +22,16 @@ import (
 //
 // name is the text-name as written in the source, with the delimiters of a
 // literal text-name already removed; library is the library-name from an OF or
-// IN phrase, or "" when the statement gave none. COBOL words are
-// case-insensitive, so an implementation should match name and library without
-// regard to case; a literal text-name, by contrast, names a file exactly as
-// spelled.
+// IN phrase, or "" when the statement gave none. Whether the source wrote the
+// name as a COBOL word or as an alphanumeric literal is *not* passed on — the
+// standard makes the first case-insensitive and the second exact, but a resolver
+// that reads a case-sensitive filesystem cannot honor both from one string, and
+// splitting the interface to say which was written would push that dilemma onto
+// every implementation. So the interface takes no position and the two resolvers
+// this package ships match case-insensitively throughout, which is what makes
+// COPY custrec find a mainframe library's CUSTREC. A resolver that must
+// distinguish the two can be written as a [CopyBookFunc] over any rule it
+// likes.
 //
 // The returned bytes are the copybook's source text in the same reference format
 // as the source doing the copying — [FSCopyBooks] and [MapCopyBooks] both return
@@ -60,7 +66,9 @@ var defaultCopyBookSuffixes = []string{"", ".cpy", ".CPY"}
 // Trying all three cases is what lets a source that says COPY custrec find
 // CUSTREC.cpy in a library lifted off a mainframe, where COBOL's
 // case-insensitivity did not survive the transfer to a case-sensitive
-// filesystem.
+// filesystem. It applies to a literal text-name too — the spelling as written is
+// tried first, so an exact match always wins, but a literal that matches nothing
+// exactly still falls back to the other casings.
 //
 // A library-name becomes a directory: COPY CUSTREC OF PAYLIB reads
 // PAYLIB/CUSTREC.cpy, again trying each casing of the directory name.
@@ -248,7 +256,10 @@ type copyParser struct {
 }
 
 // next returns the next non-comment token, buffering any comment it passes.
-func (c *copyParser) next() (Token, error) {
+// expected names the token types the caller would have accepted, so a stream
+// that ends mid-statement reports what that state was waiting for rather than
+// one fixed guess.
+func (c *copyParser) next(expected ...TokenType) (Token, error) {
 	if c.peeked != nil {
 		tok := *c.peeked
 		c.peeked = nil
@@ -260,7 +271,7 @@ func (c *copyParser) next() (Token, error) {
 			return Token{}, err
 		}
 		if !ok {
-			return Token{}, UnexpectedEndOfTokensError{Expected: []TokenType{TokenIdentifier}}
+			return Token{}, UnexpectedEndOfTokensError{Expected: expected}
 		}
 		if tok.Type == TokenComment {
 			c.comments = append(c.comments, tok)
@@ -270,18 +281,69 @@ func (c *copyParser) next() (Token, error) {
 	}
 }
 
-// peek returns the next non-comment token without consuming it.
-func (c *copyParser) peek() (Token, error) {
+// peek returns the next non-comment token without consuming it, reporting
+// [UnexpectedEndOfTokensError] over expected when the stream is exhausted. A
+// COPY statement always has more to read — at the very least its terminating
+// period — so there is no "peeked past the end" case to report separately.
+func (c *copyParser) peek(expected ...TokenType) (Token, error) {
 	if c.peeked != nil {
 		return *c.peeked, nil
 	}
-	tok, err := c.next()
+	tok, err := c.next(expected...)
 	if err != nil {
 		return Token{}, err
 	}
 	c.peeked = &tok
 	return tok, nil
 }
+
+// expect consumes the next token, requiring its type to be one of types. It is
+// the copy statement's counterpart of [parser.expect]: every place the COPY
+// grammar requires a particular token goes through it rather than inlining the
+// type check, so the expectation reported on failure is the one that state
+// actually had.
+func (c *copyParser) expect(types ...TokenType) (Token, error) {
+	tok, err := c.next(types...)
+	if err != nil {
+		return Token{}, err
+	}
+	if !slices.Contains(types, tok.Type) {
+		return Token{}, UnexpectedTokenError{Expected: types, Actual: tok}
+	}
+	return tok, nil
+}
+
+// expectKeyword consumes the next token, requiring an identifier whose spelling
+// is one of kw, compared without regard to case as COBOL reserved words are.
+func (c *copyParser) expectKeyword(kw ...string) (Token, error) {
+	tok, err := c.expect(TokenIdentifier)
+	if err != nil {
+		return Token{}, err
+	}
+	if !keywordIs(tok, kw...) {
+		return Token{}, UnexpectedKeywordError{Expected: kw, Actual: tok}
+	}
+	return tok, nil
+}
+
+// expectPeriod consumes the separator period terminating the COPY statement.
+func (c *copyParser) expectPeriod() (Token, error) {
+	tok, err := c.expect(TokenSymbol)
+	if err != nil {
+		return Token{}, err
+	}
+	if !isPeriod(tok) {
+		return Token{}, UnexpectedTokenError{Expected: []TokenType{TokenSymbol}, Actual: tok}
+	}
+	return tok, nil
+}
+
+// copyNameTokens are the token types a text-name or a library-name may be: a
+// COBOL word, or an alphanumeric literal for a name a COBOL word cannot spell.
+var copyNameTokens = []TokenType{TokenIdentifier, TokenString}
+
+// copyOperandTokens are the token types a REPLACING operand may be.
+var copyOperandTokens = []TokenType{TokenPseudoText, TokenIdentifier, TokenString, TokenNumber}
 
 // copyAction is one state of the COPY statement's action loop: it reads some
 // tokens, records what it read on st, and returns the next state, or nil to
@@ -310,59 +372,47 @@ func parseCopyStatement(c *copyParser, pos Pos) (*copyStatement, error) {
 // alphanumeric literal for a name a COBOL word cannot spell (a lower-case or
 // dotted filename, most often).
 func parseCopyName(c *copyParser, st *copyStatement) (copyAction, error) {
-	tok, err := c.next()
+	tok, err := c.expect(copyNameTokens...)
 	if err != nil {
 		return nil, err
 	}
-	name, ok := copyTextName(tok)
-	if !ok {
-		return nil, UnexpectedTokenError{
-			Expected: []TokenType{TokenIdentifier, TokenString},
-			Actual:   tok,
-		}
-	}
-	st.Name = name
+	st.Name = copyTextName(tok)
 	return parseCopyLibrary, nil
 }
 
-// parseCopyLibrary reads the optional OF/IN library-name phrase.
+// parseCopyLibrary reads the optional OF/IN library-name phrase. What may stand
+// here instead is REPLACING or the terminating period, so an exhausted stream
+// reports both a word and a symbol as acceptable.
 func parseCopyLibrary(c *copyParser, st *copyStatement) (copyAction, error) {
-	tok, err := c.peek()
+	tok, err := c.peek(TokenIdentifier, TokenSymbol)
 	if err != nil {
 		return nil, err
 	}
 	if !keywordIs(tok, "OF", "IN") {
 		return parseCopyReplacing, nil
 	}
-	if _, err := c.next(); err != nil {
+	if _, err := c.expectKeyword("OF", "IN"); err != nil {
 		return nil, err
 	}
-	name, err := c.next()
+	name, err := c.expect(copyNameTokens...)
 	if err != nil {
 		return nil, err
 	}
-	library, ok := copyTextName(name)
-	if !ok {
-		return nil, UnexpectedTokenError{
-			Expected: []TokenType{TokenIdentifier, TokenString},
-			Actual:   name,
-		}
-	}
-	st.Library = library
+	st.Library = copyTextName(name)
 	return parseCopyReplacing, nil
 }
 
 // parseCopyReplacing reads the optional REPLACING keyword, dispatching to the
 // operand pairs when it is there and to the terminating period when it is not.
 func parseCopyReplacing(c *copyParser, st *copyStatement) (copyAction, error) {
-	tok, err := c.peek()
+	tok, err := c.peek(TokenIdentifier, TokenSymbol)
 	if err != nil {
 		return nil, err
 	}
 	if !keywordIs(tok, "REPLACING") {
 		return parseCopyEnd, nil
 	}
-	if _, err := c.next(); err != nil {
+	if _, err := c.expectKeyword("REPLACING"); err != nil {
 		return nil, err
 	}
 	return parseCopyReplacementFrom, nil
@@ -370,29 +420,18 @@ func parseCopyReplacing(c *copyParser, st *copyStatement) (copyAction, error) {
 
 // parseCopyReplacementFrom reads the operand a replacement matches on.
 func parseCopyReplacementFrom(c *copyParser, st *copyStatement) (copyAction, error) {
-	tok, err := c.next()
+	tok, err := c.expect(copyOperandTokens...)
 	if err != nil {
 		return nil, err
 	}
-	from, ok := copyOperandText(tok)
-	if !ok {
-		return nil, UnexpectedTokenError{
-			Expected: []TokenType{TokenPseudoText, TokenIdentifier, TokenString, TokenNumber},
-			Actual:   tok,
-		}
-	}
-	st.Replacing = append(st.Replacing, copyReplacement{From: from})
+	st.Replacing = append(st.Replacing, copyReplacement{From: copyOperandText(tok)})
 	return parseCopyReplacementBy, nil
 }
 
 // parseCopyReplacementBy reads the BY separating a replacement's two operands.
 func parseCopyReplacementBy(c *copyParser, st *copyStatement) (copyAction, error) {
-	tok, err := c.next()
-	if err != nil {
+	if _, err := c.expectKeyword("BY"); err != nil {
 		return nil, err
-	}
-	if !keywordIs(tok, "BY") {
-		return nil, UnexpectedKeywordError{Expected: []string{"BY"}, Actual: tok}
 	}
 	return parseCopyReplacementTo, nil
 }
@@ -403,24 +442,17 @@ func parseCopyReplacementBy(c *copyParser, st *copyStatement) (copyAction, error
 // ends it is a token that cannot begin an operand — in practice the terminating
 // period.
 func parseCopyReplacementTo(c *copyParser, st *copyStatement) (copyAction, error) {
-	tok, err := c.next()
+	tok, err := c.expect(copyOperandTokens...)
 	if err != nil {
 		return nil, err
 	}
-	to, ok := copyOperandText(tok)
-	if !ok {
-		return nil, UnexpectedTokenError{
-			Expected: []TokenType{TokenPseudoText, TokenIdentifier, TokenString, TokenNumber},
-			Actual:   tok,
-		}
-	}
-	st.Replacing[len(st.Replacing)-1].To = to
+	st.Replacing[len(st.Replacing)-1].To = copyOperandText(tok)
 
-	next, err := c.peek()
+	next, err := c.peek(append(copyOperandTokens, TokenSymbol)...)
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := copyOperandText(next); ok {
+	if slices.Contains(copyOperandTokens, next.Type) {
 		return parseCopyReplacementFrom, nil
 	}
 	return parseCopyEnd, nil
@@ -430,44 +462,30 @@ func parseCopyReplacementTo(c *copyParser, st *copyStatement) (copyAction, error
 // period belongs to the statement and is not passed on: the library text
 // logically replaces the whole COPY statement, the terminating period included,
 // so a copybook supplies its own sentence and entry terminators.
-func parseCopyEnd(c *copyParser, st *copyStatement) (copyAction, error) {
-	tok, err := c.next()
-	if err != nil {
+func parseCopyEnd(c *copyParser, _ *copyStatement) (copyAction, error) {
+	if _, err := c.expectPeriod(); err != nil {
 		return nil, err
-	}
-	if tok.Type != TokenSymbol || string(tok.Value) != "." {
-		return nil, UnexpectedTokenError{Expected: []TokenType{TokenSymbol}, Actual: tok}
 	}
 	return nil, nil
 }
 
 // copyTextName extracts the name a text-name or library-name token carries: a
 // COBOL word as written, or the content of an alphanumeric literal with its
-// delimiters removed. It reports false for any other token.
-func copyTextName(tok Token) (string, bool) {
-	switch tok.Type {
-	case TokenIdentifier:
-		return string(tok.Value), true
-	case TokenString:
-		return trimLiteralDelimiters(string(tok.Value)), true
-	default:
-		return "", false
+// delimiters removed. The token's type is already one of [copyNameTokens], since
+// every caller reaches it through [copyParser.expect].
+func copyTextName(tok Token) string {
+	if tok.Type == TokenString {
+		return trimLiteralDelimiters(string(tok.Value))
 	}
+	return string(tok.Value)
 }
 
 // copyOperandText extracts the text a REPLACING operand contributes. A
 // pseudo-text operand contributes its normalized content; a word, literal or
 // number contributes its lexeme, delimiters included, since a literal operand
 // matches the literal as it is written in the copybook rather than its value.
-func copyOperandText(tok Token) (string, bool) {
-	switch tok.Type {
-	case TokenPseudoText:
-		return string(tok.Value), true
-	case TokenIdentifier, TokenString, TokenNumber:
-		return string(tok.Value), true
-	default:
-		return "", false
-	}
+func copyOperandText(tok Token) string {
+	return string(tok.Value)
 }
 
 // trimLiteralDelimiters removes the matching quotation marks around an
