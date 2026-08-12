@@ -109,6 +109,38 @@ A rejected field writes **nothing**. Validate first, build the whole field, then
 write it, so a failure cannot leave a half-field behind and desynchronize the
 record.
 
+## Packed decimal: COMP-3 and COMP-6 are separate bodies on purpose
+
+`COMP-6` (GnuCOBOL, Micro Focus) is packed decimal with **no sign nibble**, so
+`comp6Width` is `ceil(digits / 2)` against `packedWidth`'s `ceil((digits+1)/2)`
+and the pad nibble lands on the **opposite parity** — odd digit counts, not
+even. `readComp6Digits`/`writeComp6` are their own bodies rather than
+`readPackedDigits`/`writePacked` with a flag: the digits run to the end of the
+field, there is no sign to return or to emit, and the two differences interact.
+
+Three consequences to preserve:
+
+- The `Comp6` accessors take **no `Signedness`**, on either side. The encoding
+  has nowhere to record one, so it is not a value to declare — this is the one
+  numeric family where the argument's absence is the point. A negative value is
+  a `PackedRangeError{Signedness: Unsigned}` on write.
+- **No nibble may be `A`–`F`**, including the low nibble of the last byte. None
+  of `COMP-3`'s sign alphabet is accepted, which is what makes a `COMP-3` field
+  read at a `COMP-6` offset a `PackedDigitError` rather than a wrong number.
+- The errors are the packed ones (`PackedDigitCountError`, `PackedPadError`,
+  `PackedDigitError`, `PackedRangeError`) reused, not a parallel set. Only the
+  widths and the parity differ.
+
+The two widths **coincide at every odd digit count** — `packedWidth(5)` and
+`comp6Width(5)` are both 3 — and differ by a byte only at even ones. So a
+mis-declared usage desynchronizes the record half the time and is otherwise
+invisible except through the nibbles. The **"no `A`–`F` anywhere" check is what
+guarantees it is caught** — a COMP-3 sign nibble always lands in a digit
+position — while the pad check only fires when the leading digit happens to be
+non-zero. Both stay: the pad check is the cheap offset signal, the digit check
+is the guarantee. `TestPackedAndComp6Widths` pins the width relationship; do
+not "simplify" either width formula against the other.
+
 ## Binary items: two families, one axis each
 
 Binary (COMP, COMP-4, BINARY, COMP-5) has two forks and they are **not** the

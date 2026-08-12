@@ -926,6 +926,16 @@ const (
 // does not depend on scale.
 func packedWidth(digits int) int { return (digits + 2) / 2 }
 
+// comp6Width reports the byte width of a COMP-6 field holding digits digits:
+// ceil(digits / 2), one nibble per digit and nothing else, rounded up to a
+// whole byte.
+//
+// It is deliberately its own function rather than packedWidth with an
+// adjustment, because COMP-6 carries no sign nibble at all: PIC 9(4) COMP-6 is
+// two bytes where PIC 9(4) COMP-3 is three, and reading one as the other
+// desynchronizes the record. See codec/SPEC.md, "Storage Widths".
+func comp6Width(digits int) int { return (digits + 1) / 2 }
+
 // packedSignIsNegative reports whether a sign nibble means the value is
 // negative, rejecting the nibbles 0-9 that mean nothing at all.
 //

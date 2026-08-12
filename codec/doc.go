@@ -42,8 +42,8 @@
 // # Scope of this package as it stands
 //
 // [Reader] and [Writer] currently cover alphanumeric fields, raw byte fields,
-// zoned decimal (USAGE DISPLAY), packed decimal (COMP-3), binary (COMP, COMP-4,
-// BINARY, COMP-5) and floating point (COMP-1, COMP-2).
+// zoned decimal (USAGE DISPLAY), packed decimal (COMP-3 and COMP-6), binary
+// (COMP, COMP-4, BINARY, COMP-5) and floating point (COMP-1, COMP-2).
 //
 // USAGE is a property of each item and not a mode of the file, so those
 // families coexist inside one record: a record holding a DISPLAY field, a
@@ -98,6 +98,27 @@
 // four conventions are mutually detectable at that byte, the rejection is what
 // turns most wrong-convention mistakes into a loud failure at the first
 // negative value rather than into silently flipped signs.
+//
+// # Packed decimal: COMP-3 and COMP-6 are not one family
+//
+// COMP-3 spends a nibble per digit plus a trailing sign nibble, so a field is
+// ceil((digits+1)/2) bytes wide and its pad nibble appears when the digit count
+// is even. COMP-6, the GnuCOBOL and Micro Focus extension, stores no sign at
+// all: ceil(digits/2) bytes, every nibble a digit, and the pad nibble on the
+// opposite parity. PIC 9(4) COMP-3 is three bytes and PIC 9(4) COMP-6 is two.
+//
+// The two widths coincide at every odd digit count and differ only at even
+// ones, so a copybook that has the usage wrong shifts the record half the time
+// and is otherwise caught only by the nibbles — which is what the pad check and
+// the digit check are for.
+//
+// They are therefore separate accessors — [Reader.ReadComp6Int32] and its
+// family beside [Reader.ReadPackedInt32] and its — and not one accessor with a
+// flag. The COMP-6 writers take no [Signedness] because the encoding has
+// nowhere to put one, and a negative value is a [PackedRangeError] rather than
+// something stored as its magnitude. On the reading side no nibble of a COMP-6
+// field may be A-F, which is what makes a COMP-3 field read at a COMP-6 offset
+// fail loudly instead of yielding a plausible number.
 //
 // # Binary items: width, byte order and range
 //

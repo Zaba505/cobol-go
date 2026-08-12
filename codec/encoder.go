@@ -344,6 +344,95 @@ func (w *Writer) writePacked(text string, negative bool, digits, max int, s Sign
 	return w.write(field)
 }
 
+// WriteComp6Int32 writes v as a COMP-6 field of digits digits, exactly
+// ceil(digits/2) bytes wide.
+//
+// COMP-6 is packed decimal with no sign nibble at all, so it is narrower than
+// the COMP-3 of the same PICTURE and it takes no [Signedness]: there is nowhere
+// in the field to record one. See [Reader.ReadComp6Int32].
+//
+// A negative v is a [PackedRangeError] rather than something encodable, for the
+// reason a negative value written into an [Unsigned] packed field is: the
+// encoding cannot express it, and writing its absolute value would produce a
+// record that no longer says what the caller asked it to.
+//
+// digits must be between 1 and 9; see [Reader.ReadPackedInt32] for why the
+// bound belongs to the accessor rather than to the field. v is the unscaled
+// integer, since V occupies no storage.
+func (w *Writer) WriteComp6Int32(v int32, digits int) error {
+	return w.writeComp6Int(int64(v), digits, maxPackedInt32Digits)
+}
+
+// WriteComp6Int64 writes v as a COMP-6 field of digits digits, exactly
+// ceil(digits/2) bytes wide. digits must be between 1 and 18; the 19-to-31
+// digit range is written with [Writer.WriteComp6Big]. A negative v is a
+// [PackedRangeError], as it is on [Writer.WriteComp6Int32].
+func (w *Writer) WriteComp6Int64(v int64, digits int) error {
+	return w.writeComp6Int(v, digits, maxPackedInt64Digits)
+}
+
+// WriteComp6Big writes v as a COMP-6 field of digits digits, exactly
+// ceil(digits/2) bytes wide. digits must be between 1 and 31. A negative v is a
+// [PackedRangeError], as it is on [Writer.WriteComp6Int32].
+//
+// A nil v is [ErrNilValue] rather than a zero, for the reason it is on
+// [Writer.WritePackedBig]: an absent number and the number zero are different
+// things.
+func (w *Writer) WriteComp6Big(v *big.Int, digits int) error {
+	if v == nil {
+		return &OffsetError{Offset: w.off, Err: ErrNilValue}
+	}
+	return w.writeComp6(v.String(), v.Sign() < 0, digits, maxPackedDigits)
+}
+
+// writeComp6Int is the shared body of the two integer COMP-6 writers, whose
+// only difference is the digit count they accept.
+func (w *Writer) writeComp6Int(v int64, digits, max int) error {
+	// Formatted rather than negated, for the reason writePackedInt does it:
+	// the most negative int64 has no negation, and it is rejected below like
+	// any other negative value rather than overflowing on its way out.
+	return w.writeComp6(strconv.FormatInt(v, 10), v < 0, digits, max)
+}
+
+// writeComp6 builds and writes one COMP-6 field from the decimal spelling of a
+// value.
+//
+// The whole field is validated and built before a byte of it is written, so a
+// rejected value writes nothing and cannot leave a half-field behind to
+// desynchronize the record.
+func (w *Writer) writeComp6(text string, negative bool, digits, max int) error {
+	if digits < 1 || digits > max {
+		return &OffsetError{
+			Offset: w.off,
+			Err:    PackedDigitCountError{Digits: digits, Max: max},
+		}
+	}
+	magnitude := strings.TrimPrefix(text, "-")
+	if len(magnitude) > digits || negative {
+		return &OffsetError{
+			Offset: w.off,
+			Err:    PackedRangeError{Value: text, Digits: digits, Signedness: Unsigned},
+		}
+	}
+
+	// Nibbles high first. Everything ahead of the digits stays zero, which
+	// covers both the high-order zeros the value does not fill and the pad
+	// nibble an odd digit count leaves over — the opposite parity from
+	// COMP-3, since there is no sign nibble making the count up.
+	width := comp6Width(digits)
+	nibbles := make([]byte, 2*width)
+	first := len(nibbles) - len(magnitude)
+	for i := 0; i < len(magnitude); i++ {
+		nibbles[first+i] = magnitude[i] - '0'
+	}
+
+	field := make([]byte, width)
+	for i := range field {
+		field[i] = nibbles[2*i]<<4 | nibbles[2*i+1]
+	}
+	return w.write(field)
+}
+
 // WriteBinaryInt16 writes v as a binary (COMP, COMP-4, BINARY) field of digits
 // digits, exactly 2 bytes wide.
 //

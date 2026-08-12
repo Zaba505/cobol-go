@@ -510,9 +510,52 @@ pad nibble, then `digits` digit nibbles, then one sign nibble.
 A writer **MUST** emit `C`, `D`, or `F`. A reader **MUST** reject `0`–`9`; the
 lenient set above mirrors z/Architecture decimal-instruction behaviour.
 
+### `COMP-6`
+
 `COMP-6` (GnuCOBOL, Micro Focus) is packed decimal with **no sign nibble at all**:
 `ceil(digits / 2)` bytes, always unsigned, pad nibble when `digits` is odd. It is
 a different encoding and **MUST NOT** be decoded as `COMP-3`.
+
+Reading the nibbles left to right: an optional pad nibble, then `digits` digit
+nibbles, and nothing after them.
+
+```
+  PIC 9(4) COMP-6, value 1234      →  1  2 | 3  4
+                                      ─────┼─────
+                                       12  |  34
+
+  PIC 9(3) COMP-6, value 123       →  0  1 | 2  3
+                                      ─────┼─────
+                                       01  |  23
+                                       ↑ pad nibble
+```
+
+- **The pad nibble exists when `digits` is odd** — the opposite parity from
+  `COMP-3`, because no sign nibble makes the count up. It is the **high** nibble
+  of the **first** byte, in the same place `COMP-3` puts its own.
+- A writer **MUST** set the pad nibble to `0`. A reader **SHOULD** validate that
+  it is `0` and report a typed error otherwise, exactly as for `COMP-3` and for
+  the same reason: a non-zero pad is the cheapest available signal that the field
+  offset is wrong.
+- Every nibble of the digit run **MUST** be `0`–`9`. `A`–`F` anywhere in the
+  field is a typed error, so none of `COMP-3`'s sign alphabet — `C`, `D`, `F`,
+  and the lenient `A`, `B`, `E` — is accepted in the low nibble of the last byte.
+  That is what turns a `COMP-3` field read at a `COMP-6` offset into a loud
+  failure rather than a wrong number.
+- A negative value is not encodable and **MUST** be rejected by a writer rather
+  than stored as its magnitude.
+
+The two widths **coincide at every odd digit count** and differ by a byte at
+every even one: `ceil((d+1)/2)` and `ceil(d/2)` are both 3 for `d = 5`. So a
+copybook that has the usage wrong shifts the record only half the time, and at
+an odd digit count nothing but the nibbles can catch it.
+
+They do catch it, and the **digit check** is what guarantees that. A
+`PIC S9(5) COMP-3` field read as `PIC 9(5) COMP-6` puts its sign nibble — always
+one of `A`–`F` — where a digit belongs, so the digit check fires on every such
+field. The pad check fires as well whenever the value's leading digit is
+non-zero, but it is not what the guarantee rests on: `01 23 4C` presents a pad
+nibble of `0` and is rejected on the `C` alone.
 
 ### Charset invariance — and why that is a trap
 
@@ -912,11 +955,17 @@ Concrete bytes for the encodings above, intended as shared fixtures for #73–#7
 | `PIC S9(4) COMP-3` | +1234 | `01 23 4C` |
 | `PIC S9(3)V99 COMP-3` | −123.45 | `12 34 5D` (identical to `S9(5)`; scale is not stored) |
 | `PIC 9(4) COMP-6` | 1234 | `12 34` |
+| `PIC 9(3) COMP-6` | 123 | `01 23` (leading pad nibble; odd digit count) |
 
 Negative tests: `12 34 5A` decodes as +12345 under the lenient rule; `12 34 55`
 is an error (sign nibble `5`); `1A 34 5C` is an error (digit nibble `A`);
 `F2 34 5C` is an error under a strict reader (non-zero pad nibble for
 `PIC S9(4)`).
+
+`COMP-6` negative tests: `12 3C` is an error for `PIC 9(4) COMP-6` (digit nibble
+`C`; there is no sign nibble to accept it); `F1 23` is an error for
+`PIC 9(3) COMP-6` (non-zero pad nibble); and −1 cannot be written into any
+`COMP-6` field.
 
 ### A.5 Binary
 
@@ -1001,6 +1050,7 @@ Two collisions worth naming so they are not mistaken for errors:
 | [Charset as a First-Class Axis](#charset-as-a-first-class-axis), [Zoned Sign Conventions](#zoned-sign-conventions) | #77 `codec` |
 | [Zoned Decimal](#zoned-decimal-usage-display) | #73 `codec` |
 | [Packed Decimal](#packed-decimal-comp-3--packed-decimal) | #74 `codec` |
+| [`COMP-6`](#comp-6) | #99 `codec` |
 | [Binary](#binary-comp--comp-4--binary--comp-5) | #75 `codec` |
 | [Floating Point](#floating-point-comp-1--comp-2) | #76 `codec` |
 | Record tree, offsets, `OCCURS DEPENDING ON` | #78, #79, #80 `copybook` |
