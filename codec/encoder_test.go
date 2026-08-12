@@ -2664,25 +2664,66 @@ func TestComp6IsNotComp3(t *testing.T) {
 		require.Equal(t, []byte{0x01, 0x23, 0x4F}, comp3.Bytes())
 	})
 
-	t.Run("a COMP-3 sign nibble lands in a digit position", func(t *testing.T) {
+	t.Run("the same digit count at an odd width is caught by the nibbles", func(t *testing.T) {
 		t.Parallel()
 
-		// PIC S9(5) COMP-3 holding +12345 is 12 34 5C, three bytes. A
-		// PIC 9(6) COMP-6 field is three bytes too, so a copybook that has
-		// the usage wrong reads these bytes at the same width — and the
-		// sign nibble lands in a digit position, where every one of C, D, F
-		// and the lenient A, B, E is out of range.
-		for _, sign := range []byte{0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F} {
-			src := []byte{0x12, 0x34, 0x50 | sign}
-			r, err := NewReader(bytes.NewReader(src), GnuCOBOLASCII())
+		// This is the collision the width formulas leave open: packedWidth(5)
+		// and comp6Width(5) are both 3, so a copybook that has the usage
+		// wrong at an odd digit count reads the same bytes at the same width
+		// and the record does not shift. What catches it is the nibbles.
+		t.Run("a COMP-3 sign nibble lands in a digit position", func(t *testing.T) {
+			t.Parallel()
+
+			// PIC S9(5) COMP-3 holding +1234 is 01 23 4C. Its pad nibble is
+			// 0 — the leading digit is zero — so the pad check passes and the
+			// digit check on C is the whole of the guarantee.
+			for _, sign := range []byte{0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F} {
+				src := []byte{0x01, 0x23, 0x40 | sign}
+				r, err := NewReader(bytes.NewReader(src), GnuCOBOLASCII())
+				require.NoError(t, err)
+
+				_, err = r.ReadComp6Int64(5)
+
+				var digitErr PackedDigitError
+				require.ErrorAs(t, err, &digitErr)
+				require.Equal(t, sign, digitErr.Nibble)
+			}
+		})
+
+		t.Run("a non-zero leading digit trips the pad check first", func(t *testing.T) {
+			t.Parallel()
+
+			// PIC S9(5) COMP-3 holding +12345 is 12 34 5C. Here the leading
+			// digit is non-zero, so the pad check fires before the reader
+			// ever reaches the sign nibble.
+			r, err := NewReader(bytes.NewReader([]byte{0x12, 0x34, 0x5C}), GnuCOBOLASCII())
 			require.NoError(t, err)
 
-			_, err = r.ReadComp6Int64(6)
+			_, err = r.ReadComp6Int64(5)
 
-			var digitErr PackedDigitError
-			require.ErrorAs(t, err, &digitErr)
-			require.Equal(t, sign, digitErr.Nibble)
-		}
+			var padErr PackedPadError
+			require.ErrorAs(t, err, &padErr)
+			require.Equal(t, byte(0x01), padErr.Nibble)
+		})
+
+		t.Run("an even digit count sharing a width fails on the sign nibble", func(t *testing.T) {
+			t.Parallel()
+
+			// PIC S9(5) COMP-3 read as PIC 9(6) COMP-6: three bytes either
+			// way, no pad nibble at an even count, so every nibble is a digit
+			// position and the sign nibble is out of range.
+			for _, sign := range []byte{0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F} {
+				src := []byte{0x12, 0x34, 0x50 | sign}
+				r, err := NewReader(bytes.NewReader(src), GnuCOBOLASCII())
+				require.NoError(t, err)
+
+				_, err = r.ReadComp6Int64(6)
+
+				var digitErr PackedDigitError
+				require.ErrorAs(t, err, &digitErr)
+				require.Equal(t, sign, digitErr.Nibble)
+			}
+		})
 	})
 
 	t.Run("a COMP-3 field read at the COMP-6 width leaves a byte behind", func(t *testing.T) {

@@ -134,10 +134,12 @@ Three consequences to preserve:
 The two widths **coincide at every odd digit count** — `packedWidth(5)` and
 `comp6Width(5)` are both 3 — and differ by a byte only at even ones. So a
 mis-declared usage desynchronizes the record half the time and is otherwise
-invisible except through the nibbles, which is exactly why the pad check and
-the "no `A`–`F` anywhere" check both have to stay. `TestPackedAndComp6Widths`
-pins that relationship; do not "simplify" either width formula against the
-other.
+invisible except through the nibbles. The **"no `A`–`F` anywhere" check is what
+guarantees it is caught** — a COMP-3 sign nibble always lands in a digit
+position — while the pad check only fires when the leading digit happens to be
+non-zero. Both stay: the pad check is the cheap offset signal, the digit check
+is the guarantee. `TestPackedAndComp6Widths` pins the width relationship; do
+not "simplify" either width formula against the other.
 
 ## Binary items: two families, one axis each
 

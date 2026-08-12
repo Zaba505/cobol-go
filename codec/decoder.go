@@ -419,11 +419,12 @@ func (r *Reader) readPackedDigits(digits, max int) ([]byte, bool, error) {
 //
 // COMP-6 is the GnuCOBOL and Micro Focus packed decimal with no sign nibble at
 // all: every nibble of the field is a digit nibble, and the item is always
-// unsigned. That makes it a narrower field than the COMP-3 of the same PICTURE
-// — PIC 9(4) COMP-6 is two bytes where PIC 9(4) COMP-3 is three — so the two
-// are not interchangeable and a COMP-6 field read with
-// [Reader.ReadPackedInt32] desynchronizes the record. See codec/SPEC.md,
-// "Packed Decimal".
+// unsigned. The two encodings are not interchangeable, and they fail
+// differently depending on the digit count: at an even count COMP-6 is a byte
+// narrower — PIC 9(4) COMP-6 is two bytes where PIC 9(4) COMP-3 is three — so
+// reading one as the other shifts every later field of the record, while at an
+// odd count the widths coincide and what catches it is the nibbles, a COMP-3
+// sign nibble landing where a digit belongs. See codec/SPEC.md, "COMP-6".
 //
 // There is no [Signedness] to declare, on this side or the writing one, because
 // the encoding has nowhere to put a sign. A field whose PICTURE carries S is

@@ -1711,20 +1711,57 @@ func TestReaderReadComp6Errors(t *testing.T) {
 	t.Run("pad nibble is not zero", func(t *testing.T) {
 		t.Parallel()
 
-		// The cheapest available signal that the field offset is wrong,
-		// validated here exactly as it is for COMP-3.
-		r, err := NewReader(bytes.NewReader([]byte{0xF1, 0x23}), GnuCOBOLASCII())
-		require.NoError(t, err)
+		testCases := []struct {
+			name   string
+			src    []byte
+			digits int
+			want   byte
+		}{
+			{
+				// The cheapest available signal that the field offset is
+				// wrong, validated here exactly as it is for COMP-3.
+				name:   "pad nibble is not even a digit",
+				src:    []byte{0xF1, 0x23},
+				digits: 3,
+				want:   0x0F,
+			},
+			{
+				// The case a mis-offset field actually produces, and the
+				// one that would otherwise decode as a plausible number:
+				// 91 23 would read as 123 if the pad check were relaxed to
+				// the digit check's `> 9`. The check is `!= 0` for exactly
+				// this reason.
+				name:   "pad nibble is a legal digit",
+				src:    []byte{0x91, 0x23},
+				digits: 3,
+				want:   0x09,
+			},
+			{
+				name:   "single digit with a digit-valued pad nibble",
+				src:    []byte{0x51},
+				digits: 1,
+				want:   0x05,
+			},
+		}
 
-		_, err = r.ReadComp6Int64(3)
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
 
-		var padErr PackedPadError
-		require.ErrorAs(t, err, &padErr)
-		require.Equal(t, byte(0x0F), padErr.Nibble)
+				r, err := NewReader(bytes.NewReader(tc.src), GnuCOBOLASCII())
+				require.NoError(t, err)
 
-		var offErr *OffsetError
-		require.ErrorAs(t, err, &offErr)
-		require.Zero(t, offErr.Offset)
+				_, err = r.ReadComp6Int64(tc.digits)
+
+				var padErr PackedPadError
+				require.ErrorAs(t, err, &padErr)
+				require.Equal(t, tc.want, padErr.Nibble)
+
+				var offErr *OffsetError
+				require.ErrorAs(t, err, &offErr)
+				require.Zero(t, offErr.Offset)
+			})
+		}
 	})
 
 	t.Run("an even digit count has no pad nibble to validate", func(t *testing.T) {

@@ -548,10 +548,14 @@ nibbles, and nothing after them.
 The two widths **coincide at every odd digit count** and differ by a byte at
 every even one: `ceil((d+1)/2)` and `ceil(d/2)` are both 3 for `d = 5`. So a
 copybook that has the usage wrong shifts the record only half the time, and at
-an odd digit count nothing but the nibbles can catch it. The pad nibble's
-opposite parity is what makes them catch it: a `PIC S9(5) COMP-3` field read as
-`PIC 9(5) COMP-6` presents its leading digit where the pad belongs and its sign
-nibble where a digit belongs, so both checks fire.
+an odd digit count nothing but the nibbles can catch it.
+
+They do catch it, and the **digit check** is what guarantees that. A
+`PIC S9(5) COMP-3` field read as `PIC 9(5) COMP-6` puts its sign nibble — always
+one of `A`–`F` — where a digit belongs, so the digit check fires on every such
+field. The pad check fires as well whenever the value's leading digit is
+non-zero, but it is not what the guarantee rests on: `01 23 4C` presents a pad
+nibble of `0` and is rejected on the `C` alone.
 
 ### Charset invariance — and why that is a trap
 
