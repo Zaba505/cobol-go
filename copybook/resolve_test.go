@@ -285,6 +285,48 @@ func TestLayoutResolve(t *testing.T) {
 			length: 9,
 		},
 		{
+			name: "a comp-6 controlling field carries no sign nibble",
+			src: `01 R.
+   05 N PIC 9(3) COMP-6.
+   05 A PIC X(4) OCCURS 1 TO 9 TIMES DEPENDING ON N.
+   05 TAIL PIC X.
+`,
+			// PIC 9(3) COMP-6 is two bytes: one pad nibble and three
+			// digit nibbles. The same bytes under COMP-3 would be a
+			// two-digit value with a sign nibble of 2, which is no
+			// sign at all — hence its own arm in readCount.
+			data: append([]byte{0x00, 0x02}, make([]byte, 32)...),
+			want: []span{
+				{name: "R", offset: 0, length: 11},
+				{name: "N", offset: 0, length: 2},
+				{
+					name: "A", offset: 2, length: 4, occurs: 2,
+					minOccurs: 1, maxOccurs: 9, dependsOn: "N",
+				},
+				{name: "TAIL", offset: 10, length: 1},
+			},
+			length: 11,
+		},
+		{
+			name: "an even comp-6 digit count fills its bytes exactly",
+			src: `01 R.
+   05 N PIC 9(4) COMP-6.
+   05 A PIC X(2) OCCURS 1 TO 9 TIMES DEPENDING ON N.
+`,
+			// PIC 9(4) COMP-6 is two bytes of four digit nibbles and
+			// no pad, where PIC 9(4) COMP-3 is three.
+			data: append([]byte{0x00, 0x03}, make([]byte, 32)...),
+			want: []span{
+				{name: "R", offset: 0, length: 8},
+				{name: "N", offset: 0, length: 2},
+				{
+					name: "A", offset: 2, length: 2, occurs: 3,
+					minOccurs: 1, maxOccurs: 9, dependsOn: "N",
+				},
+			},
+			length: 8,
+		},
+		{
 			name: "the fields of a resolved group table sit under every occurrence",
 			src: `01 R.
    05 N PIC 9(2).
@@ -641,6 +683,28 @@ func TestLayoutResolveErrors(t *testing.T) {
 			data:     append([]byte{0x00, 0x23}, make([]byte, 32)...),
 			target:   &DependingError{},
 			contains: "whose low nibble is no sign",
+		},
+		{
+			name: "a comp-6 pad nibble holding a digit is not a count",
+			src: `01 R.
+   05 N PIC 9(3) COMP-6.
+   05 A PIC X(3) OCCURS 1 TO 5 TIMES DEPENDING ON N.
+`,
+			data:     append([]byte{0x10, 0x02}, make([]byte, 32)...),
+			target:   &DependingError{},
+			contains: "whose high nibble pads a 3-digit value and is not zero",
+		},
+		{
+			name: "a comp-6 sign nibble is a digit position and must hold a digit",
+			src: `01 R.
+   05 N PIC 9(4) COMP-6.
+   05 A PIC X(3) OCCURS 1 TO 5 TIMES DEPENDING ON N.
+`,
+			// C is the positive sign nibble COMP-3 would accept
+			// here; under COMP-6 the last nibble is the last digit.
+			data:     append([]byte{0x00, 0x2C}, make([]byte, 32)...),
+			target:   &DependingError{},
+			contains: "whose low nibble is no digit",
 		},
 		{
 			name: "a binary controlling field is not read without a byte order",

@@ -246,6 +246,26 @@ func TestNewLayout(t *testing.T) {
 			wantLength: 18,
 		},
 		{
+			name: "comp-6 is one nibble per digit and no sign nibble",
+			src: `01 R.
+   05 A PIC 9(4) COMP-6.
+   05 B PIC 9(5) COMP-6.
+   05 C PIC 9(1) COMP-6.
+   05 D PIC 9(4) COMP-3.
+`,
+			dialect: IBMEnterprise(),
+			want: []span{
+				{name: "R", offset: 0, length: 9},
+				{name: "A", offset: 0, length: 2},
+				{name: "B", offset: 2, length: 3},
+				{name: "C", offset: 5, length: 1},
+				// The same 9(4) that COMP-6 spends two bytes
+				// on costs COMP-3 three, for the sign nibble.
+				{name: "D", offset: 6, length: 3},
+			},
+			wantLength: 9,
+		},
+		{
 			name: "v and p occupy no storage",
 			src: `01 R.
    05 A PIC S9(3)V99.

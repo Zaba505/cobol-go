@@ -285,6 +285,8 @@ func readCount(f *Field, control *Item, data []byte) (int, error) {
 		value, err = zonedValue(control.Field, data[control.Offset:end])
 	case UsagePackedDecimal, UsageComp3:
 		value, err = packedValue(data[control.Offset:end], control.Field.Picture.Digits)
+	case UsageComp6:
+		value, err = unsignedPackedValue(data[control.Offset:end], control.Field.Picture.Digits)
 	default:
 		return fail("controlling item %s is a USAGE %s item, whose value depends on the byte order of the file it came from: read it with the codec package and call ResolveCounts",
 			describe(control.Field), control.Field.Usage)
@@ -441,6 +443,41 @@ func packedValue(b []byte, digits int) (int64, error) {
 		return 0, fmt.Errorf("byte %d is %#02x, whose sign nibble is negative", len(b)-1, last)
 	case sign < 0xA:
 		return 0, fmt.Errorf("byte %d is %#02x, whose low nibble is no sign", len(b)-1, last)
+	}
+	return value, nil
+}
+
+// unsignedPackedValue reads the integer value of a COMP-6 item of the given digit
+// count: two digits per byte, most significant first, and no sign nibble at all
+// (codec/SPEC.md, "Storage Widths"). An odd digit count leaves one pad nibble at
+// the front, checked for zero for the same reason packedValue checks its own.
+//
+// It is a separate function rather than a flag on packedValue because the two
+// disagree about the last nibble of the field, and each reads the other's bytes
+// as a plausible wrong number: packedValue takes a COMP-6 item's final digit for
+// a sign, so a valid record either errors or resolves to a count short by a
+// digit. That is why readCount gives COMP-6 its own arm and does not join it to
+// the PACKED-DECIMAL / COMP-3 one.
+func unsignedPackedValue(b []byte, digits int) (int64, error) {
+	if len(b) == 0 {
+		return 0, fmt.Errorf("holds no digit positions")
+	}
+
+	pad := 2*len(b) - digits
+	if pad < 0 || pad > 1 {
+		return 0, fmt.Errorf("holds %d bytes, which is no %d-digit unsigned packed value", len(b), digits)
+	}
+	if pad == 1 && b[0]>>4 != 0 {
+		return 0, fmt.Errorf("byte 0 is %#02x, whose high nibble pads a %d-digit value and is not zero", b[0], digits)
+	}
+
+	var value int64
+	for i := pad; i < 2*len(b); i++ {
+		d := nibbleAt(b, i)
+		if d > 9 {
+			return 0, fmt.Errorf("byte %d is %#02x, whose %s nibble is no digit", i/2, b[i/2], nibbleHalf(i))
+		}
+		value = value*10 + int64(d)
 	}
 	return value, nil
 }

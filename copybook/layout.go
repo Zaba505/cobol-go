@@ -729,6 +729,16 @@ func (l *layouter) width(f *Field) (int, error) {
 		}
 		// One nibble per digit plus the sign nibble, rounded up to a byte.
 		return (digits + 2) / 2, nil
+	case UsageComp6:
+		digits, err := digitsOf(f)
+		if err != nil {
+			return 0, err
+		}
+		// One nibble per digit, rounded up to a byte. COMP-6 carries no
+		// sign nibble at all (codec/SPEC.md, "Storage Widths"), so this
+		// is deliberately its own arm rather than folded in above: PIC
+		// 9(4) COMP-6 is two bytes where PIC 9(4) COMP-3 is three.
+		return (digits + 1) / 2, nil
 	case UsageBinary, UsageComp, UsageComp4, UsageComp5:
 		digits, err := digitsOf(f)
 		if err != nil {
