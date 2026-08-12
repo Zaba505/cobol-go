@@ -886,20 +886,15 @@ func TestBuildErrors(t *testing.T) {
 			message: "invalid level number 50 at line 1, column 1: valid levels are 01-49, 66, 77, and 88",
 		},
 		{
-			// Likewise the grammar admits no other usage-type, so this reports
-			// one added to the parser and not to this package.
+			// COMP-6 is the live case of a usage-type the grammar admits and
+			// this package does not map: the parser accepts the spelling so a
+			// copybook using it can be read, and Build refuses it here rather
+			// than inventing a width for it. Driving this through the real
+			// parser is what keeps the two halves of that boundary honest — if
+			// this package ever gains a COMP-6 member, this test fails.
 			name: "usage type this package does not know",
-			entries: func(*testing.T) []*cobol.DataDescriptionEntry {
-				return []*cobol.DataDescriptionEntry{
-					{
-						Pos:   at(1, 1),
-						Level: 77,
-						Name:  &cobol.Word{Pos: at(1, 4), Value: "ODD"},
-						Clauses: []cobol.DataClause{
-							&cobol.UsageClause{Pos: at(1, 8), Usage: "COMP-6"},
-						},
-					},
-				}
+			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
+				return parseFragment(t, "77 ODD COMP-6.\n")
 			},
 			target:  &UsageError{},
 			message: `item "ODD" at line 1, column 8: unknown USAGE "COMP-6"`,

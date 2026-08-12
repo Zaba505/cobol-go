@@ -3611,6 +3611,14 @@ func TestParserUsageComp6(t *testing.T) {
 			expected: entry(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 1, Column: 8}, Pos{Line: 1, Column: 17}),
 		},
 		{
+			// IS is optional, so USAGE with the usage-type straight after it is a
+			// third spelling rather than a variant of the second.
+			name:     "USAGE without IS in free format",
+			src:      "77 ODD PIC 9(4) USAGE COMP-6.\n",
+			format:   FreeFormat,
+			expected: entry(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 1, Column: 8}, Pos{Line: 1, Column: 17}),
+		},
+		{
 			// COBOL reserved words are case-insensitive and Usage is canonical
 			// upper case, so a lower-case copybook yields the same AST.
 			name:     "lower case spelling is canonicalized",
@@ -3644,6 +3652,66 @@ func TestParserUsageComp6(t *testing.T) {
 			require.Equal(t, tc.expected, f)
 		})
 	}
+
+	// The cases above are fragments, which is where a copybook usage-type is
+	// met in practice. parseDataEntries is shared with the DATA DIVISION
+	// sections, so this subtest is what shows that rather than assuming it —
+	// and it is the issue's own example, a level-05 item subordinate to an 01,
+	// in a whole program.
+	t.Run("subordinate item in WORKING-STORAGE", func(t *testing.T) {
+		t.Parallel()
+
+		src := "IDENTIFICATION DIVISION.\n" +
+			"PROGRAM-ID. ODDDEMO.\n" +
+			"DATA DIVISION.\n" +
+			"WORKING-STORAGE SECTION.\n" +
+			"01 ODD-RECORD.\n" +
+			"    05 ODD PIC 9(4) COMP-6.\n"
+
+		expected := &File{
+			Programs: []*Program{
+				{
+					Pos: Pos{Line: 1, Column: 1},
+					Divisions: []Division{
+						&IdentificationDivision{
+							Pos: Pos{Line: 1, Column: 1},
+							ProgramID: &ProgramID{
+								Pos:  Pos{Line: 2, Column: 1},
+								Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "ODDDEMO"},
+							},
+						},
+						&DataDivision{
+							Pos: Pos{Line: 3, Column: 1},
+							WorkingStorage: &DataSection{
+								Pos: Pos{Line: 4, Column: 1},
+								Entries: []*DataDescriptionEntry{
+									{
+										Pos:   Pos{Line: 5, Column: 1},
+										Level: 1,
+										Name:  &Word{Pos: Pos{Line: 5, Column: 4}, Value: "ODD-RECORD"},
+									},
+									{
+										Pos:   Pos{Line: 6, Column: 5},
+										Level: 5,
+										Name:  &Word{Pos: Pos{Line: 6, Column: 8}, Value: "ODD"},
+										Clauses: []DataClause{
+											&PictureClause{Pos: Pos{Line: 6, Column: 12}, Picture: "9(4)"},
+											&UsageClause{Pos: Pos{Line: 6, Column: 21}, Usage: "COMP-6"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		f, err := Parse(strings.NewReader(src))
+
+		require.NoError(t, err)
+		require.Equal(t, expected, f)
+	})
 }
 
 // TestParserFragmentErrors pins the two ends of the mode: a copybook is rejected

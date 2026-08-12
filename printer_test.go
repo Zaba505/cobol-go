@@ -1988,6 +1988,42 @@ func TestPrintFragment(t *testing.T) {
 	require.Equal(t, expected, buf.String())
 }
 
+// TestPrintUsageComp6 is the direct half for a dialect usage-type: an explicit
+// *File in, the exact expected text out. The printer emits "USAGE " + the
+// recorded usage-type rather than consulting a list of the ones it knows, so a
+// COMP-6 clause prints in the explicit form whichever form it was written in.
+// The round-trip half cannot show this — both spellings parse to one clause.
+func TestPrintUsageComp6(t *testing.T) {
+	t.Parallel()
+
+	f := &File{
+		Fragment: &Fragment{
+			Entries: []*DataDescriptionEntry{
+				{
+					Level: 1,
+					Name:  &Word{Value: "ODD-RECORD"},
+				},
+				{
+					Level: 5,
+					Name:  &Word{Value: "ODD"},
+					Clauses: []DataClause{
+						&PictureClause{Picture: "9(4)"},
+						&UsageClause{Usage: "COMP-6"},
+					},
+				},
+			},
+		},
+	}
+
+	const expected = `01 ODD-RECORD.
+    05 ODD PIC 9(4) USAGE COMP-6.
+`
+
+	var buf bytes.Buffer
+	require.NoError(t, Print(&buf, f))
+	require.Equal(t, expected, buf.String())
+}
+
 // TestPrintFragmentRoundTrip is the fragment's Parse -> Print -> Parse check for
 // the free-format source strings the fixture harness below covers in fixed format.
 func TestPrintFragmentRoundTrip(t *testing.T) {
@@ -2024,13 +2060,14 @@ func TestPrintFragmentRoundTrip(t *testing.T) {
 				"*> end of copybook\n",
 		},
 		{
-			// COMP-6 is written bare here and printed back in the explicit
-			// USAGE form, so the round trip is what proves the printer carries
-			// a dialect usage-type through rather than knowing a fixed list.
+			// The round trip erases the bare/explicit distinction at the first
+			// parse, so what this case shows is only that COMP-6 survives being
+			// printed and re-parsed — that the printer carries a usage-type it
+			// has no fixed list for. Which form it prints is pinned by the
+			// direct test, TestPrintUsageComp6.
 			name: "comp-6 usage",
 			src: "01 ODD-RECORD.\n" +
-				"   05 ODD PIC 9(4) COMP-6.\n" +
-				"   05 EVEN PIC 9(4) USAGE IS COMP-6.\n",
+				"   05 ODD PIC 9(4) COMP-6.\n",
 		},
 		{
 			name: "empty",

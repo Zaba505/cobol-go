@@ -1449,9 +1449,11 @@ func (*PictureClause) dataClause() {}
 // UsageClause is the USAGE clause (with or without the USAGE keyword). Pos is the
 // position of the clause; Usage is the canonical upper-case usage-type
 // ("DISPLAY", "BINARY", "PACKED-DECIMAL", "COMP", "COMP-1"…"COMP-6", "INDEX",
-// "POINTER"). The spelling is recorded as written; this package maps no usage
-// to a storage width, so a dialect extension such as "COMP-6" parses here and
-// is a separate question for a consumer that assigns it a representation.
+// "POINTER"). Only the case is normalized: no usage-type is folded to a synonym,
+// so "COMP" stays "COMP" rather than becoming "BINARY" and a dialect extension
+// such as "COMP-6" survives as "COMP-6". This package assigns no storage width
+// to any of them, so what a usage-type means is a question for whatever maps
+// the entry.
 type UsageClause struct {
 	Pos   Pos
 	Usage string
