@@ -886,18 +886,27 @@ func TestBuildErrors(t *testing.T) {
 			message: "invalid level number 50 at line 1, column 1: valid levels are 01-49, 66, 77, and 88",
 		},
 		{
-			// COMP-6 is the live case of a usage-type the grammar admits and
-			// this package does not map: the parser accepts the spelling so a
-			// copybook using it can be read, and Build refuses it here rather
-			// than inventing a width for it. Driving this through the real
-			// parser is what keeps the two halves of that boundary honest — if
-			// this package ever gains a COMP-6 member, this test fails.
+			// COMP-6 used to be the live case here: a usage-type the grammar
+			// admitted and this package did not map. It maps now, and with it
+			// every spelling the grammar admits does — TestBuildParsesEveryUsageType
+			// is what holds that — so only a hand-built entry reaches this
+			// check. The check stays because the two halves of that boundary
+			// move independently: a spelling added to the grammar and not to
+			// usageNames must be refused here rather than silently built as
+			// DISPLAY and given a width it does not have.
 			name: "usage type this package does not know",
-			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
-				return parseFragment(t, "77 ODD COMP-6.\n")
+			entries: func(*testing.T) []*cobol.DataDescriptionEntry {
+				return []*cobol.DataDescriptionEntry{{
+					Pos:   at(1, 1),
+					Level: 77,
+					Name:  &cobol.Word{Pos: at(1, 4), Value: "ODD"},
+					Clauses: []cobol.DataClause{
+						&cobol.UsageClause{Pos: at(1, 8), Usage: "COMP-9"},
+					},
+				}}
 			},
 			target:  &UsageError{},
-			message: `item "ODD" at line 1, column 8: unknown USAGE "COMP-6"`,
+			message: `item "ODD" at line 1, column 8: unknown USAGE "COMP-9"`,
 		},
 	}
 
@@ -951,6 +960,7 @@ func TestUsageString(t *testing.T) {
 		{UsageComp3, "COMP-3"},
 		{UsageComp4, "COMP-4"},
 		{UsageComp5, "COMP-5"},
+		{UsageComp6, "COMP-6"},
 		{UsageIndex, "INDEX"},
 		{UsagePointer, "POINTER"},
 		{Usage(-1), "DISPLAY"},
@@ -961,6 +971,39 @@ func TestUsageString(t *testing.T) {
 			t.Parallel()
 
 			require.Equal(t, tc.want, tc.usage.String())
+		})
+	}
+}
+
+// TestUsageValuesAreStable pins the int value of every [Usage] member. They are
+// iota-based, so a member inserted rather than appended renumbers every member
+// below it — silently, and observably to anything that has persisted the int.
+func TestUsageValuesAreStable(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		usage Usage
+		want  int
+	}{
+		{UsageDisplay, 0},
+		{UsageBinary, 1},
+		{UsagePackedDecimal, 2},
+		{UsageComp, 3},
+		{UsageComp1, 4},
+		{UsageComp2, 5},
+		{UsageComp3, 6},
+		{UsageComp4, 7},
+		{UsageComp5, 8},
+		{UsageIndex, 9},
+		{UsagePointer, 10},
+		{UsageComp6, 11},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.usage.String(), func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tc.want, int(tc.usage))
 		})
 	}
 }
@@ -984,6 +1027,7 @@ func TestBuildParsesEveryUsageType(t *testing.T) {
 		{"COMP-3", UsageComp3},
 		{"COMP-4", UsageComp4},
 		{"COMP-5", UsageComp5},
+		{"COMP-6", UsageComp6},
 		{"INDEX", UsageIndex},
 		{"POINTER", UsagePointer},
 	}

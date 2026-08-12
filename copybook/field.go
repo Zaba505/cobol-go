@@ -71,6 +71,15 @@ const (
 	UsageIndex
 	// UsagePointer is USAGE POINTER.
 	UsagePointer
+	// UsageComp6 is USAGE COMP-6, a GnuCOBOL and Micro Focus extension:
+	// packed decimal with no sign nibble at all, and so always unsigned.
+	//
+	// It is declared last rather than beside the other COMP-n members
+	// because these constants are iota-based: appending leaves every
+	// existing member's value alone, where inserting it after UsageComp5
+	// would renumber UsageIndex and UsagePointer under anything that has
+	// persisted the int.
+	UsageComp6
 )
 
 // usageNames maps each [Usage] to the canonical COBOL spelling the parser
@@ -85,6 +94,7 @@ var usageNames = map[Usage]string{
 	UsageComp3:         "COMP-3",
 	UsageComp4:         "COMP-4",
 	UsageComp5:         "COMP-5",
+	UsageComp6:         "COMP-6",
 	UsageIndex:         "INDEX",
 	UsagePointer:       "POINTER",
 }
