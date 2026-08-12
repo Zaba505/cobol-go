@@ -28,8 +28,8 @@
   "review": {
     "reviewers": ["copilot", "local"],
     "app": {
-      "idEnv": "Z5LABS_REVIEW_APP_ID",
-      "keyEnv": "Z5LABS_REVIEW_APP_KEY"
+      "idEnv": "ZABA505_REVIEW_APP_ID",
+      "keyEnv": "ZABA505_REVIEW_APP_KEY"
     }
   },
   "worktreeDir": ".claude/worktrees"
