@@ -815,6 +815,7 @@ data-clause =
 usage-type =
         "DISPLAY" | "BINARY" | "PACKED-DECIMAL"
       | "COMP" | "COMP-1" | "COMP-2" | "COMP-3" | "COMP-4" | "COMP-5"
+      | "COMP-6"
       | "INDEX" | "POINTER"
 
 occurs-clause =
@@ -831,6 +832,11 @@ occurs-clause =
 - **Level-numbers:** `01`–`49` define the record/group hierarchy (lower number =
   more inclusive); `77` is a standalone elementary item; `66` `RENAMES` regroups
   fields; `88` defines a condition-name on the preceding item.
+- **`COMP-6`** is a dialect extension (GnuCOBOL, Micro Focus): packed decimal
+  with no sign nibble. It is admitted here as a *spelling* only — the parser
+  records the usage-type it was written with and assigns no storage width to
+  any of them, so a copybook using it parses on every dialect and what it means
+  is a question for whatever maps the entry.
 
 #### Procedure Division
 

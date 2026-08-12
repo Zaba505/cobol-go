@@ -1448,8 +1448,12 @@ func (*PictureClause) dataClause() {}
 
 // UsageClause is the USAGE clause (with or without the USAGE keyword). Pos is the
 // position of the clause; Usage is the canonical upper-case usage-type
-// ("DISPLAY", "BINARY", "PACKED-DECIMAL", "COMP", "COMP-1"…"COMP-5", "INDEX",
-// "POINTER").
+// ("DISPLAY", "BINARY", "PACKED-DECIMAL", "COMP", "COMP-1"…"COMP-6", "INDEX",
+// "POINTER"). Only the case is normalized: no usage-type is folded to a synonym,
+// so "COMP" stays "COMP" rather than becoming "BINARY" and a dialect extension
+// such as "COMP-6" survives as "COMP-6". This package assigns no storage width
+// to any of them, so what a usage-type means is a question for whatever maps
+// the entry.
 type UsageClause struct {
 	Pos   Pos
 	Usage string
@@ -3127,7 +3131,7 @@ func isDataClauseKeyword(tok Token) bool {
 func isUsageType(tok Token) bool {
 	return keywordIs(tok,
 		"DISPLAY", "BINARY", "PACKED-DECIMAL",
-		"COMP", "COMP-1", "COMP-2", "COMP-3", "COMP-4", "COMP-5",
+		"COMP", "COMP-1", "COMP-2", "COMP-3", "COMP-4", "COMP-5", "COMP-6",
 		"INDEX", "POINTER",
 	)
 }
@@ -3226,7 +3230,8 @@ func parseUsageClause(p *parser, entry *DataDescriptionEntry) (parserAction[*Dat
 	if !isUsageType(usageTok) {
 		return nil, unexpectedKeyword(usageTok,
 			"DISPLAY", "BINARY", "PACKED-DECIMAL",
-			"COMP", "COMP-1", "COMP-2", "COMP-3", "COMP-4", "COMP-5", "INDEX", "POINTER",
+			"COMP", "COMP-1", "COMP-2", "COMP-3", "COMP-4", "COMP-5", "COMP-6",
+			"INDEX", "POINTER",
 		)
 	}
 	entry.Clauses = append(entry.Clauses, &UsageClause{Pos: pos, Usage: strings.ToUpper(string(usageTok.Value))})

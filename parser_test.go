@@ -3560,6 +3560,160 @@ func TestParserFragmentFixedFormat(t *testing.T) {
 	require.Error(t, freeErr)
 }
 
+// TestParserUsageComp6 pins COMP-6, the GnuCOBOL/Micro Focus packed-decimal
+// usage-type with no sign nibble. It is grammar only: the spelling is admitted
+// wherever any other usage-type is — bare and after USAGE [IS], in free format
+// and in fixed — and lands on UsageClause.Usage canonicalized to upper case.
+// Nothing here maps it to a width; that is a consumer's question.
+func TestParserUsageComp6(t *testing.T) {
+	t.Parallel()
+
+	// Every case is the same one-entry copybook, so the expected AST differs
+	// only in where the clauses sit.
+	entry := func(entryPos, namePos, picPos, usagePos Pos) *File {
+		return &File{
+			Fragment: &Fragment{
+				Entries: []*DataDescriptionEntry{
+					{
+						Pos:   entryPos,
+						Level: 77,
+						Name:  &Word{Pos: namePos, Value: "ODD"},
+						Clauses: []DataClause{
+							&PictureClause{Pos: picPos, Picture: "9(4)"},
+							&UsageClause{Pos: usagePos, Usage: "COMP-6"},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name     string
+		src      string
+		format   SourceFormat
+		expected *File
+	}{
+		{
+			// The issue's motivating spelling: the bare usage-type, no USAGE
+			// keyword, which is how copybooks in the wild write it.
+			name:     "bare usage type in free format",
+			src:      "77 ODD PIC 9(4) COMP-6.\n",
+			format:   FreeFormat,
+			expected: entry(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 1, Column: 8}, Pos{Line: 1, Column: 17}),
+		},
+		{
+			// The explicit form. Pos is the USAGE keyword, matching every other
+			// usage-type: the clause starts where the clause starts.
+			name:     "explicit USAGE IS in free format",
+			src:      "77 ODD PIC 9(4) USAGE IS COMP-6.\n",
+			format:   FreeFormat,
+			expected: entry(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 1, Column: 8}, Pos{Line: 1, Column: 17}),
+		},
+		{
+			// IS is optional, so USAGE with the usage-type straight after it is a
+			// third spelling rather than a variant of the second.
+			name:     "USAGE without IS in free format",
+			src:      "77 ODD PIC 9(4) USAGE COMP-6.\n",
+			format:   FreeFormat,
+			expected: entry(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 1, Column: 8}, Pos{Line: 1, Column: 17}),
+		},
+		{
+			// COBOL reserved words are case-insensitive and Usage is canonical
+			// upper case, so a lower-case copybook yields the same AST.
+			name:     "lower case spelling is canonicalized",
+			src:      "77 ODD PIC 9(4) usage is comp-6.\n",
+			format:   FreeFormat,
+			expected: entry(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 1, Column: 8}, Pos{Line: 1, Column: 17}),
+		},
+		{
+			// Copybooks are commonly held in column-oriented libraries, so the
+			// fixed reference format has to admit the spelling too.
+			name:     "bare usage type in fixed format",
+			src:      "000100 77  ODD  PIC 9(4) COMP-6.\n",
+			format:   FixedFormat,
+			expected: entry(Pos{Line: 1, Column: 8}, Pos{Line: 1, Column: 12}, Pos{Line: 1, Column: 17}, Pos{Line: 1, Column: 26}),
+		},
+		{
+			name:     "explicit USAGE IS in fixed format",
+			src:      "000100 77  ODD  PIC 9(4) USAGE IS COMP-6.\n",
+			format:   FixedFormat,
+			expected: entry(Pos{Line: 1, Column: 8}, Pos{Line: 1, Column: 12}, Pos{Line: 1, Column: 17}, Pos{Line: 1, Column: 26}),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f, err := Parse(strings.NewReader(tc.src), WithFragment(), WithSourceFormat(tc.format))
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, f)
+		})
+	}
+
+	// The cases above are fragments, which is where a copybook usage-type is
+	// met in practice. parseDataEntries is shared with the DATA DIVISION
+	// sections, so this subtest is what shows that rather than assuming it —
+	// and it is the issue's own example, a level-05 item subordinate to an 01,
+	// in a whole program.
+	t.Run("subordinate item in WORKING-STORAGE", func(t *testing.T) {
+		t.Parallel()
+
+		src := "IDENTIFICATION DIVISION.\n" +
+			"PROGRAM-ID. ODDDEMO.\n" +
+			"DATA DIVISION.\n" +
+			"WORKING-STORAGE SECTION.\n" +
+			"01 ODD-RECORD.\n" +
+			"    05 ODD PIC 9(4) COMP-6.\n"
+
+		expected := &File{
+			Programs: []*Program{
+				{
+					Pos: Pos{Line: 1, Column: 1},
+					Divisions: []Division{
+						&IdentificationDivision{
+							Pos: Pos{Line: 1, Column: 1},
+							ProgramID: &ProgramID{
+								Pos:  Pos{Line: 2, Column: 1},
+								Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "ODDDEMO"},
+							},
+						},
+						&DataDivision{
+							Pos: Pos{Line: 3, Column: 1},
+							WorkingStorage: &DataSection{
+								Pos: Pos{Line: 4, Column: 1},
+								Entries: []*DataDescriptionEntry{
+									{
+										Pos:   Pos{Line: 5, Column: 1},
+										Level: 1,
+										Name:  &Word{Pos: Pos{Line: 5, Column: 4}, Value: "ODD-RECORD"},
+									},
+									{
+										Pos:   Pos{Line: 6, Column: 5},
+										Level: 5,
+										Name:  &Word{Pos: Pos{Line: 6, Column: 8}, Value: "ODD"},
+										Clauses: []DataClause{
+											&PictureClause{Pos: Pos{Line: 6, Column: 12}, Picture: "9(4)"},
+											&UsageClause{Pos: Pos{Line: 6, Column: 21}, Usage: "COMP-6"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		f, err := Parse(strings.NewReader(src))
+
+		require.NoError(t, err)
+		require.Equal(t, expected, f)
+	})
+}
+
 // TestParserFragmentErrors pins the two ends of the mode: a copybook is rejected
 // without WithFragment (the behaviour the issue reported), and a whole source file
 // is rejected with it, rather than the parser silently dropping everything past the
@@ -3605,6 +3759,21 @@ func TestParserFragmentErrors(t *testing.T) {
 		var invalid InvalidLevelNumberError
 		require.ErrorAs(t, err, &invalid)
 		require.Equal(t, "50", invalid.Value)
+	})
+
+	// A genuinely unknown usage-type is still rejected, and the alternatives it
+	// lists are the ones the grammar admits — so a copybook author who mistyped
+	// COMP-6 is shown that it exists rather than being told it does not.
+	t.Run("unknown usage type lists the alternatives", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := Parse(strings.NewReader("77 ODD PIC 9(4) USAGE IS COMP-7.\n"), WithFragment())
+
+		var target UnexpectedKeywordError
+		require.ErrorAs(t, err, &target)
+		require.Equal(t, Pos{Line: 1, Column: 26}, target.Actual.Pos)
+		require.Contains(t, target.Expected, "COMP-6")
+		require.Contains(t, err.Error(), `"COMP-7"`)
 	})
 }
 
