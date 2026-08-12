@@ -414,6 +414,138 @@ func (r *Reader) readPackedDigits(digits, max int) ([]byte, bool, error) {
 	return ds, negative, nil
 }
 
+// ReadComp6Int32 reads the next COMP-6 field of digits digits as an int32,
+// consuming ceil(digits/2) bytes.
+//
+// COMP-6 is the GnuCOBOL and Micro Focus packed decimal with no sign nibble at
+// all: every nibble of the field is a digit nibble, and the item is always
+// unsigned. That makes it a narrower field than the COMP-3 of the same PICTURE
+// — PIC 9(4) COMP-6 is two bytes where PIC 9(4) COMP-3 is three — so the two
+// are not interchangeable and a COMP-6 field read with
+// [Reader.ReadPackedInt32] desynchronizes the record. See codec/SPEC.md,
+// "Packed Decimal".
+//
+// There is no [Signedness] to declare, on this side or the writing one, because
+// the encoding has nowhere to put a sign. A field whose PICTURE carries S is
+// not a COMP-6 field.
+//
+// digits must be between 1 and 9, the most that always fits an int32; a wider
+// field is a [PackedDigitCountError] rather than a silent overflow, and is read
+// with [Reader.ReadComp6Int64] or [Reader.ReadComp6Big].
+//
+// The return is the unscaled integer, for the reason it is on
+// [Reader.ReadPackedInt32]: a PICTURE's V and P positions occupy no storage.
+func (r *Reader) ReadComp6Int32(digits int) (int32, error) {
+	v, err := r.readComp6Int(digits, maxPackedInt32Digits)
+	return int32(v), err
+}
+
+// ReadComp6Int64 reads the next COMP-6 field of digits digits as an int64,
+// consuming ceil(digits/2) bytes.
+//
+// digits must be between 1 and 18, the most that always fits an int64; wider
+// counts are read with [Reader.ReadComp6Big]. As with every numeric accessor
+// the return is the unscaled integer; see [Reader.ReadComp6Int32], which also
+// says why no [Signedness] is taken.
+func (r *Reader) ReadComp6Int64(digits int) (int64, error) {
+	return r.readComp6Int(digits, maxPackedInt64Digits)
+}
+
+// ReadComp6Big reads the next COMP-6 field of digits digits as a
+// [math/big.Int], consuming ceil(digits/2) bytes.
+//
+// digits must be between 1 and 31, the same upper bound the COMP-3 accessors
+// take. This is the accessor for the 19-to-31 digit range no Go integer type
+// holds. As with every numeric accessor the return is the unscaled integer; see
+// [Reader.ReadComp6Int32].
+func (r *Reader) ReadComp6Big(digits int) (*big.Int, error) {
+	ds, err := r.readComp6Digits(digits, maxPackedDigits)
+	if err != nil {
+		return nil, err
+	}
+	v := new(big.Int)
+	ten := big.NewInt(10)
+	d := new(big.Int)
+	for _, n := range ds {
+		v.Mul(v, ten)
+		v.Add(v, d.SetInt64(int64(n)))
+	}
+	return v, nil
+}
+
+// readComp6Int is the shared body of the two integer COMP-6 accessors, whose
+// only difference is the digit count they accept.
+func (r *Reader) readComp6Int(digits, max int) (int64, error) {
+	ds, err := r.readComp6Digits(digits, max)
+	if err != nil {
+		return 0, err
+	}
+	var v int64
+	for _, d := range ds {
+		v = v*10 + int64(d)
+	}
+	return v, nil
+}
+
+// readComp6Digits reads one COMP-6 field and returns its digits, most
+// significant first and one per element with values 0-9.
+//
+// It returns no sign, because COMP-6 stores none. That is the whole of the
+// difference from [Reader.readPackedDigits], and it is why the two are separate
+// bodies rather than one with a flag: there is no sign nibble to skip, so the
+// digits run to the very end of the field and the pad nibble appears on the
+// opposite parity of digits.
+//
+// Every nibble is validated as a digit. Nothing in the field may be A-F, so
+// none of COMP-3's sign alphabet is accepted anywhere — a value ending in a C
+// or an F is a COMP-3 field being read at a COMP-6 offset, which is exactly the
+// mistake worth failing on.
+//
+// A nibble error carries the offset of the byte the nibble sits in, for the
+// reason [Reader.readPackedDigits] does.
+func (r *Reader) readComp6Digits(digits, max int) ([]byte, error) {
+	if digits < 1 || digits > max {
+		return nil, &OffsetError{
+			Offset: r.off,
+			Err:    PackedDigitCountError{Digits: digits, Max: max},
+		}
+	}
+	start := r.off
+	b, err := r.read(comp6Width(digits))
+	if err != nil {
+		return nil, err
+	}
+	// nibbleAt is the offset of the byte holding nibble i, counted from the
+	// first byte of the field.
+	nibbleAt := func(i int) int64 { return start + int64(i/2) }
+
+	nibbles := make([]byte, 0, 2*len(b))
+	for _, c := range b {
+		nibbles = append(nibbles, c>>4, c&0x0F)
+	}
+	// The pad nibble exists exactly when the digit count is odd, which is the
+	// opposite parity from COMP-3: there is no sign nibble making the count
+	// up, so an odd digit count is what leaves half a byte over. It is the
+	// high nibble of the first byte, as COMP-3's is.
+	if digits%2 == 1 && nibbles[0] != 0 {
+		return nil, &OffsetError{
+			Offset: nibbleAt(0),
+			Err:    PackedPadError{Nibble: nibbles[0]},
+		}
+	}
+	first := len(nibbles) - digits
+	ds := nibbles[first:]
+	for i, d := range ds {
+		if d > 9 {
+			return nil, &OffsetError{
+				Offset: nibbleAt(first + i),
+				Err:    PackedDigitError{Nibble: d},
+			}
+		}
+	}
+	return ds, nil
+}
+
 // ReadBinaryInt16 reads the next binary (COMP, COMP-4, BINARY) field of digits
 // digits as a signed int16, consuming 2 bytes.
 //

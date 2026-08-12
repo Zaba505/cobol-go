@@ -1038,6 +1038,311 @@ func TestWriterWritePackedErrors(t *testing.T) {
 	})
 }
 
+// TestWriterWriteComp6 is the mirror of TestReaderReadComp6 and shares its
+// vectors, the SPEC Appendix A.4 ones included.
+func TestWriterWriteComp6(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		value  int64
+		digits int
+		want   []byte
+	}{
+		{
+			name:   "even digits, no pad nibble",
+			value:  1234,
+			digits: 4,
+			want:   []byte{0x12, 0x34}, // SPEC A.4
+		},
+		{
+			name:   "odd digits write a zero pad nibble",
+			value:  123,
+			digits: 3,
+			want:   []byte{0x01, 0x23}, // SPEC A.4
+		},
+		{
+			name:   "two digits fill one byte",
+			value:  42,
+			digits: 2,
+			want:   []byte{0x42},
+		},
+		{
+			name:   "single digit is one byte with a pad nibble",
+			value:  7,
+			digits: 1,
+			want:   []byte{0x07},
+		},
+		{
+			name:   "zero",
+			value:  0,
+			digits: 4,
+			want:   []byte{0x00, 0x00},
+		},
+		{
+			name:   "value narrower than the field is zero filled",
+			value:  42,
+			digits: 4,
+			want:   []byte{0x00, 0x42},
+		},
+		{
+			name:   "nine digits, the int32 maximum",
+			value:  999999999,
+			digits: 9,
+			want:   []byte{0x09, 0x99, 0x99, 0x99, 0x99},
+		},
+		{
+			name:   "eighteen digits, the int64 maximum",
+			value:  999999999999999999,
+			digits: 18,
+			want:   []byte{0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// COMP-6 is charset-invariant, as COMP-3 is.
+			for _, enc := range []Encoding{IBMEnterprise(), GnuCOBOLASCII()} {
+				var buf bytes.Buffer
+				w, err := NewWriter(&buf, enc)
+				require.NoError(t, err)
+
+				require.NoError(t, w.WriteComp6Int64(tc.value, tc.digits))
+				require.Equal(t, tc.want, buf.Bytes())
+				require.Equal(t, int64(comp6Width(tc.digits)), w.Offset())
+
+				if tc.digits <= maxPackedInt32Digits {
+					var buf32 bytes.Buffer
+					w32, err := NewWriter(&buf32, enc)
+					require.NoError(t, err)
+
+					require.NoError(t, w32.WriteComp6Int32(int32(tc.value), tc.digits))
+					require.Equal(t, tc.want, buf32.Bytes())
+				}
+
+				var bufBig bytes.Buffer
+				wBig, err := NewWriter(&bufBig, enc)
+				require.NoError(t, err)
+
+				require.NoError(t, wBig.WriteComp6Big(big.NewInt(tc.value), tc.digits))
+				require.Equal(t, tc.want, bufBig.Bytes())
+			}
+		})
+	}
+}
+
+func TestWriterWriteComp6Big(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		value  string
+		digits int
+		want   []byte
+	}{
+		{
+			name:   "nineteen digits, one past int64",
+			value:  "1234567890123456789",
+			digits: 19,
+			want:   []byte{0x01, 0x23, 0x45, 0x67, 0x89, 0x01, 0x23, 0x45, 0x67, 0x89},
+		},
+		{
+			name:   "thirty-one digits, the COBOL maximum",
+			value:  "9999999999999999999999999999999",
+			digits: 31,
+			want: []byte{
+				0x09, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99,
+				0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99,
+			},
+		},
+		{
+			name:   "thirty digits, the widest even count",
+			value:  "123456789012345678901234567890",
+			digits: 30,
+			want: []byte{
+				0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34,
+				0x56, 0x78, 0x90, 0x12, 0x34, 0x56, 0x78, 0x90,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			v, ok := new(big.Int).SetString(tc.value, 10)
+			require.True(t, ok)
+
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, IBMEnterprise())
+			require.NoError(t, err)
+
+			require.NoError(t, w.WriteComp6Big(v, tc.digits))
+			require.Equal(t, tc.want, buf.Bytes())
+		})
+	}
+}
+
+func TestWriterWriteComp6Errors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("value wider than the field", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		err = w.WriteComp6Int64(12345, 4)
+
+		var rangeErr PackedRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, "12345", rangeErr.Value)
+		require.Equal(t, 4, rangeErr.Digits)
+		require.Equal(t, Unsigned, rangeErr.Signedness)
+		require.Empty(t, buf.Bytes())
+		require.Zero(t, w.Offset())
+	})
+
+	t.Run("negative value has nowhere to go", func(t *testing.T) {
+		t.Parallel()
+
+		// COMP-6 stores no sign at all, so there is no Signedness to pass
+		// and every negative value is out of range. Storing the magnitude is
+		// what COBOL does and what this package will not do silently.
+		writes := []struct {
+			name  string
+			write func(*Writer) error
+			want  string
+		}{
+			{
+				name:  "int32",
+				write: func(w *Writer) error { return w.WriteComp6Int32(-42, 5) },
+				want:  "-42",
+			},
+			{
+				name:  "int64",
+				write: func(w *Writer) error { return w.WriteComp6Int64(-1, 18) },
+				want:  "-1",
+			},
+			{
+				name:  "big",
+				write: func(w *Writer) error { return w.WriteComp6Big(big.NewInt(-1), 31) },
+				want:  "-1",
+			},
+			{
+				name:  "the most negative int64",
+				write: func(w *Writer) error { return w.WriteComp6Int64(math.MinInt64, 18) },
+				want:  "-9223372036854775808",
+			},
+		}
+
+		for _, tc := range writes {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				var buf bytes.Buffer
+				w, err := NewWriter(&buf, GnuCOBOLASCII())
+				require.NoError(t, err)
+
+				err = tc.write(w)
+
+				var rangeErr PackedRangeError
+				require.ErrorAs(t, err, &rangeErr)
+				require.Equal(t, tc.want, rangeErr.Value)
+				require.Equal(t, Unsigned, rangeErr.Signedness)
+				require.Empty(t, buf.Bytes())
+				require.Zero(t, w.Offset())
+			})
+		}
+	})
+
+	t.Run("digit count out of range", func(t *testing.T) {
+		t.Parallel()
+
+		testCases := []struct {
+			name   string
+			digits int
+			max    int
+			write  func(*Writer, int) error
+		}{
+			{
+				name:   "zero digits",
+				digits: 0,
+				max:    maxPackedInt64Digits,
+				write:  func(w *Writer, d int) error { return w.WriteComp6Int64(0, d) },
+			},
+			{
+				name:   "negative digits",
+				digits: -1,
+				max:    maxPackedInt32Digits,
+				write:  func(w *Writer, d int) error { return w.WriteComp6Int32(0, d) },
+			},
+			{
+				name:   "ten digits overflows an int32",
+				digits: 10,
+				max:    maxPackedInt32Digits,
+				write:  func(w *Writer, d int) error { return w.WriteComp6Int32(0, d) },
+			},
+			{
+				name:   "nineteen digits overflows an int64",
+				digits: 19,
+				max:    maxPackedInt64Digits,
+				write:  func(w *Writer, d int) error { return w.WriteComp6Int64(0, d) },
+			},
+			{
+				name:   "thirty-two digits exceeds COBOL itself",
+				digits: 32,
+				max:    maxPackedDigits,
+				write:  func(w *Writer, d int) error { return w.WriteComp6Big(big.NewInt(0), d) },
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				var buf bytes.Buffer
+				w, err := NewWriter(&buf, GnuCOBOLASCII())
+				require.NoError(t, err)
+
+				err = tc.write(w, tc.digits)
+
+				var countErr PackedDigitCountError
+				require.ErrorAs(t, err, &countErr)
+				require.Equal(t, tc.digits, countErr.Digits)
+				require.Equal(t, tc.max, countErr.Max)
+				require.Empty(t, buf.Bytes())
+				require.Zero(t, w.Offset())
+			})
+		}
+	})
+
+	t.Run("nil big value", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		err = w.WriteComp6Big(nil, 5)
+		require.ErrorIs(t, err, ErrNilValue)
+		require.Empty(t, buf.Bytes())
+	})
+
+	t.Run("underlying writer fails", func(t *testing.T) {
+		t.Parallel()
+
+		w, err := NewWriter(&failingWriter{limit: 1}, GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		err = w.WriteComp6Int64(1234, 4)
+		require.ErrorIs(t, err, errWriteFailed)
+	})
+}
+
 // TestWriterWriteBinary writes a signed binary field in both byte orders, at
 // every width and at both width boundaries. It is the mirror of
 // TestReaderReadBinary and shares its vectors.
@@ -1880,6 +2185,7 @@ func TestMarshal(t *testing.T) {
 			Raw:     []byte{0x00, 0x01, 0xFF},
 			Amount:  12345,
 			Qty:     42,
+			Units:   7,
 			Seq:     1234,
 			Rate:    1.5,
 			Factor:  2.5,
@@ -1887,11 +2193,14 @@ func TestMarshal(t *testing.T) {
 			Count:   42,
 		})
 		require.NoError(t, err)
-		// 3F C0 00 00 is RATE as binary32 and 40 04 … FACTOR as binary64,
-		// big-endian as GnuCOBOL writes them by default; "1234u" is BALANCE
-		// with its sign overpunched into the last digit byte, and "042" is
-		// COUNT, an unsigned DISPLAY item padded with a high-order zero.
-		require.Equal(t, []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2"+
+		// 00 07 is UNITS, a PIC 9(4) COMP-6 item: two bytes to QTY's three,
+		// and a leading zero rather than a pad nibble, since the digit count
+		// is even. 3F C0 00 00 is RATE as binary32 and 40 04 … FACTOR as
+		// binary64, big-endian as GnuCOBOL writes them by default; "1234u" is
+		// BALANCE with its sign overpunched into the last digit byte, and
+		// "042" is COUNT, an unsigned DISPLAY item padded with a high-order
+		// zero.
+		require.Equal(t, []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x00\x07\x04\xD2"+
 			"\x3F\xC0\x00\x00"+"\x40\x04\x00\x00\x00\x00\x00\x00"+"1234u"+"042"), got)
 	})
 
@@ -1928,30 +2237,35 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 		{
 			name: "ascii record",
 			enc:  GnuCOBOLASCII(),
-			// … | 12 34 5C: AMOUNT +12345 | 00 04 2F: QTY 42 | 04 D2: SEQ 1234
+			// … | 12 34 5C: AMOUNT +12345 | 00 04 2F: QTY 42 | 00 07: UNITS 7,
+			// COMP-6 and so a byte narrower than QTY | 04 D2: SEQ 1234
 			// | 3F C0 00 00: RATE 1.5, binary32 | 40 04 …: FACTOR 2.5, binary64
 			// | "1234u": BALANCE -12345, zone 3/7 | "042": COUNT 42
-			src: []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x04\xD2" +
+			src: []byte("A12345WIDGET GRIP   42\x00\x01\xFF\x12\x34\x5C\x00\x04\x2F\x00\x07\x04\xD2" +
 				"\x3F\xC0\x00\x00" + "\x40\x04\x00\x00\x00\x00\x00\x00" + "1234u" + "042"),
 		},
 		{
 			name: "ascii record with empty fields",
 			enc:  MicroFocusASCII(),
-			// The zero of a signed packed field is C, of an unsigned one F.
-			// SEQ is zero, which is the one binary value this encoding's
-			// native byte order cannot reorder — and RATE and FACTOR are zero
-			// for the same reason, since their IEEE bytes follow that order
-			// too. A zoned zero is spelled out digit by digit, and under zone
-			// 3/7 a positive sign leaves the last one an ordinary '0'.
+			// The zero of a signed packed field is C, of an unsigned one F,
+			// and of a COMP-6 field nothing at all — its two bytes are all
+			// digit nibbles. SEQ is zero, which is the one binary value this
+			// encoding's native byte order cannot reorder — and RATE and
+			// FACTOR are zero for the same reason, since their IEEE bytes
+			// follow that order too. A zoned zero is spelled out digit by
+			// digit, and under zone 3/7 a positive sign leaves the last one an
+			// ordinary '0'.
 			src: []byte("      " + "            " + "    " + "\x00\x00\x00" +
-				"\x00\x00\x0C" + "\x00\x00\x0F" + "\x00\x00" +
+				"\x00\x00\x0C" + "\x00\x00\x0F" + "\x00\x00" + "\x00\x00" +
 				"\x00\x00\x00\x00" + "\x00\x00\x00\x00\x00\x00\x00\x00" +
 				"00000" + "000"),
 		},
 		{
 			name: "ascii record with full fields",
 			enc:  ConvertedFromEBCDIC(),
-			// 98 76 5D: AMOUNT -98765 | 09 99 9F: QTY 9999 | FB 2E: SEQ -1234,
+			// 98 76 5D: AMOUNT -98765 | 09 99 9F: QTY 9999 | 99 99: UNITS 9999,
+			// the widest a PIC 9(4) COMP-6 holds and the case where its two
+			// bytes are entirely digits | FB 2E: SEQ -1234,
 			// big-endian because the mainframe that wrote it was — and for the
 			// same reason RATE and FACTOR are HFP, C1 18 …: -1.5 and
 			// 42 FF …: 255. A converted file keeps the floating point format
@@ -1959,7 +2273,7 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 			// which is exactly what "9876N" is: BALANCE -98765 with the
 			// EBCDIC overpunch D5 translated to the letter N. "999" is COUNT,
 			// filling its three digits.
-			src: []byte("A12345WIDGETGRIP123456\xFF\xFE\xFD\x98\x76\x5D\x09\x99\x9F\xFB\x2E" +
+			src: []byte("A12345WIDGETGRIP123456\xFF\xFE\xFD\x98\x76\x5D\x09\x99\x9F\x99\x99\xFB\x2E" +
 				"\xC1\x18\x00\x00" + "\x42\xFF\x00\x00\x00\x00\x00\x00" +
 				"9876N" + "999"),
 		},
@@ -1979,6 +2293,7 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 				0x00, 0x01, 0xFF, // raw payload
 				0x12, 0x34, 0x5C, // AMOUNT +12345
 				0x00, 0x04, 0x2F, // QTY 42
+				0x00, 0x07, // UNITS 7, PIC 9(4) COMP-6 — two bytes, no sign nibble
 				0x04, 0xD2, // SEQ 1234, big-endian as z/OS writes it
 				0x41, 0x18, 0x00, 0x00, // RATE 1.5 as HFP short
 				0x41, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // FACTOR 2.5 as HFP long
@@ -2266,6 +2581,129 @@ func TestRoundTripPacked(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRoundTripComp6 walks a COMP-6 field both ways at every digit count COBOL
+// allows, which is the cheapest check that the width formula, the pad nibble's
+// parity and the digit placement agree between the reader and the writer.
+func TestRoundTripComp6(t *testing.T) {
+	t.Parallel()
+
+	for digits := 1; digits <= maxPackedDigits; digits++ {
+		t.Run(strconv.Itoa(digits)+" digits", func(t *testing.T) {
+			t.Parallel()
+
+			// The widest value the field holds, a value with high-order
+			// zeros, and zero itself. There is no negation here: a COMP-6
+			// field cannot hold one.
+			nines, ok := new(big.Int).SetString(strings.Repeat("9", digits), 10)
+			require.True(t, ok)
+			values := []*big.Int{nines, big.NewInt(0), big.NewInt(7)}
+
+			for _, v := range values {
+				var buf bytes.Buffer
+				w, err := NewWriter(&buf, IBMEnterprise())
+				require.NoError(t, err)
+				require.NoError(t, w.WriteComp6Big(v, digits))
+				require.Len(t, buf.Bytes(), comp6Width(digits))
+
+				r, err := NewReader(bytes.NewReader(buf.Bytes()), IBMEnterprise())
+				require.NoError(t, err)
+				got, err := r.ReadComp6Big(digits)
+				require.NoError(t, err)
+				require.Equal(t, v.String(), got.String())
+
+				// The bytes a reader accepts are written back unchanged,
+				// which is the direction that catches a pad nibble drifting.
+				var back bytes.Buffer
+				w2, err := NewWriter(&back, IBMEnterprise())
+				require.NoError(t, err)
+				require.NoError(t, w2.WriteComp6Big(got, digits))
+				require.Equal(t, buf.Bytes(), back.Bytes())
+
+				if digits <= maxPackedInt64Digits {
+					r64, err := NewReader(bytes.NewReader(buf.Bytes()), IBMEnterprise())
+					require.NoError(t, err)
+					got64, err := r64.ReadComp6Int64(digits)
+					require.NoError(t, err)
+					require.Equal(t, v.Int64(), got64)
+				}
+				if digits <= maxPackedInt32Digits {
+					r32, err := NewReader(bytes.NewReader(buf.Bytes()), IBMEnterprise())
+					require.NoError(t, err)
+					got32, err := r32.ReadComp6Int32(digits)
+					require.NoError(t, err)
+					require.Equal(t, int32(v.Int64()), got32)
+				}
+			}
+		})
+	}
+}
+
+// TestComp6IsNotComp3 pins the two encodings apart at the byte level. A COMP-3
+// field read at a COMP-6 offset must fail rather than yield a plausible number,
+// which is the failure mode the SPEC's "MUST NOT be decoded as COMP-3" is
+// about.
+func TestComp6IsNotComp3(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the same value writes different bytes", func(t *testing.T) {
+		t.Parallel()
+
+		var comp6 bytes.Buffer
+		w6, err := NewWriter(&comp6, GnuCOBOLASCII())
+		require.NoError(t, err)
+		require.NoError(t, w6.WriteComp6Int64(1234, 4))
+
+		var comp3 bytes.Buffer
+		w3, err := NewWriter(&comp3, GnuCOBOLASCII())
+		require.NoError(t, err)
+		require.NoError(t, w3.WritePackedInt64(1234, 4, Unsigned))
+
+		require.Equal(t, []byte{0x12, 0x34}, comp6.Bytes())
+		require.Equal(t, []byte{0x01, 0x23, 0x4F}, comp3.Bytes())
+	})
+
+	t.Run("a COMP-3 sign nibble lands in a digit position", func(t *testing.T) {
+		t.Parallel()
+
+		// PIC S9(5) COMP-3 holding +12345 is 12 34 5C, three bytes. A
+		// PIC 9(6) COMP-6 field is three bytes too, so a copybook that has
+		// the usage wrong reads these bytes at the same width — and the
+		// sign nibble lands in a digit position, where every one of C, D, F
+		// and the lenient A, B, E is out of range.
+		for _, sign := range []byte{0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F} {
+			src := []byte{0x12, 0x34, 0x50 | sign}
+			r, err := NewReader(bytes.NewReader(src), GnuCOBOLASCII())
+			require.NoError(t, err)
+
+			_, err = r.ReadComp6Int64(6)
+
+			var digitErr PackedDigitError
+			require.ErrorAs(t, err, &digitErr)
+			require.Equal(t, sign, digitErr.Nibble)
+		}
+	})
+
+	t.Run("a COMP-3 field read at the COMP-6 width leaves a byte behind", func(t *testing.T) {
+		t.Parallel()
+
+		// PIC 9(4) COMP-3 holding 1234 is 01 23 4F. Read as a PIC 9(4)
+		// COMP-6 field it is two bytes, 01 23, whose nibbles are all legal
+		// digits — so this one is not caught at the nibble level at all. It
+		// is caught by the width: the reader stops a byte short and every
+		// later field of the record is out of place, which is the
+		// loud-indirectly failure the SPEC's "MUST NOT be decoded as
+		// COMP-3" is about.
+		src := []byte{0x01, 0x23, 0x4F}
+		r, err := NewReader(bytes.NewReader(src), GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		got, err := r.ReadComp6Int64(4)
+		require.NoError(t, err)
+		require.Equal(t, int64(123), got)
+		require.Equal(t, int64(2), r.Offset())
+	})
 }
 
 // TestRoundTripPackedLenientSigns is the one place the round trip is
@@ -2720,6 +3158,7 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Raw:     []byte{0x00, 0x01, 0xFF},
 				Amount:  12345,
 				Qty:     42,
+				Units:   7,
 				Seq:     1234,
 				Rate:    1.5,
 				Factor:  2.5,
@@ -2737,6 +3176,7 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Raw:    []byte{0x00, 0x01, 0xFF},
 				Amount: -12345,
 				Qty:    42,
+				Units:  9999,
 				Seq:    -1234,
 				// HFP, so both are values whose fraction survives being
 				// normalized to a hex digit boundary.
@@ -2756,6 +3196,7 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Raw:    []byte{0x40, 0x20, 0x00},
 				Amount: 0,
 				Qty:    0,
+				Units:  0,
 				Seq:    0,
 				// A translated-EBCDIC negative one, which is the letter J.
 				Balance: -1,
@@ -2772,6 +3213,7 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Raw:    []byte{0xFF, 0xFE, 0xFD},
 				Amount: -99999,
 				Qty:    9999,
+				Units:  9999,
 				Seq:    9999,
 				// IEEE, so the widest value each width holds is in range.
 				Rate:    math.MaxFloat32,
@@ -2790,6 +3232,7 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 				Raw:    []byte{0x01, 0x02, 0x03},
 				Amount: -1,
 				Qty:    1,
+				Units:  1,
 				Seq:    -1,
 				// A value binary32 cannot spell exactly still round-trips,
 				// because it is the same format on the way back.

@@ -11,6 +11,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -230,6 +231,45 @@ func TestZonedWidth(t *testing.T) {
 			require.Equal(t, tc.wantWidth, zonedWidth(5, tc.sign))
 			require.Equal(t, tc.wantOverpun, tc.sign.overpunchAt(5))
 			require.Equal(t, tc.wantWidth > 5, tc.sign.separate())
+		})
+	}
+}
+
+// TestPackedAndComp6Widths pins the two packed width formulas against each
+// other. They differ by a byte at every *even* digit count and coincide at
+// every odd one, which is the fact a reader of either encoding has to know: at
+// an odd digit count a mis-declared usage does not shift the record, so nothing
+// but the nibbles catches it — and the pad nibble sits on the opposite parity
+// precisely so that they do.
+func TestPackedAndComp6Widths(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		digits     int
+		wantPacked int
+		wantComp6  int
+	}{
+		{digits: 1, wantPacked: 1, wantComp6: 1},
+		{digits: 2, wantPacked: 2, wantComp6: 1},
+		{digits: 3, wantPacked: 2, wantComp6: 2},
+		{digits: 4, wantPacked: 3, wantComp6: 2},
+		{digits: 5, wantPacked: 3, wantComp6: 3},
+		{digits: 18, wantPacked: 10, wantComp6: 9},
+		{digits: 31, wantPacked: 16, wantComp6: 16},
+	}
+
+	for _, tc := range testCases {
+		t.Run(strconv.Itoa(tc.digits)+" digits", func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tc.wantPacked, packedWidth(tc.digits))
+			require.Equal(t, tc.wantComp6, comp6Width(tc.digits))
+
+			if tc.digits%2 == 0 {
+				require.Equal(t, packedWidth(tc.digits)-1, comp6Width(tc.digits))
+			} else {
+				require.Equal(t, packedWidth(tc.digits), comp6Width(tc.digits))
+			}
 		})
 	}
 }
