@@ -445,15 +445,19 @@ func TestNewLayout(t *testing.T) {
    05 A PIC X.
    05 B PIC S9(5) SYNC.
    05 C PIC S9(5) COMP-3 SYNC.
+   05 D PIC 9(5) COMP-6 SYNC.
 `,
 			dialect: IBMEnterprise(),
 			want: []span{
-				{name: "R", offset: 0, length: 9},
+				{name: "R", offset: 0, length: 12},
 				{name: "A", offset: 0, length: 1},
 				{name: "B", offset: 1, length: 5},
 				{name: "C", offset: 6, length: 3},
+				// COMP-6 is packed too, so naturalAlign leaves it
+				// on a byte boundary like COMP-3: no slack.
+				{name: "D", offset: 9, length: 3},
 			},
-			wantLength: 9,
+			wantLength: 12,
 		},
 		{
 			// The same copybook under a dialect that syntax-checks

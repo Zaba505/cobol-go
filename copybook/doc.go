@@ -41,8 +41,8 @@
 // Widths come from each elementary item's PICTURE, USAGE and the dialect, per
 // codec/SPEC.md, "Storage Widths": PIC 9(5) COMP is four bytes and not five, a
 // COMP-3 item is one nibble per digit plus a sign nibble, a COMP-6 item is the
-// same nibbles without the sign one, and a group is as wide
-// as its subordinate items. OCCURS multiplies a subtree and gives it a stride,
+// same nibbles without the sign one, and a group is as wide as its subordinate
+// items. OCCURS multiplies a subtree and gives it a stride,
 // REDEFINES overlays its target at the same offset, and SYNCHRONIZED inserts
 // slack bytes where the dialect honours it.
 //

@@ -292,9 +292,10 @@ func TestLayoutResolve(t *testing.T) {
    05 TAIL PIC X.
 `,
 			// PIC 9(3) COMP-6 is two bytes: one pad nibble and three
-			// digit nibbles. The same bytes under COMP-3 would be a
-			// two-digit value with a sign nibble of 2, which is no
-			// sign at all — hence its own arm in readCount.
+			// digit nibbles. packedValue reads the same two bytes as
+			// a three-digit 000 whose sign nibble is 2 — no sign at
+			// all, so it refuses a record COMP-6 reads fine. Hence
+			// its own arm in readCount.
 			data: append([]byte{0x00, 0x02}, make([]byte, 32)...),
 			want: []span{
 				{name: "R", offset: 0, length: 11},
@@ -306,6 +307,26 @@ func TestLayoutResolve(t *testing.T) {
 				{name: "TAIL", offset: 10, length: 1},
 			},
 			length: 11,
+		},
+		{
+			name: "a comp-6 count is its nibbles most significant first",
+			src: `01 R.
+   05 N PIC 9(3) COMP-6.
+   05 A PIC X(2) OCCURS 1 TO 12 TIMES DEPENDING ON N.
+`,
+			// Nibbles 0, 1, 2 read as 12 and not as 2 or 21: the one
+			// count in this file whose value needs every nibble in
+			// the right order and place.
+			data: append([]byte{0x00, 0x12}, make([]byte, 32)...),
+			want: []span{
+				{name: "R", offset: 0, length: 26},
+				{name: "N", offset: 0, length: 2},
+				{
+					name: "A", offset: 2, length: 2, occurs: 12,
+					minOccurs: 1, maxOccurs: 12, dependsOn: "N",
+				},
+			},
+			length: 26,
 		},
 		{
 			name: "an even comp-6 digit count fills its bytes exactly",
@@ -751,6 +772,76 @@ func TestLayoutResolveErrors(t *testing.T) {
 			require.Error(t, err)
 			require.ErrorAs(t, err, tc.target)
 			require.Contains(t, err.Error(), tc.contains)
+		})
+	}
+}
+
+// TestUnsignedPackedValue drives the COMP-6 reader directly, which is the only
+// way to reach its two width guards: readCount only ever hands it a slice whose
+// length came from layouter.width, so a byte count that is no width for the
+// digit count cannot arise there. Pinning them here keeps them honest rather
+// than merely unreachable, and pins the nibble order the resolve tests exercise
+// only through a layout.
+func TestUnsignedPackedValue(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		b       []byte
+		digits  int
+		want    int64
+		wantErr string
+	}{
+		{name: "even digits fill their bytes", b: []byte{0x12, 0x34}, digits: 4, want: 1234},
+		{name: "odd digits pad the leading nibble", b: []byte{0x01, 0x23}, digits: 3, want: 123},
+		{name: "a single digit", b: []byte{0x07}, digits: 1, want: 7},
+		{name: "every nibble carries its place", b: []byte{0x10, 0x00, 0x00}, digits: 6, want: 100000},
+		{name: "the last nibble is a digit and not a sign", b: []byte{0x00, 0x09}, digits: 4, want: 9},
+		{name: "zero", b: []byte{0x00, 0x00}, digits: 4, want: 0},
+		{
+			name: "no bytes hold no digits",
+			b:    []byte{}, digits: 4,
+			wantErr: "holds no digit positions",
+		},
+		{
+			name: "too few bytes for the digit count",
+			b:    []byte{0x12}, digits: 4,
+			wantErr: "holds 1 bytes, which is no 4-digit unsigned packed value",
+		},
+		{
+			name: "too many bytes for the digit count",
+			b:    []byte{0x00, 0x12, 0x34}, digits: 3,
+			wantErr: "holds 3 bytes, which is no 3-digit unsigned packed value",
+		},
+		{
+			name: "a pad nibble holding a digit",
+			b:    []byte{0x91, 0x23}, digits: 3,
+			wantErr: "byte 0 is 0x91, whose high nibble pads a 3-digit value and is not zero",
+		},
+		{
+			name: "a high nibble that is no digit",
+			b:    []byte{0xA1, 0x23}, digits: 4,
+			wantErr: "byte 0 is 0xa1, whose high nibble is no digit",
+		},
+		{
+			name: "a low nibble that is no digit",
+			b:    []byte{0x12, 0x3C}, digits: 4,
+			wantErr: "byte 1 is 0x3c, whose low nibble is no digit",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := unsignedPackedValue(tc.b, tc.digits)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				require.EqualError(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
 		})
 	}
 }
