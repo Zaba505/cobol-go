@@ -2024,6 +2024,15 @@ func TestPrintFragmentRoundTrip(t *testing.T) {
 				"*> end of copybook\n",
 		},
 		{
+			// COMP-6 is written bare here and printed back in the explicit
+			// USAGE form, so the round trip is what proves the printer carries
+			// a dialect usage-type through rather than knowing a fixed list.
+			name: "comp-6 usage",
+			src: "01 ODD-RECORD.\n" +
+				"   05 ODD PIC 9(4) COMP-6.\n" +
+				"   05 EVEN PIC 9(4) USAGE IS COMP-6.\n",
+		},
+		{
 			name: "empty",
 			src:  "",
 		},
