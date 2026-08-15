@@ -619,9 +619,14 @@ func expandOne(c *copyParser, pos Pos, cfg copyConfig, stack []string, yield fun
 		return false
 	}
 
+	// The copybook's tokens get their own listing-directive pass rather than
+	// sharing the copying source's: recognition is line-relative, and a copied
+	// token's position is a position within the copybook, so one filter spanning
+	// the seam would read the copybook's line 1 as a continuation of the line the
+	// COPY statement sat on.
 	replaced := applyReplacing(string(text), st.Replacing)
 	inner := expandCopy(
-		Tokenize(strings.NewReader(replaced), cfg.tokenizeOptions...),
+		skipListingDirectives(Tokenize(strings.NewReader(replaced), cfg.tokenizeOptions...)),
 		cfg,
 		append(append([]string{}, stack...), key),
 	)

@@ -6,10 +6,12 @@ text file library that reads, parses, and formats COBOL source. It follows a
 `go/parser` + `go/printer` in shape but specialized to one language.
 
 ```
-source ── Tokenize ─► iter.Seq2[Token, error] ─┬─► Parse ─► *File (AST) ── Print ─► source
-              │                                │      │                       │
-         tokenizer.go                   expandCopy   parser.go            printer.go
-                                          copy.go
+source ── Tokenize ─► iter.Seq2[Token, error] ─┬───────┬─► Parse ─► *File (AST) ── Print ─► source
+              │                                │       │      │                       │
+         tokenizer.go            skipListingDirectives │  parser.go              printer.go
+                                     directive.go      │
+                                                  expandCopy
+                                                    copy.go
 ```
 
 The whole pipeline is a state machine expressed as **recursive action
@@ -190,6 +192,31 @@ copied text and needs to know nothing about copybooks.
   qualified names turns a loop into a `CopyBookCycleError`.
 - Positions on copied nodes are positions *within the copybook*. `Pos` has no
   field naming a file, so this is a documented trade rather than an oversight.
+
+## Listing directives (`directive.go`)
+
+The listing-control statements — `EJECT`, `SKIP1`/`SKIP2`/`SKIP3` and
+`TITLE <literal>` — direct the compiler's source listing and not the compilation
+of the source text, so `skipListingDirectives` **drops** them from the token
+stream and **no node exists for them in the AST**. That is the settled choice,
+argued in `SPEC.md` §"Listing-Control Statements": this printer emits canonical
+source rather than a listing, and the package already loses the same page-eject
+intent when it re-emits a fixed-format `/` comment line as `*>`.
+
+- Recognition is the standard's own rule — the statement must be **the only
+  statement on its line** — so a word counts only when it *opens* a line, and
+  only tokens on that same line can belong to it (`TITLE`'s literal, the
+  optional separator period). A period on a later line is left to whatever
+  follows.
+- `TITLE` requires its literal operand to be recognized, which is what keeps a
+  bare `TITLE` opening a line an ordinary word (a paragraph name, say).
+- The pass wraps **each tokenizer stream separately** — the source unit's in
+  `Parse`, and each copybook's inside `expandOne`. Recognition is line-relative
+  and copied tokens are positioned within their own copybook, so one filter
+  spanning the seam would read a copybook's line 1 as a continuation of the line
+  the `COPY` statement sat on. This is why the pass is not simply a diversion in
+  `parser.next()` beside the comment one.
+- It runs **before** `expandCopy`, so the `COPY` scan never meets a directive.
 
 ## Printer (`printer.go`)
 

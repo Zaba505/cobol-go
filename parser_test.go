@@ -3560,6 +3560,326 @@ func TestParserFragmentFixedFormat(t *testing.T) {
 	require.Error(t, freeErr)
 }
 
+// TestParserListingDirectivesInFragment pins the listing-control statements
+// (EJECT, SKIP1/2/3, TITLE) in the place they actually turn up: between the data
+// description entries of a real mainframe copybook. They direct the compiler's
+// source listing only, so the package discards them at the parser's next() seam
+// (SPEC "Listing-Control Statements") — every case here is the same two-entry
+// copybook, and the expected AST never mentions the directive. Positions on the
+// entries around it are untouched, which is the point of pinning them exactly.
+func TestParserListingDirectivesInFragment(t *testing.T) {
+	t.Parallel()
+
+	// copybook is 01 A. with a subordinate 05 B PIC X(2)., wherever the directives
+	// push the two entries to.
+	copybook := func(recPos, recNamePos, itemPos, itemNamePos, picPos Pos) *File {
+		return &File{
+			Fragment: &Fragment{
+				Entries: []*DataDescriptionEntry{
+					{
+						Pos:   recPos,
+						Level: 1,
+						Name:  &Word{Pos: recNamePos, Value: "A"},
+					},
+					{
+						Pos:   itemPos,
+						Level: 5,
+						Name:  &Word{Pos: itemNamePos, Value: "B"},
+						Clauses: []DataClause{
+							&PictureClause{Pos: picPos, Picture: "X(2)"},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name     string
+		src      string
+		format   SourceFormat
+		expected *File
+	}{
+		{
+			// The issue's motivating copybook, reduced: a SKIP1 between two entries.
+			name: "directive between entries",
+			src: "01 A.\n" +
+				"SKIP1\n" +
+				"05 B PIC X(2).\n",
+			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{3, 1}, Pos{3, 4}, Pos{3, 6}),
+		},
+		{
+			name: "directive before the first entry",
+			src: "EJECT\n" +
+				"01 A.\n" +
+				"05 B PIC X(2).\n",
+			expected: copybook(Pos{2, 1}, Pos{2, 4}, Pos{3, 1}, Pos{3, 4}, Pos{3, 6}),
+		},
+		{
+			// Nothing follows the directive, so ending the stream inside one must
+			// end the parse cleanly rather than trip the end-of-input check.
+			name: "directive after the last entry",
+			src: "01 A.\n" +
+				"05 B PIC X(2).\n" +
+				"EJECT\n",
+			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{2, 1}, Pos{2, 4}, Pos{2, 6}),
+		},
+		{
+			name: "directive after the last entry with a separator period",
+			src: "01 A.\n" +
+				"05 B PIC X(2).\n" +
+				"EJECT.\n",
+			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{2, 1}, Pos{2, 4}, Pos{2, 6}),
+		},
+		{
+			name: "directives with separator periods",
+			src: "01 A.\n" +
+				"SKIP1.\n" +
+				"05 B PIC X(2).\n",
+			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{3, 1}, Pos{3, 4}, Pos{3, 6}),
+		},
+		{
+			// COBOL reserved words are case-insensitive, so the directives are too.
+			name: "lowercase directives",
+			src: "01 A.\n" +
+				"eject\n" +
+				"skip2.\n" +
+				"05 B PIC X(2).\n",
+			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{4, 1}, Pos{4, 4}, Pos{4, 6}),
+		},
+		{
+			// TITLE is the one form with an operand; the literal goes with it.
+			name: "title with a literal operand",
+			src: "TITLE 'CUSTOMER RECORD'\n" +
+				"01 A.\n" +
+				"05 B PIC X(2).\n",
+			expected: copybook(Pos{2, 1}, Pos{2, 4}, Pos{3, 1}, Pos{3, 4}, Pos{3, 6}),
+		},
+		{
+			name: "every form in one copybook",
+			src: "EJECT\n" +
+				"01 A.\n" +
+				"SKIP1\n" +
+				"SKIP2\n" +
+				"SKIP3\n" +
+				"TITLE 'X'.\n" +
+				"05 B PIC X(2).\n",
+			expected: copybook(Pos{2, 1}, Pos{2, 4}, Pos{7, 1}, Pos{7, 4}, Pos{7, 6}),
+		},
+		{
+			// IBM permits a listing-control statement in Area A or Area B alike, so
+			// neither column is load-bearing.
+			name: "fixed format directive in Area A",
+			src: "       01  A.\n" +
+				"       SKIP1\n" +
+				"           05  B PIC X(2).\n",
+			format:   FixedFormat,
+			expected: copybook(Pos{1, 8}, Pos{1, 12}, Pos{3, 12}, Pos{3, 16}, Pos{3, 18}),
+		},
+		{
+			name: "fixed format directive in Area B",
+			src: "       01  A.\n" +
+				"           SKIP1\n" +
+				"           05  B PIC X(2).\n",
+			format:   FixedFormat,
+			expected: copybook(Pos{1, 8}, Pos{1, 12}, Pos{3, 12}, Pos{3, 16}, Pos{3, 18}),
+		},
+		{
+			name: "fixed format title with a literal operand and a period",
+			src: "       TITLE 'CUSTOMER RECORD'.\n" +
+				"       01  A.\n" +
+				"           05  B PIC X(2).\n",
+			format:   FixedFormat,
+			expected: copybook(Pos{2, 8}, Pos{2, 12}, Pos{3, 12}, Pos{3, 16}, Pos{3, 18}),
+		},
+		{
+			// The separator period is the directive's only when it is on the
+			// directive's own line. Here the period terminating the 05 entry sits
+			// on the line after SKIP1: claiming it would leave the entry
+			// unterminated and the parse would die at end of input.
+			name: "period on a later line belongs to the following construct",
+			src: "01 A.\n" +
+				"05 B PIC X(2)\n" +
+				"SKIP1\n" +
+				".\n",
+			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{2, 1}, Pos{2, 4}, Pos{2, 6}),
+		},
+		{
+			// A directive word is one only when it opens its line. Second on the
+			// line it is an ordinary word — here the record's name.
+			name: "directive spelling used as a data name",
+			src: "01 EJECT.\n" +
+				"05 TITLE PIC X(2).\n",
+			expected: &File{
+				Fragment: &Fragment{
+					Entries: []*DataDescriptionEntry{
+						{
+							Pos:   Pos{1, 1},
+							Level: 1,
+							Name:  &Word{Pos: Pos{1, 4}, Value: "EJECT"},
+						},
+						{
+							Pos:   Pos{2, 1},
+							Level: 5,
+							Name:  &Word{Pos: Pos{2, 4}, Value: "TITLE"},
+							Clauses: []DataClause{
+								&PictureClause{Pos: Pos{2, 10}, Picture: "X(2)"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			// Comments and directives are diverted at the same seam, so a comment
+			// still attaches to the entry that follows the directive.
+			name: "comment across a directive",
+			src: "01 A.\n" +
+				"*> the identifier\n" +
+				"SKIP1\n" +
+				"05 B PIC X(2).\n",
+			expected: &File{
+				Fragment: &Fragment{
+					Entries: []*DataDescriptionEntry{
+						{
+							Pos:   Pos{1, 1},
+							Level: 1,
+							Name:  &Word{Pos: Pos{1, 4}, Value: "A"},
+						},
+						{
+							Pos:      Pos{4, 1},
+							Comments: []*Comment{{Pos: Pos{2, 1}, Text: "the identifier"}},
+							Level:    5,
+							Name:     &Word{Pos: Pos{4, 4}, Value: "B"},
+							Clauses: []DataClause{
+								&PictureClause{Pos: Pos{4, 6}, Picture: "X(2)"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f, err := Parse(strings.NewReader(tc.src), WithFragment(), WithSourceFormat(tc.format))
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, f)
+		})
+	}
+}
+
+// TestParserListingDirectivesInProgram pins the same statements in a full source
+// unit rather than a copybook fragment: in the DATA DIVISION, in the PROCEDURE
+// DIVISION, and between the division headers themselves. The assertion is the
+// discard decision stated directly — the AST of a program carrying the
+// directives is the AST of the same program with those lines deleted, positions
+// aside — which no hand-built expected tree says as plainly.
+func TestParserListingDirectivesInProgram(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		src    string
+		bare   string
+		format SourceFormat
+	}{
+		{
+			name: "free format across both divisions",
+			src: "TITLE 'LEDGER'\n" +
+				"IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. LEDGER.\n" +
+				"EJECT\n" +
+				"DATA DIVISION.\n" +
+				"WORKING-STORAGE SECTION.\n" +
+				"SKIP1\n" +
+				"01 COUNTER PIC 9(2).\n" +
+				"SKIP2.\n" +
+				"01 TOTAL PIC 9(4).\n" +
+				"EJECT\n" +
+				"PROCEDURE DIVISION.\n" +
+				"P.\n" +
+				"SKIP3\n" +
+				"    DISPLAY \"x\".\n" +
+				"EJECT\n" +
+				"    STOP RUN.\n",
+			bare: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. LEDGER.\n" +
+				"DATA DIVISION.\n" +
+				"WORKING-STORAGE SECTION.\n" +
+				"01 COUNTER PIC 9(2).\n" +
+				"01 TOTAL PIC 9(4).\n" +
+				"PROCEDURE DIVISION.\n" +
+				"P.\n" +
+				"    DISPLAY \"x\".\n" +
+				"    STOP RUN.\n",
+		},
+		{
+			name: "fixed format across both divisions",
+			src: "       IDENTIFICATION DIVISION.\n" +
+				"       PROGRAM-ID. LEDGER.\n" +
+				"       EJECT\n" +
+				"       DATA DIVISION.\n" +
+				"       WORKING-STORAGE SECTION.\n" +
+				"           SKIP1\n" +
+				"       01  COUNTER PIC 9(2).\n" +
+				"       PROCEDURE DIVISION.\n" +
+				"       P.\n" +
+				"       SKIP2\n" +
+				"           DISPLAY \"x\".\n" +
+				"           STOP RUN.\n",
+			bare: "       IDENTIFICATION DIVISION.\n" +
+				"       PROGRAM-ID. LEDGER.\n" +
+				"       DATA DIVISION.\n" +
+				"       WORKING-STORAGE SECTION.\n" +
+				"       01  COUNTER PIC 9(2).\n" +
+				"       PROCEDURE DIVISION.\n" +
+				"       P.\n" +
+				"           DISPLAY \"x\".\n" +
+				"           STOP RUN.\n",
+			format: FixedFormat,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			withDirectives, err := Parse(strings.NewReader(tc.src), WithSourceFormat(tc.format))
+			require.NoError(t, err)
+
+			bare, err := Parse(strings.NewReader(tc.bare), WithSourceFormat(tc.format))
+			require.NoError(t, err)
+
+			require.Equal(t, withoutPos(bare), withoutPos(withDirectives))
+		})
+	}
+}
+
+// TestParserBareTitleIsNotADirective pins the boundary the operand rule draws: a
+// TITLE statement always carries a literal, so a bare TITLE opening a line is an
+// ordinary word and stays one — here the name of a paragraph.
+func TestParserBareTitleIsNotADirective(t *testing.T) {
+	t.Parallel()
+
+	src := "IDENTIFICATION DIVISION.\n" +
+		"PROGRAM-ID. P.\n" +
+		"PROCEDURE DIVISION.\n" +
+		"TITLE.\n" +
+		"    STOP RUN.\n"
+
+	f, err := Parse(strings.NewReader(src))
+	require.NoError(t, err)
+
+	proc, ok := f.Programs[0].Divisions[1].(*ProcedureDivision)
+	require.True(t, ok)
+	require.Len(t, proc.Paragraphs, 1)
+	require.Equal(t, "TITLE", proc.Paragraphs[0].Name.Value)
+}
+
 // TestParserUsageComp6 pins COMP-6, the GnuCOBOL/Micro Focus packed-decimal
 // usage-type with no sign nibble. It is grammar only: the spelling is admitted
 // wherever any other usage-type is — bare and after USAGE [IS], in free format

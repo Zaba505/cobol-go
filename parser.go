@@ -1689,6 +1689,11 @@ func WithCopyBooks(r CopyBookResolver) ParseOption {
 // nothing of them appears in the [File]. Pass [WithCopyBooks] to supply the
 // copybooks; a source that copies without one is a
 // [MissingCopyBookResolverError].
+//
+// The listing-control statements EJECT, SKIP1, SKIP2, SKIP3 and TITLE are
+// accepted wherever they stand on a line of their own and are discarded: they
+// direct the compiler's source listing rather than the compilation, and nothing
+// of them appears in the [File] either.
 func Parse(r io.Reader, opts ...ParseOption) (*File, error) {
 	cfg := parseConfig{} // zero value => FreeFormat
 	for _, opt := range opts {
@@ -1705,6 +1710,13 @@ func Parse(r io.Reader, opts ...ParseOption) (*File, error) {
 		panic(fmt.Sprintf("unknown source format: %d", cfg.format))
 	}
 
+	// Two passes stand between the tokenizer and the parser, for the two things
+	// COBOL removes from the source text before compiling it.
+	//
+	// The listing-control statements (EJECT, SKIP1/2/3, TITLE) direct the
+	// compiler's listing and not the compilation, so they are dropped outright;
+	// they go first so the COPY scan below never meets one.
+	//
 	// COPY is a text-manipulation statement, not a construct of the grammar: the
 	// expansion pass sits between the tokenizer and the parser so every division,
 	// section and entry parser below sees only the copied text. It runs even when
@@ -1712,7 +1724,7 @@ func Parse(r io.Reader, opts ...ParseOption) (*File, error) {
 	// the missing resolver it is rather than as a stray word in whatever
 	// construct happened to be open.
 	tokens := expandCopy(
-		Tokenize(r, topts...),
+		skipListingDirectives(Tokenize(r, topts...)),
 		copyConfig{resolver: cfg.copyBooks, tokenizeOptions: topts},
 		nil,
 	)
