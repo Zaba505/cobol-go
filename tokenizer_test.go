@@ -749,6 +749,138 @@ func TestTokenizerLevelNumbers(t *testing.T) {
 	}
 }
 
+// The listing-control statements (EJECT, SKIP1/2/3, TITLE) are not a lexical
+// class either: the tokenizer has no notion of them and lexes each as the
+// ordinary word it looks like, with TITLE's operand a plain alphanumeric
+// literal and any trailing separator period a plain symbol. This pins that
+// stream — it is what the parser sees and discards at its next() seam (SPEC
+// "Listing-Control Statements"), so a change here is a change to the parser's
+// input.
+func TestTokenizerListingDirectives(t *testing.T) {
+	t.Parallel()
+
+	collect := func(seq iter.Seq2[Token, error]) ([]Token, error) {
+		var tokens []Token
+		for tok, err := range seq {
+			if err != nil {
+				return tokens, err
+			}
+			t.Log(tok)
+			tokens = append(tokens, tok)
+		}
+		return tokens, nil
+	}
+
+	testCases := []struct {
+		name     string
+		src      string
+		opts     []TokenizeOption
+		expected []Token
+	}{
+		{
+			name: "free format bare directives",
+			src:  "EJECT\nSKIP1\nSKIP2\nSKIP3\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("EJECT")},
+				{Pos: Pos{Line: 2, Column: 1}, Type: TokenIdentifier, Value: []byte("SKIP1")},
+				{Pos: Pos{Line: 3, Column: 1}, Type: TokenIdentifier, Value: []byte("SKIP2")},
+				{Pos: Pos{Line: 4, Column: 1}, Type: TokenIdentifier, Value: []byte("SKIP3")},
+			},
+		},
+		{
+			name: "free format directive with a separator period",
+			src:  "EJECT.\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("EJECT")},
+				{Pos: Pos{Line: 1, Column: 6}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			name: "free format lowercase directive",
+			src:  "skip1\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("skip1")},
+			},
+		},
+		{
+			// TITLE's operand is an ordinary alphanumeric literal, and it sits on
+			// the directive's own line — the same rule that makes a trailing period
+			// the directive's.
+			name: "free format title with a literal operand",
+			src:  "TITLE 'CUSTOMER RECORD'.\n",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenIdentifier, Value: []byte("TITLE")},
+				{Pos: Pos{Line: 1, Column: 7}, Type: TokenString, Value: []byte("'CUSTOMER RECORD'")},
+				{Pos: Pos{Line: 1, Column: 24}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// IBM permits these statements in Area A or Area B alike, so the only
+			// thing the column changes is the position on the token.
+			name: "fixed format directive in Area A",
+			src:  "       SKIP1\n",
+			opts: []TokenizeOption{WithFixedFormat()},
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte("SKIP1")},
+			},
+		},
+		{
+			name: "fixed format directive in Area B",
+			src:  "           SKIP1\n",
+			opts: []TokenizeOption{WithFixedFormat()},
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 12}, Type: TokenIdentifier, Value: []byte("SKIP1")},
+			},
+		},
+		{
+			name: "fixed format title with a literal operand",
+			src:  "       TITLE 'X'.\n",
+			opts: []TokenizeOption{WithFixedFormat()},
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenIdentifier, Value: []byte("TITLE")},
+				{Pos: Pos{Line: 1, Column: 14}, Type: TokenString, Value: []byte("'X'")},
+				{Pos: Pos{Line: 1, Column: 17}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// The motivating copybook: a directive between two data description
+			// entries is lexically indistinguishable from the words around it.
+			name: "fixed format directive between data description entries",
+			src: "       01  LEDGER-HEADER.\n" +
+				"           05  HDR-TYPE PIC X(2).\n" +
+				"       SKIP1\n" +
+				"           05  HDR-LEDGER-ID PIC X(10).\n",
+			opts: []TokenizeOption{WithFixedFormat()},
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 8}, Type: TokenNumber, Value: []byte("01")},
+				{Pos: Pos{Line: 1, Column: 12}, Type: TokenIdentifier, Value: []byte("LEDGER-HEADER")},
+				{Pos: Pos{Line: 1, Column: 25}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 2, Column: 12}, Type: TokenNumber, Value: []byte("05")},
+				{Pos: Pos{Line: 2, Column: 16}, Type: TokenIdentifier, Value: []byte("HDR-TYPE")},
+				{Pos: Pos{Line: 2, Column: 25}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 2, Column: 29}, Type: TokenPicture, Value: []byte("X(2)")},
+				{Pos: Pos{Line: 2, Column: 33}, Type: TokenSymbol, Value: []byte(".")},
+				{Pos: Pos{Line: 3, Column: 8}, Type: TokenIdentifier, Value: []byte("SKIP1")},
+				{Pos: Pos{Line: 4, Column: 12}, Type: TokenNumber, Value: []byte("05")},
+				{Pos: Pos{Line: 4, Column: 16}, Type: TokenIdentifier, Value: []byte("HDR-LEDGER-ID")},
+				{Pos: Pos{Line: 4, Column: 30}, Type: TokenIdentifier, Value: []byte("PIC")},
+				{Pos: Pos{Line: 4, Column: 34}, Type: TokenPicture, Value: []byte("X(10)")},
+				{Pos: Pos{Line: 4, Column: 39}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tokens, err := collect(Tokenize(strings.NewReader(tc.src), tc.opts...))
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, tokens)
+		})
+	}
+}
+
 func TestTokenizerErrors(t *testing.T) {
 	t.Parallel()
 

@@ -491,13 +491,62 @@ indicator area; in free format it may begin in any column. Relevant directives:
   in-source `>>SOURCE FORMAT` directive (vs. an explicit caller choice) remains
   deferred — it needs the CDF directive token, which is not yet recognized.
 - `>>PAGE` — page eject; the free-format counterpart of the fixed-format `/`
-  column-7 indicator.
+  column-7 indicator and of the `EJECT` statement below.
 - `>>SET`, `>>DEFINE`, `>>IF` / `>>ELSE` / `>>END-IF` — conditional compilation.
 
 > **Ambiguity:** Full CDF semantics (conditional compilation, `DEFINE`
 > substitution) are out of scope for the core parser; recognize the directive
 > line as a token and, at minimum, honor `SOURCE FORMAT`. The AST may keep
 > directive lines verbatim for round-tripping.
+
+### Listing-Control Statements
+
+`EJECT`, `SKIP1`, `SKIP2`, `SKIP3` and `TITLE` are a **separate class** from the
+`>>` directives above, and the older one. They are compiler-directing
+*statements* written as ordinary COBOL words in the source text — no `>>`
+introducer, no distinct token class — and they affect only the **compiler's
+source listing**, never the compilation of the source text itself (*IBM
+Enterprise COBOL for z/OS,
+[SKIP statements](https://www.ibm.com/docs/en/cobol-zos/6.3.0?topic=statements-skip)*).
+
+```ebnf
+ListingStatement = ( "EJECT" | "SKIP1" | "SKIP2" | "SKIP3" ) [ "." ]
+                 | "TITLE" AlphanumericLiteral [ "." ] ;
+```
+
+- `EJECT` begins a new page of the listing; `SKIP1` / `SKIP2` / `SKIP3` leave
+  one, two or three blank lines in it; `TITLE` sets the page title from its
+  literal operand.
+- Each may be written in **Area A or Area B**, is **not** itself printed, and
+  must be **the only statement on the line**. That last rule is what makes the
+  words recognizable at all, since none of them is otherwise distinguishable
+  from a user-defined word.
+- The separator period is **optional**, and belongs to the statement only when
+  written on the statement's own line; a period on a later line terminates
+  whatever construct follows.
+- Like every COBOL reserved word, the spellings are case-insensitive.
+- `EJECT` is the third spelling of one intent: the fixed-format `/` in the
+  column-7 indicator area and the free-format `>>PAGE` directive both ask for
+  the same page eject.
+
+**Discarded, not preserved.** The package removes these statements from the
+token stream before the grammar sees them, and no AST node records them.
+The reason is that they describe an artifact this package does not produce: a
+compiler's source listing, with its pages and its page titles. The printer emits
+canonical source, and it already drops this same intent in the one spelling the
+tokenizer does recognize — a fixed-format `/` comment line survives as its
+comment *text* only, re-emitted as `*>`, with the page eject gone. Preserving
+`EJECT` while discarding `/`'s eject would be incoherent, and a `SKIP2` carried
+into an AST would be an instruction for an output that has no reader. Comments
+set the opposite precedent and keep their `Comment` nodes, because a comment's
+text is content that exists nowhere else; `EJECT` and `SKIP1` carry no content,
+and `TITLE`'s literal titles a listing page rather than describing the data.
+
+> **Ambiguity:** Recognition follows the "only statement on the line" rule
+> literally, so a *user-defined word* spelled `EJECT` or `SKIP1` that happens to
+> open a line on its own is read as the statement. `TITLE` is exempt: because a
+> `TITLE` statement always carries a literal operand, a bare `TITLE` opening a
+> line stays an ordinary word (a data name or a paragraph name).
 
 ### COPY and Pseudo-Text
 
@@ -663,6 +712,11 @@ program-name      = user-defined-word | AlphanumericLiteral
   `>>PAGE`, conditional-compilation directives), not only in a leading preamble.
   By convention `>>SOURCE FORMAT IS FREE`, when present, appears first. Document
   end: end of input after the last program.
+- The [listing-control statements](#listing-control-statements) (`EJECT`,
+  `SKIP1`/`SKIP2`/`SKIP3`, `TITLE`) are trivia in the same sense: they may stand
+  on a line of their own anywhere a line may — between divisions, among data
+  description entries, between the sentences of a paragraph — and are removed
+  before the grammar rather than admitted by it.
 
 > **Ambiguity:** Nested programs, and non-program compilation units (functions,
 > classes, interfaces), are recognized structurally but their full grammar is
@@ -1365,3 +1419,6 @@ round-trip fixtures are added in #23; this snippet is illustrative.)
 - GnuCOBOL Programmer's Guide, Chapter 2 — *COBOL Fundamentals*.
   <https://superbol.eu/gnucobol/gnucobpg/chapter2.html>
 - GnuCOBOL project documentation. <https://gnucobol.sourceforge.io/>
+- IBM Enterprise COBOL for z/OS 6.3, *SKIP statements* — the listing-control
+  statements' area, one-statement-per-line and optional-period rules.
+  <https://www.ibm.com/docs/en/cobol-zos/6.3.0?topic=statements-skip>

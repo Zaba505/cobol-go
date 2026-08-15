@@ -1684,6 +1684,26 @@ func TestPrinterRoundTrip(t *testing.T) {
 				"PROCEDURE DIVISION.\n" +
 				"    SEARCH ALL T WHEN K = 1 AND V DISPLAY \"f\" END-SEARCH.\n",
 		},
+		{
+			// The listing-control statements are discarded at the parse, so the
+			// round trip stays stable through them wherever they fall — between
+			// division headers, among data description entries, and between the
+			// sentences of a paragraph.
+			name: "listing directives",
+			src: "TITLE 'LEDGER'\n" +
+				"IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"EJECT\n" +
+				"DATA DIVISION.\n" +
+				"WORKING-STORAGE SECTION.\n" +
+				"SKIP1\n" +
+				"01 COUNTER PIC 9(2).\n" +
+				"PROCEDURE DIVISION.\n" +
+				"SKIP2.\n" +
+				"    DISPLAY \"x\".\n" +
+				"EJECT\n" +
+				"    STOP RUN.\n",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1988,6 +2008,38 @@ func TestPrintFragment(t *testing.T) {
 	require.Equal(t, expected, buf.String())
 }
 
+// TestPrintFragmentDropsListingDirectives is the direct half of the discard
+// decision (SPEC "Listing-Control Statements"): a fixed-format copybook out of a
+// mainframe library goes in, and the printed copybook comes out carrying its
+// comments but none of the listing-control statements — the package prints
+// canonical source, not a compiler listing. The round-trip half cannot show
+// this; there the directives are already gone before the printer runs.
+func TestPrintFragmentDropsListingDirectives(t *testing.T) {
+	t.Parallel()
+
+	src := "000100 TITLE 'CUSTOMER RECORD'\n" +
+		"000200* customer copybook\n" +
+		"000300 01  CUSTOMER-RECORD.\n" +
+		"000400 SKIP1\n" +
+		"000500     05  CUST-ID     PIC 9(6).\n" +
+		"000600 EJECT\n" +
+		"000700     05  CUST-NAME   PIC X(20).\n" +
+		"000800 SKIP2.\n"
+
+	const expected = `*> customer copybook
+01 CUSTOMER-RECORD.
+    05 CUST-ID PIC 9(6).
+    05 CUST-NAME PIC X(20).
+`
+
+	f, err := Parse(strings.NewReader(src), WithFragment(), WithSourceFormat(FixedFormat))
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	require.NoError(t, Print(&buf, f))
+	require.Equal(t, expected, buf.String())
+}
+
 // TestPrintUsageComp6 is the direct half for a dialect usage-type: an explicit
 // *File in, the exact expected text out. The printer emits "USAGE " + the
 // recorded usage-type rather than consulting a list of the ones it knows, so a
@@ -2068,6 +2120,19 @@ func TestPrintFragmentRoundTrip(t *testing.T) {
 			name: "comp-6 usage",
 			src: "01 ODD-RECORD.\n" +
 				"   05 ODD PIC 9(4) COMP-6.\n",
+		},
+		{
+			// The listing-control statements are discarded at the parse, so the
+			// round trip is stable through them by construction: they are gone
+			// before the printer is reached and cannot come back on the re-parse.
+			// What they must not do is disturb the entries around them — see
+			// TestPrintFragmentDropsListingDirectives for the printed text.
+			name: "listing directives",
+			src: "TITLE 'CUSTOMER RECORD'\n" +
+				"01 CUSTOMER-RECORD.\n" +
+				"SKIP1\n" +
+				"   05 CUST-ID PIC 9(6).\n" +
+				"EJECT\n",
 		},
 		{
 			name: "empty",

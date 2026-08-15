@@ -353,6 +353,66 @@ func TestParserCopyNested(t *testing.T) {
 	})
 }
 
+// TestParserCopyListingDirectives pins the listing-control statements (EJECT,
+// SKIP1/2/3, TITLE) inside library text, where a mainframe copybook most often
+// carries them. They are dropped by a pass that runs on each tokenizer stream
+// separately — the copying source's and each copybook's — because recognition is
+// line-relative and a copied token is positioned within its own copybook. A
+// single filter spanning the seam would read a copybook's line 1 as a
+// continuation of the line the COPY statement sat on and let its directive
+// through.
+func TestParserCopyListingDirectives(t *testing.T) {
+	t.Parallel()
+
+	books := MapCopyBooks(map[string]string{
+		// LEADING opens on the very line number the COPY statement below sits on.
+		"LEADING": "EJECT\n05 B PIC X(2).\n",
+		"MIDDLE":  "05 B PIC X(2).\nSKIP1\nCOPY INNER.\n",
+		"INNER":   "TITLE 'INNER'\n05 C PIC X(3).\nSKIP2.\n",
+	})
+
+	testCases := []struct {
+		name  string
+		src   string
+		names []string
+	}{
+		{
+			// The regression the per-stream pass exists for: the copying source's
+			// last token and the copybook's first are both on "line 1".
+			name:  "directive opening a copybook",
+			src:   "01 A.\nCOPY LEADING.\n",
+			names: []string{"A", "B"},
+		},
+		{
+			name:  "directives in the copying source around the statement",
+			src:   "EJECT\n01 A.\nSKIP1\nCOPY LEADING.\nSKIP3\n",
+			names: []string{"A", "B"},
+		},
+		{
+			// A directive in a copybook that itself copies: every stream in the
+			// nest gets its own pass.
+			name:  "directives through a nested copybook",
+			src:   "01 A.\nCOPY MIDDLE.\n",
+			names: []string{"A", "B", "C"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f, err := Parse(strings.NewReader(tc.src), WithFragment(), WithCopyBooks(books))
+			require.NoError(t, err)
+
+			names := make([]string, 0, len(f.Fragment.Entries))
+			for _, e := range f.Fragment.Entries {
+				names = append(names, e.Name.Value)
+			}
+			require.Equal(t, tc.names, names)
+		})
+	}
+}
+
 // COPY is not confined to the DATA DIVISION: it is a text-manipulation statement
 // and may stand anywhere library text can, the PROCEDURE DIVISION included.
 func TestParserCopyWholeProgram(t *testing.T) {
