@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -346,6 +347,234 @@ func TestReaderReadAlphanumeric(t *testing.T) {
 	})
 }
 
+// charsetEncoding returns an encoding whose charset is cs. The charset is the
+// only axis an alphanumeric field reads — neither the sign convention, the
+// float format nor the byte order touches one — so the walks below vary that
+// axis alone and leave the rest at a bundle's values.
+func charsetEncoding(cs Charset) Encoding {
+	enc := GnuCOBOLASCII()
+	enc.Charset = cs
+	return enc
+}
+
+// alphanumericCharset is one row of the table the alphanumeric walks run over.
+type alphanumericCharset struct {
+	name    string
+	charset Charset
+	// roundTrip says a PIC X field of arbitrary bytes survives
+	// decode → encode → byte-equal under this charset, which needs it to be
+	// bijective over the whole byte space. Where it is not, why says why, and
+	// unrepresentable is the first character of the all-bytes corpus the
+	// writer has no byte for.
+	roundTrip       bool
+	unrepresentable rune
+	why             string
+}
+
+// alphanumericCharsets is every charset the alphanumeric accessors are walked
+// over byte for byte: every charset the package ships, taken from
+// shippedCharsets so that a code page added there is walked by construction,
+// plus the caller-supplied oddballCharset, which is in the table so that an
+// implementation hard-coded to a shipped code page fails the walk rather than
+// passes it.
+var alphanumericCharsets = func() []alphanumericCharset {
+	table := make([]alphanumericCharset, 0, len(shippedCharsets)+1)
+	for _, sc := range shippedCharsets {
+		// Every charset this package ships is bijective over all 256 bytes —
+		// TestCharsetIsTotalAndBijective is what holds that true — so a PIC X
+		// field of arbitrary bytes round-trips under each of them.
+		table = append(table, alphanumericCharset{name: sc.name, charset: sc.charset, roundTrip: true})
+	}
+	return append(table, alphanumericCharset{
+		name:    "oddball",
+		charset: oddballCharset{},
+		// A caller's charset owes this package a total ToUnicode and nothing
+		// more, and oddball's FromUnicode spells only the digits and the two
+		// signs — so U+0000, the first character of the decoded corpus, has no
+		// byte to be written back as. Nor is its decoding injective: 0x01 and
+		// 0x2B both decode to '+', so even a total FromUnicode could not
+		// reproduce the field. A PIC X field of arbitrary bytes is therefore
+		// unrepresentable under such a charset, which is a property of the
+		// charset and not a defect of the writer; [Reader.ReadBytes] is what
+		// carries a binary payload under one.
+		unrepresentable: 0x00,
+		why:             "oddball spells only the digits, '+' and '-'",
+	})
+}()
+
+// wantUTF8Lens is the length in bytes of the decoded 256-byte corpus under
+// each charset, keyed by the charset's own name. The lengths are stated rather
+// than derived, because they are the property these walks exist to pin: a
+// translation emitting one byte per input byte — string(b), or a [256]byte
+// table — reads 256 for every charset here, and every one of them maps some
+// byte above U+007F, where a character costs two bytes once written as UTF-8.
+//
+// A charset added to alphanumericCharsets with no length here fails the walk
+// rather than being quietly walked without the pin.
+var wantUTF8Lens = map[string]int{
+	"ASCII":   384,
+	"cp037":   384,
+	"oddball": 374,
+}
+
+// allByteValues is a PIC X field carrying every byte value in order, which is
+// the corpus the alphanumeric walks below run over. Under every charset in
+// alphanumericCharsets it begins and ends with a byte that does not decode to
+// a space, so the padding strip is a no-op on it and cannot mask a difference
+// — the walks assert that rather than assume it.
+func allByteValues() []byte {
+	src := make([]byte, 256)
+	for i := range src {
+		src[i] = byte(i)
+	}
+	return src
+}
+
+// paddedMultiByteField is a six-byte PIC X field whose value is the two
+// characters cs spells for 0x80 and 0xFF, padded either side with two of the
+// charset's space bytes. It is the fixture where the justification axis is
+// load-bearing: the trim and the pad run on opposite ends, and the value's
+// characters are not one byte each, so an implementation working over the
+// source bytes rather than over the translated string takes the wrong amount
+// off one end. It returns the field and the value it carries.
+func paddedMultiByteField(cs Charset) (src []byte, content string) {
+	return []byte{cs.Space(), cs.Space(), 0x80, 0xFF, cs.Space(), cs.Space()},
+		string([]rune{cs.ToUnicode(0x80), cs.ToUnicode(0xFF)})
+}
+
+// requireMultiByteFixture states the preconditions paddedMultiByteField's
+// value carries, rather than leaving a charset that violates one to fail with
+// a diff of two unprintable strings and no reason.
+//
+// The padding is a byte and the trim runs on characters, so the two only meet
+// where the charset's space byte decodes to U+0020; and the value is only a
+// multi-byte case where its characters do not fit in one UTF-8 byte.
+func requireMultiByteFixture(t *testing.T, cs Charset, content string) {
+	t.Helper()
+
+	require.Equalf(t, ' ', cs.ToUnicode(cs.Space()),
+		"%s's space byte does not decode to U+0020, so a field padded with it has no padding to strip",
+		cs.Name())
+	for _, r := range content {
+		require.NotEqualf(t, ' ', r, "a value character of %s decodes to a space, so the field is all padding", cs.Name())
+		require.Greaterf(t, r, rune(0x7F), "a value character of %s is one byte, so the case is not multi-byte", cs.Name())
+	}
+}
+
+// TestReaderReadAlphanumericTranslatesEveryByte reads a PIC X field carrying
+// all 256 byte values and requires the result to be byte-identical to the
+// charset's own translation of those bytes. Every other alphanumeric fixture
+// in the package spells printable characters, so the 128 byte values where a
+// translating implementation and a verbatim one disagree are otherwise
+// untested end to end — and a PIC X field routinely carries a binary payload
+// (codec/SPEC.md, "Alphanumeric and Alphabetic Items"), which makes the high
+// half of the byte space data rather than a theoretical case.
+func TestReaderReadAlphanumericTranslatesEveryByte(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range alphanumericCharsets {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := allByteValues()
+
+			// The reference is the accessor's specification and reads nothing
+			// of its implementation: translate each byte through the charset,
+			// then encode the character it names as UTF-8.
+			var sb strings.Builder
+			for _, b := range src {
+				sb.WriteRune(tc.charset.ToUnicode(b))
+			}
+			want := sb.String()
+
+			wantLen, ok := wantUTF8Lens[tc.charset.Name()]
+			require.Truef(t, ok, "no decoded length stated for %s; add one to wantUTF8Lens", tc.charset.Name())
+			require.Equal(t, wantLen, len(want))
+			require.Greaterf(t, len(want), len(src),
+				"%s decodes this corpus one byte per byte, so it cannot catch a verbatim read",
+				tc.charset.Name())
+
+			// The strip takes off U+0020 rather than the charset's space
+			// byte, since it runs on the translated string — so both are what
+			// the corpus has to avoid at its ends for the equality below to be
+			// exact under either justification.
+			require.Equal(t, want, strings.Trim(want, " "),
+				"corpus begins or ends with a space, so the padding strip would hide a difference")
+			require.NotEqual(t, tc.charset.Space(), src[0])
+			require.NotEqual(t, tc.charset.Space(), src[len(src)-1])
+
+			for _, j := range []Justification{JustifyLeft, JustifyRight} {
+				t.Run(j.String(), func(t *testing.T) {
+					t.Parallel()
+
+					r, err := NewReader(bytes.NewReader(src), charsetEncoding(tc.charset))
+					require.NoError(t, err)
+
+					got, err := r.ReadAlphanumericJustified(len(src), j)
+					require.NoError(t, err)
+					require.Equal(t, want, got)
+					require.Equal(t, int64(len(src)), r.Offset())
+
+					// Stated apart from the equality above because it is the
+					// mutation this walk was written for: string(b) and a
+					// [256]byte table both produce exactly this.
+					require.NotEqual(t, string(src), got, "field was read verbatim rather than translated")
+				})
+			}
+
+			t.Run("default justification", func(t *testing.T) {
+				t.Parallel()
+
+				r, err := NewReader(bytes.NewReader(src), charsetEncoding(tc.charset))
+				require.NoError(t, err)
+
+				got, err := r.ReadAlphanumeric(len(src))
+				require.NoError(t, err)
+				require.Equal(t, want, got)
+			})
+		})
+	}
+}
+
+// TestReaderReadAlphanumericTrimsAroundMultiByteContent pins the padding strip
+// against a value whose characters are not one byte each. The trim runs on the
+// translated string rather than on the bytes read, so a strip written over the
+// source bytes would take the wrong number of characters off the end that
+// carries the padding.
+func TestReaderReadAlphanumericTrimsAroundMultiByteContent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range alphanumericCharsets {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cs := tc.charset
+			src, content := paddedMultiByteField(cs)
+			requireMultiByteFixture(t, cs, content)
+
+			testCases := []struct {
+				justify Justification
+				want    string
+			}{
+				{justify: JustifyLeft, want: "  " + content},
+				{justify: JustifyRight, want: content + "  "},
+			}
+			for _, jc := range testCases {
+				t.Run(jc.justify.String(), func(t *testing.T) {
+					t.Parallel()
+
+					r, err := NewReader(bytes.NewReader(src), charsetEncoding(cs))
+					require.NoError(t, err)
+
+					got, err := r.ReadAlphanumericJustified(len(src), jc.justify)
+					require.NoError(t, err)
+					require.Equal(t, jc.want, got)
+				})
+			}
+		})
+	}
+}
+
 func TestReaderReadBytes(t *testing.T) {
 	t.Parallel()
 
@@ -376,6 +605,36 @@ func TestReaderReadBytes(t *testing.T) {
 		got, err := r.ReadBytes(len(src))
 		require.NoError(t, err)
 		require.Equal(t, src, got)
+	})
+
+	t.Run("returns a slice the caller owns", func(t *testing.T) {
+		t.Parallel()
+
+		// The doc comment promises the returned slice is the caller's own and
+		// is not a view into a buffer the Reader reuses. Two short reads at
+		// disjoint offsets would not pin that — a slice into a shared read
+		// window satisfies them — so the field is held across enough further
+		// reading to force any plausible internal buffer to be recycled, and
+		// its capacity is checked as well, since a window would hand back a
+		// slice with room after it.
+		const held, rest = 4, 64 * 1024
+		src := append([]byte("ABCD"), bytes.Repeat([]byte("x"), rest)...)
+
+		r, err := NewReader(bytes.NewReader(src), GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		first, err := r.ReadBytes(held)
+		require.NoError(t, err)
+		require.Equal(t, []byte("ABCD"), first)
+		require.Equal(t, held, cap(first), "the returned slice has room after it, so it is a window into a larger buffer")
+
+		first[0] = 'Z'
+		for range rest / held {
+			_, err := r.ReadBytes(held)
+			require.NoError(t, err)
+		}
+
+		require.Equal(t, []byte("ZBCD"), first, "a later read wrote into a slice an earlier one returned")
 	})
 
 	t.Run("zero width consumes nothing", func(t *testing.T) {
