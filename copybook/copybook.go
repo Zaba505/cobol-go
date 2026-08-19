@@ -61,10 +61,16 @@ func WithDecimalPointIsComma() Option {
 //
 // A level between 02 and 49 is subordinate to the nearest preceding item with a
 // lower level number, which is the rule COBOL compilers apply; sibling items are
-// not required to share one level number. USAGE flows down from a group to the
-// items subordinate to it unless one states its own (root SPEC.md, Semantics:
-// "USAGE is inherited by subordinate items from a group unless overridden"), and
-// an entry with no data-name is FILLER, exactly as one written FILLER is.
+// not required to share one level number. A REDEFINES clause does not move an
+// entry: REDEFINES asks for an item of the same group as its target, so an entry
+// numbered *above* the item it names is subordinate to that item and can never
+// redefine it, and is reported rather than re-read as a sibling (root SPEC.md,
+// Semantics: "A REDEFINES entry numbered above its target").
+//
+// USAGE flows down from a group to the items subordinate to it unless one states
+// its own (root SPEC.md, Semantics: "USAGE is inherited by subordinate items from
+// a group unless overridden"), and an entry with no data-name is FILLER, exactly
+// as one written FILLER is.
 //
 // It returns a [LevelError] for a level number COBOL does not admit, a
 // [LevelSequenceError] for a level number in a position the sequence does not
@@ -151,6 +157,12 @@ func (b *builder) addStandalone(entry *cobol.DataDescriptionEntry) error {
 // IBM extension over the 85 Standard, and what a REDEFINES written with a level
 // number differing from its target's relies on (root SPEC.md, Semantics:
 // "Level numbers are relative").
+//
+// A REDEFINES clause does not change where the entry lands: the tree is built
+// from level numbers alone, so an entry numbered above the item it names is
+// subordinate to that item rather than a redefinition of it, and is reported
+// here rather than admitted (root SPEC.md, Semantics: "A REDEFINES entry
+// numbered above its target").
 func (b *builder) addSubordinate(entry *cobol.DataDescriptionEntry) error {
 	for len(b.open) > 0 && b.open[len(b.open)-1].Level >= entry.Level {
 		b.open = b.open[:len(b.open)-1]
@@ -169,12 +181,23 @@ func (b *builder) addSubordinate(entry *cobol.DataDescriptionEntry) error {
 	}
 
 	parent := b.open[len(b.open)-1]
+	if enclosing := b.redefinesEnclosing(entry, parent); enclosing != nil {
+		return LevelSequenceError{
+			Pos:   entry.Pos,
+			Level: entry.Level,
+			Name:  nameOf(entry),
+			Reason: fmt.Sprintf("redefines %s, which its level number makes it subordinate to rather than a sibling of; "+
+				"a REDEFINES entry must be an item of the same group as its target, so it must carry a level number at or below its target's %02d",
+				describe(enclosing), enclosing.Level),
+		}
+	}
 	if parent.Picture != nil {
 		return LevelSequenceError{
 			Pos:   entry.Pos,
 			Level: entry.Level,
 			Name:  nameOf(entry),
-			Reason: fmt.Sprintf("is subordinate to %s, which has a PICTURE and so is an elementary item",
+			Reason: fmt.Sprintf("is numbered above %s, which has a PICTURE and so is an elementary item and takes no subordinate items; "+
+				"a level number greater than the nearest preceding item's makes the entry subordinate to that item",
 				describe(parent)),
 		}
 	}
@@ -186,6 +209,45 @@ func (b *builder) addSubordinate(entry *cobol.DataDescriptionEntry) error {
 	parent.Kind = KindGroup
 	parent.Children = append(parent.Children, field)
 	b.open = append(b.open, field)
+	return nil
+}
+
+// redefinesEnclosing reports the item an entry's REDEFINES clause names when
+// that item is one the entry is being placed *inside* rather than beside,
+// returning nil in every other case — no REDEFINES clause, or one whose target
+// is a sibling, or one naming something this record has not opened.
+//
+// An entry may never redefine an item it is subordinate to: REDEFINES asks for
+// an item of the same group as its target, and the open chain is exactly the
+// items this entry is subordinate to. The chain is only consulted once no
+// preceding sibling carries the name, because a data-name may repeat within a
+// record — a record and a field of it may share one — and the sibling is what a
+// correct copybook means (root SPEC.md, Semantics: "REDEFINES asks for the same
+// level, not the same level number").
+//
+// This is the shape a production copybook reaches when it writes every record
+// type of a file as a REDEFINES of a generic record and numbers one of them
+// above its target. Reporting it here rather than leaving it to [NewLayout] is
+// what lets the diagnostic name the level rule: by layout time the entry is a
+// child of its own target, and all that is left to say is that the target is not
+// among its own children.
+func (b *builder) redefinesEnclosing(entry *cobol.DataDescriptionEntry, parent *Field) *Field {
+	clause := redefinesOf(entry)
+	if clause == nil || clause.Name == nil {
+		return nil
+	}
+	name := clause.Name.Value
+
+	for _, sibling := range parent.Children {
+		if !sibling.Filler && sibling.Name == name {
+			return nil
+		}
+	}
+	for i := len(b.open) - 1; i >= 0; i-- {
+		if open := b.open[i]; !open.Filler && open.Name == name {
+			return open
+		}
+	}
 	return nil
 }
 

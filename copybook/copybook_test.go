@@ -815,7 +815,7 @@ func TestBuildErrors(t *testing.T) {
 				return parseFragment(t, "01 REC.\n   05 A PIC X.\n      10 B PIC X.\n")
 			},
 			target:  &LevelSequenceError{},
-			message: `level-10 item "B" at line 3, column 7 is subordinate to "A", which has a PICTURE and so is an elementary item`,
+			message: `level-10 item "B" at line 3, column 7 is numbered above "A", which has a PICTURE and so is an elementary item and takes no subordinate items; a level number greater than the nearest preceding item's makes the entry subordinate to that item`,
 		},
 		{
 			// The divergence from a literal reading of IBM's "treat
@@ -831,7 +831,7 @@ func TestBuildErrors(t *testing.T) {
 				return parseFragment(t, "01 REC.\n   05 A PIC X(6).\n   04 B PIC X(2).\n   05 C PIC X(1).\n")
 			},
 			target:  &LevelSequenceError{},
-			message: `level-05 item "C" at line 4, column 4 is subordinate to "B", which has a PICTURE and so is an elementary item`,
+			message: `level-05 item "C" at line 4, column 4 is numbered above "B", which has a PICTURE and so is an elementary item and takes no subordinate items; a level number greater than the nearest preceding item's makes the entry subordinate to that item`,
 		},
 		{
 			// The boundary of the unequal-level-numbers extension a
@@ -840,13 +840,57 @@ func TestBuildErrors(t *testing.T) {
 			// is subordinate to what precedes it and so can never be
 			// the sibling REDEFINES needs. Nothing about the
 			// REDEFINES clause changes that — the tree is built from
-			// level numbers alone.
+			// level numbers alone. The diagnostic names that rule and
+			// the number the entry would have to carry, because the
+			// adopter reading it is holding a copybook something
+			// compiled (root SPEC.md, Semantics: "A REDEFINES entry
+			// numbered above its target").
 			name: "redefines numbered above an elementary target is subordinate to it instead",
 			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
 				return parseFragment(t, "01 REC.\n   05 A PIC X(6).\n   07 B REDEFINES A PIC X(6).\n")
 			},
 			target:  &LevelSequenceError{},
-			message: `level-07 item "B" at line 3, column 4 is subordinate to "A", which has a PICTURE and so is an elementary item`,
+			message: `level-07 item "B" at line 3, column 4 redefines "A", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so it must carry a level number at or below its target's 05`,
+		},
+		{
+			// The group target reaches the same rule by the same
+			// route, and used to reach [NewLayout] instead — B became
+			// a child of A, and the only thing left to report was
+			// that A holds no item named A. Build rejects it now, so
+			// the level rule is what the adopter is told.
+			name: "redefines numbered above a group target is subordinate to it instead",
+			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
+				return parseFragment(t, "01 REC.\n   05 A.\n      10 A1 PIC X(4).\n   07 B REDEFINES A PIC X(4).\n")
+			},
+			target:  &LevelSequenceError{},
+			message: `level-07 item "B" at line 4, column 4 redefines "A", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so it must carry a level number at or below its target's 05`,
+		},
+		{
+			// The shape this rule was decided on: a production
+			// copybook writing every record type of a file as a
+			// REDEFINES of a generic subfield-less record, with the
+			// header and the trailer numbered 05 against a level-01
+			// target. Refused, and the diagnostic names the 01 the
+			// entry would have to carry — which is the whole edit the
+			// copybook needs.
+			name: "redefines of an elementary record numbered above it",
+			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
+				return parseFragment(t, "01 HEADER PIC X(20).\n05 HEADER-RECORD REDEFINES HEADER.\n   10 HDR-TYPE PIC X(7).\n   10 HDR-NAME PIC X(13).\n")
+			},
+			target:  &LevelSequenceError{},
+			message: `level-05 item "HEADER-RECORD" at line 2, column 1 redefines "HEADER", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so it must carry a level number at or below its target's 01`,
+		},
+		{
+			// An ancestor further up the open chain than the immediate
+			// parent is refused for the same reason: the chain is
+			// exactly the items the entry is subordinate to, and an
+			// entry can be the sibling of none of them.
+			name: "redefines of an enclosing record two levels up",
+			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
+				return parseFragment(t, "01 REC.\n   05 GRP.\n      10 X REDEFINES REC PIC X(4).\n")
+			},
+			target:  &LevelSequenceError{},
+			message: `level-10 item "X" at line 3, column 7 redefines "REC", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so it must carry a level number at or below its target's 01`,
 		},
 		{
 			name: "condition name with nothing to qualify",

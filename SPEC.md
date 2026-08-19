@@ -1314,6 +1314,86 @@ parse).
   the level numbers of a group's children itself — they are preserved verbatim on
   each field.
 
+- **A `REDEFINES` entry numbered above its target is refused, not re-read as a
+  sibling.** The bullet above settles the direction the extension runs in; this
+  is the other direction, and it is a shape production copybooks actually reach.
+  A file whose every record type is written as a `REDEFINES` of one generic
+  subfield-less record may number some of those alternatives *above* the record
+  they redefine — a greater level number, and so a place further down the
+  hierarchy:
+
+  ```cobol
+         01  HEADER                      PIC X(20).
+         05  HEADER-RECORD REDEFINES HEADER.
+             10  HDR-TYPE                PIC X(7).
+             10  HDR-NAME                PIC X(13).
+  ```
+
+  `05` is greater than the `01` it names, so by *Level numbers are relative* the
+  entry is **subordinate** to `HEADER` — and `HEADER` carries a `PICTURE`, so it
+  is an elementary item and takes no subordinate items at all. This
+  specification **refuses** the entry, when the tree is built, and the refusal
+  is not conditional on anything: not on a `Build` option, not on a `Dialect`,
+  not on the reference format. The generalisation is the one the code enforces:
+  *an entry may not redefine an item it is subordinate to*, at any depth, so the
+  same refusal covers a `10 X REDEFINES REC` written inside `REC` and a
+  `07 B REDEFINES A` written inside a group `A`.
+
+  Two standard rules each rule it out on their own — an item may not be
+  subordinate to an elementary item, since a group is a group precisely by
+  having no `PICTURE`; and `REDEFINES` requires its subject and its object to
+  hold *the same level in the hierarchy*, which an item written inside another
+  never does. Neither is a rule this package invented, and neither is one IBM's
+  unequal-level-numbers extension relaxes: that extension is about the *numbers*
+  two siblings carry and says nothing about an entry that is not a sibling.
+
+  **Why not a `Build` option or a `Dialect` field.** The relaxation would have
+  to be sourced before it could be gated, and it cannot be: no compiler
+  documentation was found stating that any of the three dialects this package
+  models — IBM Enterprise COBOL, GnuCOBOL, Micro Focus — reads a redefining
+  entry numbered above its target as a sibling of that target. A knob whose
+  behaviour matches no compiler is a third dialect this package would be
+  inventing. The mechanical objection is real too and worth recording: the level
+  hierarchy is built by `copybook.Build`, whose only option today is
+  `WithDecimalPointIsComma`, while `Dialect` is `NewLayout`'s and selects
+  storage widths, `SYNCHRONIZED` slack and the `REDEFINES` *size* rule — all
+  questions about bytes, decided a stage after the shape is fixed. But the
+  mechanics are what a decision would have to work around, not a reason for one.
+
+  **Why not admit it unconditionally.** Reading the entry as a redefinition of
+  its target rather than as a subordinate of it is the reading its author
+  plainly meant, and it is the reading the same file's level-01 alternatives
+  already get. What stops it is that no rule can be *sourced* for the entries
+  that follow. `10 HDR-TYPE` after it is unambiguous, but a second alternative —
+  a trailer, written `05 TRAILER-RECORD REDEFINES HEADER` — has to be placed
+  too, and placing it needs the redefining entry to have taken up a position in
+  the hierarchy that its own written level number contradicts. Every candidate
+  rule for that (renumber the entry to its target's; resolve `REDEFINES` targets
+  during tree-building and place the entry beside whatever it resolves to; treat
+  the clause as closing the open chain down to its target) is a guess, no manual
+  states one, and a wrong guess here moves every offset in every record after
+  it. Refusing a copybook is recoverable; laying one out at the wrong offsets is
+  not.
+
+  **What the reader is told instead.** The diagnostic names the level rule and
+  the level number the entry would have to carry, rather than only the `PICTURE`
+  on the item above it — the reader is holding a copybook something accepted,
+  and "`HEADER` has a `PICTURE`" does not tell them what to change:
+
+  ```
+  level-05 item "HEADER-RECORD" at line 2, column 1 redefines "HEADER",
+  which its level number makes it subordinate to rather than a sibling
+  of; a REDEFINES entry must be an item of the same group as its target,
+  so it must carry a level number at or below its target's 01
+  ```
+
+  Written that way — `01 HEADER-RECORD REDEFINES HEADER.`, the subfields left
+  exactly as they were — the copybook is read, and each alternative resolves to
+  a record of its own laid out from offset zero, because a record's own
+  `REDEFINES` clause names another record rather than a field of this one and so
+  constrains nothing. The edit is one token per alternative, and it is the only
+  thing this package asks of a file it will not otherwise read.
+
 - **`USAGE` default is `DISPLAY`.** An item with no `USAGE` clause is `DISPLAY`
   (character) representation; `COMP`/`BINARY`/`PACKED-DECIMAL` change the stored
   encoding but not the logical value. `USAGE` is inherited by subordinate items
