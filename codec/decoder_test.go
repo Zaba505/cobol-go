@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -3539,7 +3540,7 @@ func TestNumericScratchFitsEveryNumericUsage(t *testing.T) {
 	// Equality and not just "fits": a scratch wider than the widest field is
 	// dead bytes on every Reader, and one derived from a term that has stopped
 	// being anybody's maximum would still pass the loop above.
-	require.Equal(t, got, maxNumericWidth,
+	require.Equal(t, maxNumericWidth, got,
 		"maxNumericWidth is not the widest numeric field the package reads")
 }
 
@@ -3730,7 +3731,10 @@ func TestReaderReadsNoFurtherThanTheFieldsAsked(t *testing.T) {
 	r, err := NewReader(src, GnuCOBOLASCII())
 	require.NoError(t, err)
 
-	_, err = r.ReadBytes(wide)
+	// ReadAlphanumeric and not ReadBytes: ReadBytes takes the allocating path
+	// and would never touch the growable buffer, which is the one whose
+	// capacity outlives the field and so the one read-ahead could creep into.
+	_, err = r.ReadAlphanumeric(wide)
 	require.NoError(t, err)
 	require.Equal(t, len(data)-wide, src.Len())
 
@@ -3743,4 +3747,157 @@ func TestReaderReadsNoFurtherThanTheFieldsAsked(t *testing.T) {
 	rest, err := io.ReadAll(src)
 	require.NoError(t, err)
 	require.Equal(t, []byte("TRAILING BYTES"), rest)
+}
+
+// TestReadResultIsVolatile pins the premise every accessor on the reusing path
+// depends on: what [Reader.read] returns is a window into the Reader and is
+// overwritten by the next read.
+//
+// It is the other half of TestReadValuesDoNotAliasTheReusedBuffer, and it is
+// here because that test cannot fail on its own — every value testRecord holds
+// is a string or a number, and Go's own string conversion would copy the bytes
+// even if an accessor tried to hand the scratch out. Stating the volatility
+// directly is what makes "no returned value aliases it" a claim about the
+// accessors rather than a claim about string conversion.
+func TestReadResultIsVolatile(t *testing.T) {
+	t.Parallel()
+
+	widths := []struct {
+		name string
+		n    int
+	}{
+		{name: "fixed array", n: 4},
+		{name: "growable buffer", n: maxNumericWidth + 1},
+	}
+
+	for _, w := range widths {
+		t.Run(w.name, func(t *testing.T) {
+			t.Parallel()
+
+			first := bytes.Repeat([]byte{0xAA}, w.n)
+			second := bytes.Repeat([]byte{0x55}, w.n)
+
+			r, err := NewReader(bytes.NewReader(append(slices.Clone(first), second...)), GnuCOBOLASCII())
+			require.NoError(t, err)
+
+			held, err := r.read(w.n)
+			require.NoError(t, err)
+			require.Equal(t, first, held)
+
+			_, err = r.read(w.n)
+			require.NoError(t, err)
+			require.Equal(t, second, held,
+				"read returned a buffer the next read did not reuse; the accessors' no-alias property is then untested rather than true")
+		})
+	}
+
+	t.Run("the returned slice cannot be appended into the next field", func(t *testing.T) {
+		t.Parallel()
+
+		const n = 4
+
+		r, err := NewReader(bytes.NewReader(bytes.Repeat([]byte{0x01}, 4*n)), GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		held, err := r.read(n)
+		require.NoError(t, err)
+		require.Equal(t, n, cap(held),
+			"read returned spare capacity, so an append would write over the bytes of the next field")
+	})
+}
+
+// TestReadBytesIsTheOnlyAccessorHandingOutBytes guards the boundary the whole
+// buffer-reuse design rests on: exactly one exported accessor returns a
+// []byte, and it is the one that allocates.
+//
+// TestReadValuesDoNotAliasTheReusedBuffer checks the accessors that exist. This
+// checks the ones that do not yet: a second []byte-returning accessor added on
+// the reusing path would hand a caller a window into the Reader that is
+// overwritten by the next field, and every existing test would still pass. It
+// fails here instead, at the moment the method is added.
+func TestReadBytesIsTheOnlyAccessorHandingOutBytes(t *testing.T) {
+	t.Parallel()
+
+	byteSlice := reflect.TypeOf([]byte(nil))
+
+	var got []string
+	rt := reflect.TypeOf(&Reader{})
+	for i := 0; i < rt.NumMethod(); i++ {
+		m := rt.Method(i)
+		for j := 0; j < m.Type.NumOut(); j++ {
+			if m.Type.Out(j) == byteSlice {
+				got = append(got, m.Name)
+				break
+			}
+		}
+	}
+
+	require.Equal(t, []string{"ReadBytes"}, got,
+		"an accessor other than ReadBytes returns a []byte; it must read through readOwned, not read")
+}
+
+// TestReadingDoesNotAllocate is the enforceable form of the change this test
+// file was extended for: the read buffer no longer escapes, so an accessor that
+// decodes into a value allocates nothing at all.
+//
+// It asserts zero rather than pinning a count. A count moves with the toolchain
+// and wants an owner — codec/CLAUDE.md says so of the benchmarks, and that
+// still holds — but zero is zero on every toolchain, and it is the one number
+// that says the buffer did not escape. Every accessor here returns a value with
+// no backing array of its own, so any allocation at all is the field's bytes
+// reaching the heap.
+//
+// It is the package's one test without t.Parallel(), at either level.
+// [testing.AllocsPerRun] sets GOMAXPROCS to 1 for the duration of its run and
+// panics outright when called from a parallel test, so the choice is this
+// exception or no allocation assertion at all.
+func TestReadingDoesNotAllocate(t *testing.T) {
+	enc := GnuCOBOLASCII()
+
+	testCases := []struct {
+		name  string
+		field []byte
+		read  func(r *Reader) error
+	}{
+		{
+			name:  "binary",
+			field: []byte{0x04, 0xD2},
+			read: func(r *Reader) error {
+				_, err := r.ReadBinaryInt16(testRecordSeqDigits)
+				return err
+			},
+		},
+		{
+			name:  "comp-1",
+			field: []byte{0x3F, 0xC0, 0x00, 0x00},
+			read: func(r *Reader) error {
+				_, err := r.ReadFloat32()
+				return err
+			},
+		},
+		{
+			name:  "comp-2",
+			field: []byte{0x40, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			read: func(r *Reader) error {
+				_, err := r.ReadFloat64()
+				return err
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := NewReader(&repeatReader{buf: bytes.Repeat(tc.field, 4096)}, enc)
+			require.NoError(t, err)
+
+			require.NoError(t, tc.read(r))
+
+			allocs := testing.AllocsPerRun(100, func() {
+				if err := tc.read(r); err != nil {
+					t.Error(err)
+				}
+			})
+			require.Zero(t, allocs, "the field's bytes reached the heap")
+		})
+	}
 }

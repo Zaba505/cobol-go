@@ -20,7 +20,9 @@ import (
 //
 // There is deliberately no usable zero value: a Reader is only obtainable from
 // [NewReader], which requires a complete [Encoding]. A Reader is not safe for
-// concurrent use — the read position is state.
+// concurrent use — the read position is state, and so are the scratch buffers
+// every field is read into, which makes concurrent use silent corruption of a
+// field rather than a racy counter.
 type Reader struct {
 	r   io.Reader
 	enc Encoding
@@ -38,6 +40,12 @@ type Reader struct {
 	// [Reader.read] for why one buffer is an array on the struct and the
 	// other a slice, and [Reader.ReadBytes] for the one accessor that opts
 	// out of both.
+	//
+	// wide grows to the widest field asked of it and never shrinks, so a
+	// Reader that has read one PIC X(32760) field holds 32KB until it is
+	// dropped. That is the trade a reused buffer is: shrinking it would
+	// reintroduce the allocation on the next wide field, and a Reader is a
+	// short-lived object — [Unmarshal] builds one per record.
 	num  [maxNumericWidth]byte
 	wide []byte
 }
@@ -112,18 +120,25 @@ func (r *Reader) Offset() int64 { return r.off }
 // which grows on demand and is then reused at that size. The wide path is also
 // the fallback that keeps a numeric field wider than the array an allocation
 // rather than a panic.
+//
+// Both buffers are sliced with a **full slice expression**, so the returned
+// slice's capacity is the field width and not the buffer's. A slice into a
+// reused buffer with spare capacity is an append away from writing over the
+// bytes of the next field, silently and with no bounds panic; capping it makes
+// "these n bytes and no more" a fact the runtime enforces rather than a
+// promise this comment makes.
 func (r *Reader) read(n int) ([]byte, error) {
-	if n < 0 {
-		return nil, &OffsetError{Offset: r.off, Err: FieldWidthError{Width: n}}
+	if err := r.checkWidth(n); err != nil {
+		return nil, err
 	}
 	var buf []byte
 	if n <= maxNumericWidth {
-		buf = r.num[:n]
+		buf = r.num[:n:n]
 	} else {
 		if cap(r.wide) < n {
 			r.wide = make([]byte, n)
 		}
-		buf = r.wide[:n]
+		buf = r.wide[:n:n]
 	}
 	if err := r.readInto(buf); err != nil {
 		return nil, err
@@ -135,14 +150,26 @@ func (r *Reader) read(n int) ([]byte, error) {
 // becomes the caller's. It is [Reader.read] for the one accessor whose bytes
 // escape, and it allocates on purpose; see [Reader.ReadBytes].
 func (r *Reader) readOwned(n int) ([]byte, error) {
-	if n < 0 {
-		return nil, &OffsetError{Offset: r.off, Err: FieldWidthError{Width: n}}
+	if err := r.checkWidth(n); err != nil {
+		return nil, err
 	}
 	buf := make([]byte, n)
 	if err := r.readInto(buf); err != nil {
 		return nil, err
 	}
 	return buf, nil
+}
+
+// checkWidth rejects a negative field width. It is the one precondition both
+// buffer policies share, held here rather than written out in each of them for
+// the reason the offset is stamped in one place: two copies of a precondition
+// are two copies to keep in step, and the reusing path and the owning one are
+// exactly the pair that must not drift.
+func (r *Reader) checkWidth(n int) error {
+	if n < 0 {
+		return &OffsetError{Offset: r.off, Err: FieldWidthError{Width: n}}
+	}
+	return nil
 }
 
 // readInto fills buf exactly. It is the single place the offset advances and

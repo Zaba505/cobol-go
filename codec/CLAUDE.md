@@ -125,8 +125,9 @@ record.
 ## Reading buffers: reused by default, allocated on request
 
 `Reader.readInto` fills a buffer the caller supplies and is the only thing that
-moves the offset. Two methods sit on it and they are the whole of the buffer
-policy:
+moves the offset, and `Reader.checkWidth` is the one precondition both policies
+share, held in one place for the same reason. Two methods sit on them and they
+are the whole of the buffer policy:
 
 - **`read(n)` returns a buffer the `Reader` owns and reuses.** Its bytes are
   valid until the next read and no further, so every caller must consume them
@@ -160,16 +161,39 @@ free. It is expensive because `read` *returned* the slice, forcing it onto the
 heap — one allocation per field before any value exists. Removing the escape
 took `BenchmarkDecodeRecord` from 20 allocs/record to 9 and 507 ns to 399.
 
-Two invariants a change here must keep, both pinned by tests:
+**Both buffers are sliced with a full slice expression** — `r.num[:n:n]`, not
+`r.num[:n]`. A slice into a reused buffer carrying spare capacity is one
+`append` in one callee away from writing over the next field's bytes, silently
+and with no bounds panic; capping makes "these `n` bytes and no more" something
+the runtime enforces. Do not drop the third index.
+
+Four invariants a change here must keep, all pinned by tests:
 
 - **Nothing an accessor returns may view the reused buffer.**
   `zonedCodec.decodeField` and the packed/COMP-6 nibble slices allocate their
   own, which is what makes this hold today.
   `TestReadValuesDoNotAliasTheReusedBuffer` reads two records with one `Reader`
-  and requires the first record's values to survive the second.
+  and requires the first record's values to survive the second — but on its own
+  that test cannot fail, because every value `testRecord` holds is a string or a
+  number and Go's own string conversion would copy the bytes anyway. Two tests
+  give it teeth: `TestReadResultIsVolatile` states the premise directly (what
+  `read` returns *is* overwritten by the next read, and its capacity *is* the
+  field width), and `TestReadBytesIsTheOnlyAccessorHandingOutBytes` reflects
+  over the exported methods and fails the moment a second `[]byte`-returning
+  accessor appears — which is the regression the two-record test would sit
+  through.
+- **`ReadBytes` allocates.** It is the only accessor on `readOwned`, and its doc
+  comment promises the caller owns the slice.
 - **No read-ahead.** `read` slices to `n` and never to the buffer's capacity, so
   the `io.Reader` still holds every byte no field asked for.
-  `TestReaderReadsNoFurtherThanTheFieldsAsked` requires that.
+  `TestReaderReadsNoFurtherThanTheFieldsAsked` requires that, reading its wide
+  field with `ReadAlphanumeric` rather than `ReadBytes` so the growable buffer
+  — the one whose capacity outlives the field — is actually on the path.
+- **The buffer does not escape.** `TestReadingDoesNotAllocate` requires
+  **zero** allocations from `ReadBinaryInt16`, `ReadFloat32` and `ReadFloat64`,
+  each of which returns a value with no backing array of its own, so any
+  allocation at all is the field's bytes reaching the heap. See the benchmarks
+  section for why zero is assertable where a count is not.
 
 ## Packed decimal: COMP-3 and COMP-6 are separate bodies on purpose
 
@@ -403,11 +427,14 @@ exist because the figures it replaces could not be attributed to any data:
 - **allocs/op is the figure worth comparing; ns/op is orientation.** The
   allocation count is machine independent and reproducible, so a change may be
   held to it. Wall time moves with the machine and the toolchain, so nothing
-  may. Neither is *enforced* — nothing asserts a count, there is no stored
-  baseline, and CI does not run these (below). A `testing.AllocsPerRun` guard
-  over a few accessors is what would make it a mechanism rather than a habit;
-  that is a deliberate non-goal for now, because a count pinned in a test moves
-  with the toolchain and wants an owner.
+  may. Neither is *enforced* here — nothing asserts a count, there is no stored
+  baseline, and CI does not run these (below). Pinning a *count* in a test
+  remains a deliberate non-goal: it moves with the toolchain and wants an owner.
+  Pinning **zero** does not, and `TestReadingDoesNotAllocate` does exactly that
+  for three accessors, because zero is zero on every toolchain and is the one
+  number that says a buffer did not escape. It is also the package's one test
+  without `t.Parallel()`, since `testing.AllocsPerRun` sets `GOMAXPROCS` to 1
+  and panics when called from a parallel test.
 - **Every benchmark fixes and documents its corpus**, and every parameter is a
   parameter because results at two of its values are *not* comparable. A zoned
   field of nines used to cost more than one of zeros, because
