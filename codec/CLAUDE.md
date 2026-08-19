@@ -306,3 +306,39 @@ round-trip shapes, both required for every accessor pair:
 
 `testRecord` in `decoder_test.go` is the shared fixture standing in for
 generated code; extend it rather than growing a second one.
+
+## Benchmarks: allocs/op is the figure worth comparing, and CI does not run them
+
+`bench_test.go` is the package's performance baseline. Two rules, both of which
+exist because the figures it replaces could not be attributed to any data:
+
+- **allocs/op is the figure worth comparing; ns/op is orientation.** The
+  allocation count is machine independent and reproducible, so a change may be
+  held to it. Wall time moves with the machine and the toolchain, so nothing
+  may. Neither is *enforced* — nothing asserts a count, there is no stored
+  baseline, and CI does not run these (below). A `testing.AllocsPerRun` guard
+  over a few accessors is what would make it a mechanism rather than a habit;
+  that is a deliberate non-goal for now, because a count pinned in a test moves
+  with the toolchain and wants an owner.
+- **Every benchmark fixes and documents its corpus**, and every parameter is a
+  parameter because results at two of its values are *not* comparable. A zoned
+  field of nines costs more than one of zeros, because `zonedBytes.digitValue`
+  scans; an alphanumeric field whose bytes decode to non-ASCII runes costs two
+  UTF-8 bytes a character where an ASCII one costs one; a packed field's width
+  is a function of its digit count. Those three are exactly the conflations that
+  put wrong numbers in #108.
+
+**CI does not run them, by decision** (#111). `.github/workflows/ci.yml` passes
+no `-bench`, so the functions compile on every pull request and execute on none
+— which is the point CI does contribute, since a benchmark that stops building
+is caught at once. Making them a gate would need a second job without `-race`
+(which distorts both timings and allocation counts), a stored baseline,
+benchstat, and a runner whose variance is known; GitHub's shared runners are
+shared. Run them by hand against a change:
+
+```
+go test ./codec/ -run '^$' -bench . -benchmem
+```
+
+Extend `testRecord` rather than adding a second fixture here too — the whole
+record benchmarks decode and encode it, so a new field is measured for free.
