@@ -632,3 +632,58 @@ go test ./codec/ -run '^$' -bench . -benchmem
 
 Extend `testRecord` rather than adding a second fixture here too — the whole
 record benchmarks decode and encode it, so a new field is measured for free.
+
+## Performance: what landed, and what the next round waits on (#108)
+
+The research in [#108](https://github.com/Zaba505/cobol-go/discussions/108)
+measured where decode time goes and produced eight stories, #109–#116, all
+merged. Everything that landed is contract-preserving: the zoned inverse tables
+(#112), the reused read scratch (#113), the alphanumeric table derived per
+charset (#114), `Reset` and the byte-backed constructors on both sides (#115),
+and folding the packed and COMP-6 nibbles rather than unpacking them into a
+slice (#116) — with #109 and #110 pinning the alphanumeric byte range and the
+nibble fault precedence *first*, so the refactors had a contract to be held to,
+and #111 supplying the baseline the package did not have.
+
+Two things were deliberately left, and the reasons are written down here so that
+neither is re-argued from first principles:
+
+- **`Append`-style accessors over a caller-owned arena.** Removing the remaining
+  string allocations is worth about 1.3x on top of what landed — the last
+  quarter, not the 12x #108 quoted. That figure came from returning strings that
+  alias a reused buffer, which was measured doing exactly what this package's
+  buffer invariants forbid: a previously returned value came back spelling
+  another field's bytes. The shape that would work is
+  `AppendAlphanumeric(dst []byte, …)` following `strconv.AppendInt`, with the
+  arena's lifetime owned by the caller — and it is new exported API, so it is not
+  free the way #112–#116 were.
+- **SIMD.** After the scalar work in front of it, the only genuinely
+  vector-shaped work left is the charset translate: roughly a third of what
+  remains, projecting to about 1.5x end to end against the 4x the scalar work
+  was worth. As of Go 1.26, `simd/archsimd` is behind `GOEXPERIMENT=simd` and
+  every file in it is `_amd64.go`, so there is no portable route — and this
+  package imports only `std`.
+
+**Neither waits on a benchmark. Both wait on a named adopter's CPU profile**
+showing `codec` at **≥40% of on-CPU samples**, over **≥30s** of run time, with
+**≥1000 samples**, with the record layout contributed as `testdata` so the claim
+is reproducible here.
+
+Each clause of that bar is there because #108 was triggered by something that
+failed it:
+
+- **A profile, not a `time` split and not a records/s figure.** The workload that
+  prompted the exercise was quoted at ~457,000 records/s end to end against a
+  decode-only 405,298 records/s. A program cannot outrun its own subroutine, so
+  those two are not measurements of the same thing and decode's actual share was
+  never established. The profile that started it had three samples in it.
+- **40%, because Amdahl bounds what the work can be worth.** Against a perfect 4x
+  on the codec share alone: 40% caps end-to-end at 1.43x, 30% at 1.29x, 20% at
+  1.18x. Below the bar the ceiling is smaller than the risk of the change.
+- **The layout as `testdata`, because that is the form #24 and #82 were closed in
+  favour of** — acquire no corpus, rely on adopter reports. An adopter
+  decode-bound enough to clear this bar is that report, and their layout is the
+  fixture the package still does not have.
+
+Until then the answer to "could `codec` be faster" is yes, by about 1.3x with new
+API and about 1.5x more with assembly, and neither is worth the contract.
