@@ -2129,6 +2129,301 @@ func TestReaderReadComp6Errors(t *testing.T) {
 	})
 }
 
+// packedFault names which of the three nibble roles a packed field's reported
+// fault belongs to. A multi-fault test row states the role it expects rather
+// than asserting it in a closure, so the table reads as the precedence rule it
+// pins: pad, then digits most significant first, then sign.
+type packedFault int
+
+const (
+	faultPad packedFault = iota
+	faultDigit
+	faultSign
+)
+
+// requirePackedFault asserts that err is the packed nibble error for the given
+// role, carrying the given nibble, stamped with the offset of the byte holding
+// that nibble. Asserting the role is what rejects a reordered scan: a reader
+// that checked digits before the pad returns a PackedDigitError here, and
+// [require.ErrorAs] for PackedPadError fails on it.
+func requirePackedFault(t *testing.T, err error, want packedFault, nibble byte, offset int64) {
+	t.Helper()
+
+	switch want {
+	case faultPad:
+		var padErr PackedPadError
+		require.ErrorAs(t, err, &padErr)
+		require.Equal(t, nibble, padErr.Nibble)
+	case faultDigit:
+		var digitErr PackedDigitError
+		require.ErrorAs(t, err, &digitErr)
+		require.Equal(t, nibble, digitErr.Nibble)
+	case faultSign:
+		var signErr PackedSignError
+		require.ErrorAs(t, err, &signErr)
+		require.Equal(t, nibble, signErr.Nibble)
+	default:
+		t.Fatalf("unknown packed fault %d", want)
+	}
+
+	// The offset names the byte holding the offending nibble, not the byte the
+	// field ended at, which is what makes nibbleAt's arithmetic load bearing
+	// rather than decorative.
+	var offErr *OffsetError
+	require.ErrorAs(t, err, &offErr)
+	require.Equal(t, offset, offErr.Offset)
+}
+
+// TestPackedFaultPrecedence pins which fault a COMP-3 field carrying more than
+// one of them reports, and which byte the offset names.
+//
+// This is the common case rather than a corner of it: of the 16,777,216
+// three-byte values a PIC S9(4) COMP-3 field can hold, 15,384,000 — 91.7% — are
+// invalid in more than one of the three roles at once. SPEC.md's "Fault
+// precedence" makes the answer normative, and it is field order: the pad
+// nibble, then the digit nibbles from most significant to least, then the sign.
+// Every row below is chosen so that at least one of the three reorderings the
+// rule forbids — digits before the pad, the sign before the digits, the last
+// bad digit instead of the first — returns something this table rejects.
+func TestPackedFaultPrecedence(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		src        []byte
+		digits     int
+		want       packedFault
+		wantNibble byte
+		wantOffset int64
+	}{
+		{
+			// Pad A at nibble 0, digit B at nibble 3. Checking the digits
+			// first would report B at offset 1.
+			name:       "bad pad beats a bad digit",
+			src:        []byte{0xA1, 0x2B, 0x4C},
+			digits:     4,
+			want:       faultPad,
+			wantNibble: 0x0A,
+			wantOffset: 0,
+		},
+		{
+			// Pad F, leading digit A, sign 3: every role is wrong at once,
+			// which is the shape a field read at a slipped offset usually has.
+			name:       "bad pad beats everything else in the field",
+			src:        []byte{0xFA, 0x23, 0x43},
+			digits:     4,
+			want:       faultPad,
+			wantNibble: 0x0F,
+			wantOffset: 0,
+		},
+		{
+			// Digit A at nibble 2, sign 7. Checking the sign first would
+			// report a PackedSignError at offset 2.
+			name:       "bad digit beats a bad sign",
+			src:        []byte{0x01, 0xA3, 0x47},
+			digits:     4,
+			want:       faultDigit,
+			wantNibble: 0x0A,
+			wantOffset: 1,
+		},
+		{
+			// Digits A and B, in the first two bytes. Reporting the last bad
+			// digit would give B at offset 1.
+			name:       "the first bad digit beats the second",
+			src:        []byte{0x0A, 0xB3, 0x4C},
+			digits:     4,
+			want:       faultDigit,
+			wantNibble: 0x0A,
+			wantOffset: 0,
+		},
+		{
+			// Both bad digits are past the first byte, so the offset is
+			// nibbleAt's arithmetic rather than the field's start offset.
+			name:       "the first bad digit beats the second away from the field start",
+			src:        []byte{0x01, 0x2C, 0xDC},
+			digits:     4,
+			want:       faultDigit,
+			wantNibble: 0x0C,
+			wantOffset: 1,
+		},
+		{
+			// The bad digit and the bad sign share the final byte, so the
+			// offsets coincide and only the error type separates the two
+			// orderings.
+			name:       "a bad digit in the final byte beats the sign beside it",
+			src:        []byte{0x01, 0x23, 0xE5},
+			digits:     4,
+			want:       faultDigit,
+			wantNibble: 0x0E,
+			wantOffset: 2,
+		},
+		{
+			// Four bytes, so the reported byte is neither the first nor the
+			// last: faults at nibbles 5, 6 and 7 (bytes 2, 3 and 3).
+			name:       "the first bad digit beats the rest in a four-byte field",
+			src:        []byte{0x01, 0x23, 0x4B, 0xC2},
+			digits:     6,
+			want:       faultDigit,
+			wantNibble: 0x0B,
+			wantOffset: 2,
+		},
+		{
+			// An odd digit count has no pad nibble, so the high nibble of the
+			// first byte is the most significant digit. A reader that checked
+			// nibble 0 as a pad regardless of parity would report a
+			// PackedPadError here.
+			name:       "at an odd digit count the leading nibble is a digit, and beats the sign",
+			src:        []byte{0xA2, 0x34, 0x51},
+			digits:     5,
+			want:       faultDigit,
+			wantNibble: 0x0A,
+			wantOffset: 0,
+		},
+		{
+			// The boundary that gives the two rows above their meaning: with
+			// nothing earlier wrong, the sign check does fire, and it fires
+			// at the last byte.
+			name:       "the sign is reported when nothing before it is wrong",
+			src:        []byte{0x01, 0x23, 0x45},
+			digits:     4,
+			want:       faultSign,
+			wantNibble: 0x05,
+			wantOffset: 2,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Every accessor shares readPackedDigits, so the precedence must
+			// not depend on which one the generated code calls.
+			readers := map[string]func(*Reader, int) error{
+				"ReadPackedInt32": func(r *Reader, d int) error { _, err := r.ReadPackedInt32(d); return err },
+				"ReadPackedInt64": func(r *Reader, d int) error { _, err := r.ReadPackedInt64(d); return err },
+				"ReadPackedBig":   func(r *Reader, d int) error { _, err := r.ReadPackedBig(d); return err },
+			}
+			for name, read := range readers {
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+
+					r, err := NewReader(bytes.NewReader(tc.src), GnuCOBOLASCII())
+					require.NoError(t, err)
+
+					err = read(r, tc.digits)
+					requirePackedFault(t, err, tc.want, tc.wantNibble, tc.wantOffset)
+				})
+			}
+		})
+	}
+}
+
+// TestComp6FaultPrecedence is TestPackedFaultPrecedence's other half. COMP-6
+// puts its pad nibble on the opposite parity — odd digit counts, not even — and
+// has no sign role at all, so the same rule has to be pinned against a
+// different layout rather than assumed to carry over from the COMP-3 body: the
+// two are separate functions, and until this test only one of them had its scan
+// order held in place.
+func TestComp6FaultPrecedence(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		src        []byte
+		digits     int
+		want       packedFault
+		wantNibble byte
+		wantOffset int64
+	}{
+		{
+			// Pad 9 — a legal digit value, which is why the pad check is
+			// != 0 rather than > 9 — beside digit A at nibble 2.
+			name:       "bad pad beats a bad digit",
+			src:        []byte{0x91, 0xA3},
+			digits:     3,
+			want:       faultPad,
+			wantNibble: 0x09,
+			wantOffset: 0,
+		},
+		{
+			// The COMP-3-read-at-a-COMP-6-offset shape: a sign nibble sits in
+			// the last digit position, and the pad is wrong as well. The pad
+			// is the earlier fault and wins.
+			name:       "bad pad beats a COMP-3 sign nibble in the last position",
+			src:        []byte{0x11, 0x2C},
+			digits:     3,
+			want:       faultPad,
+			wantNibble: 0x01,
+			wantOffset: 0,
+		},
+		{
+			// Digits A and B in different bytes. Reporting the last bad digit
+			// would give B at offset 1.
+			name:       "the first bad digit beats the second",
+			src:        []byte{0x0A, 0xB3},
+			digits:     3,
+			want:       faultDigit,
+			wantNibble: 0x0A,
+			wantOffset: 0,
+		},
+		{
+			// An even digit count has no pad nibble here, the opposite parity
+			// from COMP-3, so nibble 0 is the most significant digit. A reader
+			// that checked it as a pad would report a PackedPadError.
+			name:       "at an even digit count the leading nibble is a digit",
+			src:        []byte{0xC2, 0x3D},
+			digits:     4,
+			want:       faultDigit,
+			wantNibble: 0x0C,
+			wantOffset: 0,
+		},
+		{
+			// Pad valid, so the offset comes from nibbleAt rather than from
+			// the field's start: faults at nibbles 2 and 5, bytes 1 and 2.
+			name:       "the first bad digit beats the second away from the field start",
+			src:        []byte{0x01, 0xA3, 0x4B},
+			digits:     5,
+			want:       faultDigit,
+			wantNibble: 0x0A,
+			wantOffset: 1,
+		},
+		{
+			// Three bytes with no pad nibble at all, faults at nibbles 3 and
+			// 4 — adjacent nibbles that straddle a byte boundary, so the two
+			// orderings differ in offset as well as in nibble.
+			name:       "the first bad digit beats the second across a byte boundary",
+			src:        []byte{0x12, 0x3E, 0xF6},
+			digits:     6,
+			want:       faultDigit,
+			wantNibble: 0x0E,
+			wantOffset: 1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			readers := map[string]func(*Reader, int) error{
+				"ReadComp6Int32": func(r *Reader, d int) error { _, err := r.ReadComp6Int32(d); return err },
+				"ReadComp6Int64": func(r *Reader, d int) error { _, err := r.ReadComp6Int64(d); return err },
+				"ReadComp6Big":   func(r *Reader, d int) error { _, err := r.ReadComp6Big(d); return err },
+			}
+			for name, read := range readers {
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+
+					r, err := NewReader(bytes.NewReader(tc.src), GnuCOBOLASCII())
+					require.NoError(t, err)
+
+					err = read(r, tc.digits)
+					requirePackedFault(t, err, tc.want, tc.wantNibble, tc.wantOffset)
+				})
+			}
+		})
+	}
+}
+
 // TestReaderReadBinary reads a signed binary field in both byte orders, at
 // every width and at both width boundaries. The vectors are SPEC Appendix A.5's
 // where it has them.

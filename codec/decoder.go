@@ -375,6 +375,15 @@ func (r *Reader) readPackedInt(digits, max int) (int64, error) {
 // the offset the field ended at, which is the one place in this package an
 // [OffsetError] is stamped with something other than the current position: a
 // bad nibble is diagnosable only if the byte holding it can be found.
+//
+// The order the nibbles are checked in is normative rather than incidental, and
+// must not be rearranged. A corrupt field usually carries more than one bad
+// nibble — 91.7% of the three-byte values a PIC S9(4) field can hold are
+// invalid in more than one of the three roles at once — so which fault is
+// reported, and which byte the offset names, is decided by this order and by
+// nothing else. It is field order: the pad nibble, then the digit nibbles from
+// most significant to least, then the sign, which makes the reported offset the
+// earliest byte that went wrong. See codec/SPEC.md, "Fault precedence".
 func (r *Reader) readPackedDigits(digits, max int) ([]byte, bool, error) {
 	if digits < 1 || digits > max {
 		return nil, false, &OffsetError{
@@ -509,7 +518,10 @@ func (r *Reader) readComp6Int(digits, max int) (int64, error) {
 // mistake worth failing on.
 //
 // A nibble error carries the offset of the byte the nibble sits in, for the
-// reason [Reader.readPackedDigits] does.
+// reason [Reader.readPackedDigits] does, and the nibbles are checked in field
+// order — pad, then digits from most significant to least — for the reason it
+// does too. That precedence is normative here as well; see codec/SPEC.md,
+// "Fault precedence".
 func (r *Reader) readComp6Digits(digits, max int) ([]byte, error) {
 	if digits < 1 || digits > max {
 		return nil, &OffsetError{

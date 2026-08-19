@@ -80,6 +80,16 @@ holding it**, computed from the field's start offset in a single `nibbleAt`
 helper. A packed field is several bytes wide, and "the field ended at offset N"
 does not say which byte was corrupt.
 
+**Which** bad nibble that is, when there is more than one, is normative and not
+an artefact of the scan: both `readPackedDigits` and `readComp6Digits` check
+nibbles in **field order** — pad, digits most significant first, then (COMP-3
+only) the sign — and report the **earliest** fault, so the offset names the
+first byte that went wrong. Most corrupt fields carry several faults at once, so
+this is the common path rather than a corner of it; `SPEC.md`'s "Fault
+precedence" states it and `TestPackedFaultPrecedence` /
+`TestComp6FaultPrecedence` pin it. Do not reorder either body's checks, and do
+not report the last bad digit instead of the first.
+
 The second such exception is `BinaryRangeError`, stamped with the offset the
 field **starts** at rather than the one it ends at, for the same reason: a
 binary field is several bytes wide and a range error is a statement about the
