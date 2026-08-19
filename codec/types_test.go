@@ -65,6 +65,27 @@ func TestEncodingValidate(t *testing.T) {
 			enc:       Encoding{Charset: CP037(), Sign: SignEBCDIC, ByteOrder: binary.BigEndian, Float: FloatFormat(42)},
 			wantField: "Float",
 		},
+		{
+			name: "missing binary size",
+			enc: Encoding{
+				Charset:   CP037(),
+				Sign:      SignEBCDIC,
+				ByteOrder: binary.BigEndian,
+				Float:     FloatHFP,
+			},
+			wantField: "Binary",
+		},
+		{
+			name: "unknown binary size",
+			enc: Encoding{
+				Charset:   CP037(),
+				Sign:      SignEBCDIC,
+				ByteOrder: binary.BigEndian,
+				Float:     FloatHFP,
+				Binary:    BinarySize(42),
+			},
+			wantField: "Binary",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -87,6 +108,7 @@ func TestEncodingValidate(t *testing.T) {
 			Sign:      SignASCIIZone37,
 			ByteOrder: binary.LittleEndian,
 			Float:     FloatIEEE,
+			Binary:    BinarySizeSmallest,
 		}
 		require.NoError(t, enc.Validate())
 	})
@@ -108,6 +130,7 @@ func TestDialects(t *testing.T) {
 				Sign:      SignEBCDIC,
 				ByteOrder: binary.BigEndian,
 				Float:     FloatHFP,
+				Binary:    BinarySize248,
 			},
 		},
 		{
@@ -118,6 +141,7 @@ func TestDialects(t *testing.T) {
 				Sign:      SignASCIIZone37,
 				ByteOrder: binary.NativeEndian,
 				Float:     FloatIEEE,
+				Binary:    BinarySize248,
 			},
 		},
 		{
@@ -128,6 +152,7 @@ func TestDialects(t *testing.T) {
 				Sign:      SignASCIIZone37,
 				ByteOrder: binary.BigEndian,
 				Float:     FloatIEEE,
+				Binary:    BinarySize1248,
 			},
 		},
 		{
@@ -138,6 +163,7 @@ func TestDialects(t *testing.T) {
 				Sign:      SignTranslatedEBCDIC,
 				ByteOrder: binary.BigEndian,
 				Float:     FloatHFP,
+				Binary:    BinarySize248,
 			},
 		},
 	}
@@ -273,6 +299,35 @@ func TestPackedAndComp6Widths(t *testing.T) {
 			} else {
 				require.Equal(t, packedWidth(tc.digits), comp6Width(tc.digits))
 			}
+		})
+	}
+}
+
+func TestBinarySizeString(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		b    BinarySize
+		want string
+	}{
+		{name: "unset", b: BinarySizeUnset, want: "unset"},
+		{name: "2-4-8", b: BinarySize248, want: "2-4-8"},
+		{name: "1-2-4-8", b: BinarySize1248, want: "1-2-4-8"},
+		{name: "smallest", b: BinarySizeSmallest, want: "1--8"},
+		{name: "full", b: BinarySizeFull, want: "full"},
+		{name: "out of range", b: BinarySize(42), want: "BinarySize(42)"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// The four named spellings are GnuCOBOL's own binary-size values,
+			// and copybook.BinarySize returns the same strings for the same
+			// members; copybook's TestBinarySizeAgreesWithCodec is what holds
+			// the two together.
+			require.Equal(t, tc.want, tc.b.String())
 		})
 	}
 }
@@ -1045,7 +1100,7 @@ func TestNewZonedCodecRequiresCompleteEncoding(t *testing.T) {
 	require.ErrorAs(t, err, &encErr)
 	require.Equal(t, "Charset", encErr.Field)
 
-	_, err = newZonedCodec(Encoding{Charset: ASCII(), ByteOrder: binary.BigEndian, Float: FloatIEEE})
+	_, err = newZonedCodec(Encoding{Charset: ASCII(), ByteOrder: binary.BigEndian, Float: FloatIEEE, Binary: BinarySize248})
 	require.ErrorAs(t, err, &encErr)
 	require.Equal(t, "Sign", encErr.Field)
 
@@ -1058,7 +1113,7 @@ func TestNewZonedCodecRequiresCompleteEncoding(t *testing.T) {
 func TestZonedFieldRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	realia := Encoding{Charset: ASCII(), Sign: SignRealia, ByteOrder: binary.LittleEndian, Float: FloatIEEE}
+	realia := Encoding{Charset: ASCII(), Sign: SignRealia, ByteOrder: binary.LittleEndian, Float: FloatIEEE, Binary: BinarySize248}
 
 	// signAt is the index the sign is overpunched into: the last byte under
 	// SIGN IS TRAILING, the first under SIGN IS LEADING, -1 for an unsigned
@@ -1203,6 +1258,7 @@ func TestZonedFieldRoundTripsEverySignConvention(t *testing.T) {
 				Sign:      sign,
 				ByteOrder: binary.BigEndian,
 				Float:     FloatIEEE,
+				Binary:    BinarySize248,
 			})
 			require.NoError(t, err)
 
@@ -1257,6 +1313,7 @@ func TestZonedFieldRejectsBytesOfAnotherConvention(t *testing.T) {
 						Sign:      s,
 						ByteOrder: binary.BigEndian,
 						Float:     FloatIEEE,
+						Binary:    BinarySize248,
 					}
 				}
 
@@ -1334,6 +1391,7 @@ func TestZonedDecodingNeverTranslatesThroughTheCharset(t *testing.T) {
 		Sign:      SignEBCDIC,
 		ByteOrder: binary.BigEndian,
 		Float:     FloatHFP,
+		Binary:    BinarySize248,
 	})
 	require.NoError(t, err)
 

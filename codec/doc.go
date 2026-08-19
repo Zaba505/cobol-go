@@ -14,18 +14,20 @@
 //
 // # No default encoding
 //
-// Four settings must be known before a single byte of a data file can be
+// Five settings must be known before a single byte of a data file can be
 // interpreted: the character set, the zoned-decimal sign convention, the byte
-// order of binary items, and the floating-point format. None of them is
-// recoverable from the file with certainty, and every one of them fails
-// silently when wrong — the wrong value yields a plausible but incorrect
-// number rather than an error.
+// order of binary items, the floating-point format, and the width staircase
+// binary items were compiled under. None of them is recoverable from the file
+// with certainty, and every one of them fails silently when wrong — the wrong
+// value yields a plausible but incorrect number rather than an error, and the
+// last of them yields a plausible but incorrect *record*, since it decides how
+// many bytes a binary field occupies.
 //
 // So this package has no default for any of them and no usable zero-value
-// [Reader]. [Encoding] carries all four, every field of it has an invalid zero
+// [Reader]. [Encoding] carries all five, every field of it has an invalid zero
 // value, and every constructor — [NewReader], [NewBytesReader], [NewWriter],
 // [NewBytesWriter] — fails with an [EncodingError] naming the field that was
-// left out. See codec/SPEC.md, "The Four Axes of an
+// left out. See codec/SPEC.md, "The Five Axes of an
 // Encoding", which states that as a normative requirement on this package.
 //
 // The named bundles keep that ergonomic without making it implicit.
