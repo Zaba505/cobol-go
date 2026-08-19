@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/big"
 	"strconv"
+	"strings"
 )
 
 // Reader reads the fields of a COBOL data file from an [io.Reader], one field
@@ -52,16 +53,21 @@ type Reader struct {
 	// the same fixed-array-plus-growable-slice pair num and wide are, for
 	// the same reason.
 	//
-	// alpha is resolved on the first alphanumeric read and not before.
-	// Deriving it calls [Charset.ToUnicode] 256 times, and
+	// alpha is looked up on the first alphanumeric read and not before.
+	// Deriving a table calls [Charset.ToUnicode] 256 times, and
 	// TestZonedAccessorsNeverTranslateThroughTheCharset requires a Reader
 	// that reads only numeric fields to make no such call at all — which is
 	// codec/SPEC.md's rule that numeric decoding never routes through the
 	// charset, asserted from construction onward. Lazy is what keeps that
 	// true; see [alphaTables] for why the table itself is not per-Reader.
-	alpha     *alphaTable
-	alphaNum  [maxAlphaScratch]byte
-	alphaWide []byte
+	//
+	// It stays nil for a charset that cannot be cached, which is a working
+	// state and not an unresolved one — alphaLookedUp is what tells those
+	// apart, so a charset with no table is not looked up again per field.
+	alpha         *alphaTable
+	alphaLookedUp bool
+	alphaNum      [maxAlphaScratch]byte
+	alphaWide     []byte
 }
 
 // maxNumericWidth is the width of [Reader.num], the fixed scratch every
@@ -100,23 +106,30 @@ const maxNumericWidth = max(
 // Unlike maxNumericWidth this is a *policy* number that happens to be derived,
 // and it cannot be anything else: PIC X(n) is bounded by the record rather than
 // by a digit ceiling, so there is no width to derive one from. What pins it is
-// the other end — a [Reader] is what [Unmarshal] builds per record, so every
-// byte of it is paid once per record, and past this size the struct costs the
-// per-record path more than the translation saves it. Measured on
-// BenchmarkNewReader and BenchmarkUnmarshalRecord: at 32 bytes NewReader is
-// 258 -> 267 ns/op and the per-record path 631 -> 581; at 259 bytes, enough for
-// a 64-byte field under any charset, NewReader is 305 and the per-record path
-// 668 — slower than the code this replaced, on the strength of the struct
-// alone. Growing this array is therefore not a free way to widen the heap-free
-// case, and the benchmark pair is what says so.
+// the other end. A [Reader] is what [Unmarshal] builds per record, so every byte
+// of the struct is paid once per record, and a bigger array buys a wider
+// heap-free field at the cost of every record — including the records whose
+// fields would have fitted anyway. A sweep over BenchmarkNewReader and
+// BenchmarkUnmarshalRecord found the crossover well below a 64-byte field: at
+// 259 bytes, enough for one under any charset, both benchmarks were slower than
+// the code this replaces on the strength of the struct alone. **Do not grow this
+// array without re-running that pair**; it is not free, and the two benchmarks
+// disagree by design about which way it should go.
 //
-// How wide a *field* that covers is charset-dependent, because a rune is one to
+// At the value chosen the struct costs NewReader 262 -> 272 ns/op, one
+// allocation either way, and the per-record path still comes out ahead:
+// 628 -> 615 for a cacheable charset. [Reader.readAlphanumericPerByte] documents
+// the one case that does not.
+//
+// How wide a *field* this covers is charset-dependent, because a rune is one to
 // four UTF-8 bytes: 14 bytes under either shipped charset and 7 under one
-// mapping into a supplementary plane; see [alphaTable.fieldCap]. A field wider
-// than that is not a fault and not a panic — it falls to [Reader.alphaWide],
-// exactly as a numeric field wider than maxNumericWidth falls to
-// [Reader.wide], at the cost of one allocation that is then reused at that
-// size.
+// mapping into a supplementary plane; see [alphaTable.fieldCap]. It covers far
+// more than that in practice, because the padding is stripped before the
+// translation is written — a PIC X(30) name holding eleven characters needs 25
+// bytes here, not 63. A field whose *value* is still wider is not a fault and
+// not a panic: it falls to [Reader.alphaWide], exactly as a numeric field wider
+// than maxNumericWidth falls to [Reader.wide], at the cost of one allocation
+// that is then reused at that size.
 const maxAlphaScratch = maxNumericWidth
 
 // NewReader returns a [Reader] that reads from r under the given encoding.
@@ -304,8 +317,18 @@ func (r *Reader) ReadAlphanumericJustified(n int, j Justification) (string, erro
 	if err != nil {
 		return "", err
 	}
-	if r.alpha == nil {
-		r.alpha = alphaTableOf(r.enc.Charset)
+	if len(b) == 0 {
+		// Nothing to translate, and so no reason to look a table up: a
+		// zero-width field must not be what makes a Reader derive 256
+		// entries, and must not be a charset translation at all.
+		return "", nil
+	}
+	if !r.alphaLookedUp {
+		r.alpha, r.alphaLookedUp = alphaTableOf(r.enc.Charset), true
+	}
+	t := r.alpha
+	if t == nil {
+		return r.readAlphanumericPerByte(b, j), nil
 	}
 	// The padding comes off the *source* bytes, before translation rather
 	// than after it, and the two are the same operation. The space stripped
@@ -319,8 +342,41 @@ func (r *Reader) ReadAlphanumericJustified(n int, j Justification) (string, erro
 	// characters is the normal case, not the exception — so trimming first
 	// keeps a field far wider than [maxAlphaScratch] off the growable buffer,
 	// and translates only the bytes that survive.
-	src := r.alpha.trim(b, j)
-	return string(r.alpha.translate(r.alphaScratch(r.alpha.fieldCap(len(src))), src)), nil
+	src := t.trim(b, j)
+	return string(t.translate(r.alphaScratch(t.fieldCap(len(src))), src)), nil
+}
+
+// readAlphanumericPerByte is the translation of a field whose charset has no
+// derived table: one [Charset.ToUnicode] and one [strings.Builder.WriteRune] per
+// byte, which is what this package did for every charset before the table
+// existed.
+//
+// It is reached only for a charset that cannot be a map key and so cannot be
+// cached — see [alphaTableOf], which explains why no table at all beats a table
+// built per [Reader]. It is a separate method rather than a branch inline in
+// [Reader.ReadAlphanumericJustified] so that the table path, which is the path
+// nearly every program takes, is not sharing a stack frame with a loop it never
+// runs.
+//
+// **This is the one path that is slower than before the table existed**, and by
+// a constant rather than by a factor: BenchmarkUnmarshalRecord/uncached is
+// 665 -> 735 ns/op, about 10%. The cost is the [Reader] carrying a table pointer
+// and a scratch it will not use, the comparability answer being reached once per
+// Reader, and the branch above. None of it is recoverable while the table is
+// cached per charset and the [Reader] is built per record, and the remedy
+// belongs to the caller rather than here: a comparable charset — a pointer will
+// do — takes the table path and is 2.1x faster instead. [Charset] says so.
+func (r *Reader) readAlphanumericPerByte(b []byte, j Justification) string {
+	charset := r.enc.Charset
+	var sb strings.Builder
+	sb.Grow(len(b))
+	for _, c := range b {
+		sb.WriteRune(charset.ToUnicode(c))
+	}
+	if j == JustifyRight {
+		return strings.TrimLeft(sb.String(), " ")
+	}
+	return strings.TrimRight(sb.String(), " ")
 }
 
 // ReadZonedInt32 reads the next zoned decimal (USAGE DISPLAY) field of digits

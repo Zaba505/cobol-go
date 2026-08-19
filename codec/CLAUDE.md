@@ -320,10 +320,11 @@ through `alphaTable`, the charset's translation materialised as UTF-8: `enc[c]`
 packs the encoding of byte `c` into a `uint32` little-endian and `width[c]` says
 how many of those four bytes count, so the inner loop stores a whole rune's
 worth unconditionally and advances by the width — no branch, no interface
-dispatch, no per-rune re-encode. It measured 2.1x on an ASCII-mapping corpus and
-2.9x on a multi-byte one, and took `BenchmarkDecodeRecord` from 405 to 307 ns.
+dispatch, no per-rune re-encode. `BenchmarkReadAlphanumeric` measured 2.1x on its
+ASCII-mapping corpus and 2.9x on its multi-byte one, and `BenchmarkDecodeRecord`
+went 403 to 333 ns.
 
-Four things about it are load bearing, and all four cost something to
+Five things about it are load bearing, and all five cost something to
 rediscover:
 
 - **It is not a `[256]byte`, and there is no "ASCII is verbatim" shortcut.**
@@ -346,16 +347,30 @@ rediscover:
   panic waiting to happen: `Charset` promises nothing about comparability, so
   `comparableCharset` answers from the type — reading an interface-typed field
   as *not* comparable, conservatively — before anything reaches the map. Do not
-  replace it with `reflect.Value.Comparable`, which is the exact answer and
-  allocates four times per call, i.e. four allocations per record; and do not
-  wrap the map access in a `recover`, because `sync.Map`'s store path panics
-  with its mutex held.
+  replace it with `reflect.Value.Comparable`: it is the exact answer, but it
+  walks per *value* rather than per type and allocates, and this runs once per
+  `Reader` and so once per record. Do not wrap the map access in a `recover`
+  either, because `sync.Map`'s store path panics with its mutex held. The cache
+  is an `alphaCache` value rather than loose package variables so that both of
+  its edges — a hit returning the same table, and a full cache still returning a
+  correct one — are testable without touching process state.
 - **Padding comes off the source bytes, before translation.** `alphaTable.trim`
-  strips the bytes that spell U+0020, which agrees with trimming the translated
-  string because 0x20 is neither a UTF-8 lead byte nor a continuation byte.
-  Doing it first is what makes the 32-byte inline scratch worth having: a real
-  field is mostly padding, so a `PIC X(30)` name holding eleven characters
-  never reaches the growable buffer.
+  strips the bytes that spell U+0020 — every such byte, never `Charset.Space()`,
+  a distinction the field's own doc comment spells out. It agrees with trimming
+  the translated string because 0x20 is neither a UTF-8 lead byte nor a
+  continuation byte. Doing it first is what makes the 32-byte inline scratch
+  worth having: a real field is mostly padding, so a `PIC X(30)` name holding
+  eleven characters needs 25 bytes of scratch and never reaches the growable
+  buffer.
+- **A charset that cannot be cached gets no table, not an uncached one.**
+  `alphaTableOf` returns nil and `Reader.readAlphanumericPerByte` does what this
+  package always did. An uncached table was the first design and is the one
+  answer worse than none: 256 `ToUnicode` calls and a 1.5KiB allocation *per
+  record*, against about 22 calls for the loop it replaces. What is left is a
+  measured 10% on `BenchmarkUnmarshalRecord/uncached` — the struct growth and one
+  branch — and the remedy is the caller's: the **public** `Charset` doc comment
+  now tells them to make the implementation comparable, and warns that
+  `struct{ Charset }` is not while `*struct{ Charset }` is.
 
 The scratch follows the `num`/`wide` policy exactly — `Reader.alphaNum` is a
 fixed array of `maxAlphaScratch` bytes, `Reader.alphaWide` the growable
@@ -365,6 +380,12 @@ fallback. `maxAlphaScratch` is `maxNumericWidth`, and it is a **policy** number:
 directions are benchmarked — `BenchmarkNewReader` and
 `BenchmarkUnmarshalRecord` — because they pull opposite ways, and a change here
 is not landable without running both.
+
+`NewReader` is 3.5% slower than before this change (262 -> 272 ns/op, one
+allocation either way) because the `Reader` grew by one allocation size class.
+That is the floor for caching anything on a `Reader` at all; it is disclosed
+rather than smoothed over, and the per-record path it buys pays for it — 403 ->
+333 ns on the record decode, 628 -> 615 on `Unmarshal`.
 
 ## Zoned bytes: two halves that must not merge
 

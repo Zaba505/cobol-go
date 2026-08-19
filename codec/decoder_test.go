@@ -4117,3 +4117,37 @@ func TestReadAlphanumericTrimsPaddingBeforeTranslating(t *testing.T) {
 		})
 	}
 }
+
+// TestReadAlphanumericZeroWidthTranslatesNothing pins the one field width that
+// has no bytes to translate. A zero-width PIC X item is legal to ask for — a
+// generated record layout can carry an OCCURS 0 group — and it must be an empty
+// string, must consume nothing, and must not be what makes a [Reader] derive a
+// 256-entry translation table.
+func TestReadAlphanumericZeroWidthTranslatesNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, j := range []Justification{JustifyLeft, JustifyRight} {
+		t.Run(j.String(), func(t *testing.T) {
+			t.Parallel()
+
+			cs := &countingCharset{Charset: CP037()}
+			r, err := NewReader(bytes.NewReader(allByteValues()), charsetEncoding(cs))
+			require.NoError(t, err)
+
+			got, err := r.ReadAlphanumericJustified(0, j)
+			require.NoError(t, err)
+			require.Empty(t, got)
+			require.Zero(t, r.Offset(), "a zero-width field consumed bytes")
+			require.Zero(t, cs.toUnicode.Load(), "a zero-width field translated characters")
+
+			// The next field still reads correctly, so the short circuit is
+			// not a state the Reader gets stuck in.
+			next, err := r.ReadAlphanumericJustified(4, j)
+			require.NoError(t, err)
+			require.Equal(t, string([]rune{
+				cs.ToUnicode(0x00), cs.ToUnicode(0x01),
+				cs.ToUnicode(0x02), cs.ToUnicode(0x03),
+			}), next)
+		})
+	}
+}

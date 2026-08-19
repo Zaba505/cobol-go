@@ -1515,7 +1515,7 @@ var alphaTableCharsets = func() []struct {
 	table := make([]struct {
 		name    string
 		charset Charset
-	}, 0, len(shippedCharsets)+4)
+	}, 0, len(shippedCharsets)+6)
 	for _, sc := range shippedCharsets {
 		table = append(table, struct {
 			name    string
@@ -1539,6 +1539,14 @@ var alphaTableCharsets = func() []struct {
 			name    string
 			charset Charset
 		}{name: "not comparable", charset: nonComparableCharset{pad: []byte{1}}},
+		struct {
+			name    string
+			charset Charset
+		}{name: "embedded interface", charset: embeddingCharset{Charset: CP037()}},
+		struct {
+			name    string
+			charset Charset
+		}{name: "map field", charset: mapCharset{alias: map[rune]rune{'A': 'Z'}}},
 	)
 }()
 
@@ -1622,46 +1630,155 @@ func TestAlphaTableAppendFieldMatchesWriteRune(t *testing.T) {
 	}
 }
 
-// TestAlphaTableOfSharesOneTablePerComparableCharset pins the cache's whole
-// reason for existing: the table outlives any one [Reader], because
-// [Unmarshal] builds a Reader per record and a table built per Reader would be
-// amortised over a single one.
-func TestAlphaTableOfSharesOneTablePerComparableCharset(t *testing.T) {
+// TestAlphaCacheSharesOneTablePerCharset pins the cache's whole reason for
+// existing: the table outlives any one [Reader], because [Unmarshal] builds a
+// Reader per record and a table built per Reader would be amortised over a
+// single one.
+//
+// It runs against a cache of its own rather than against [alphaTables], so it
+// asserts nothing about global state. Through the package-level cache the same
+// assertion is order dependent — every distinct pointer-typed charset any test
+// in the suite reads with is a permanent entry, and past alphaTablesMax the
+// sharing property legitimately stops holding — which would make this fail for
+// reasons that have nothing to do with what it checks.
+func TestAlphaCacheSharesOneTablePerCharset(t *testing.T) {
 	t.Parallel()
 
-	require.Same(t, alphaTableOf(ASCII()), alphaTableOf(ASCII()))
-	require.Same(t, alphaTableOf(CP037()), alphaTableOf(CP037()))
-	require.NotSame(t, alphaTableOf(ASCII()), alphaTableOf(CP037()))
+	c := &alphaCache{max: alphaTablesMax}
+	require.Same(t, c.tableOf(ASCII()), c.tableOf(ASCII()))
+	require.Same(t, c.tableOf(CP037()), c.tableOf(CP037()))
+	require.NotSame(t, c.tableOf(ASCII()), c.tableOf(CP037()))
+	require.Equal(t, int64(2), c.len.Load())
 }
 
-// TestAlphaTableOfDoesNotUseANonComparableCharsetAsAKey is the hazard of
-// keying a cache by an interface. [Charset] promises nothing about
-// comparability, so a caller whose charset carries a slice, a map or a
-// function would panic the map lookup rather than any code of their own.
+// TestAlphaCacheKeepsAnsweringWhenFull walks the bound. A cached entry keeps its
+// charset reachable for the life of the program, so the cache has a ceiling —
+// and the branch past that ceiling has to keep returning correct tables rather
+// than nil or a shared wrong one.
 //
-// The requirement is that it keeps working, not that it is cached: a charset
-// that cannot be a key gets a table per Reader, which is slower and correct.
-func TestAlphaTableOfDoesNotUseANonComparableCharsetAsAKey(t *testing.T) {
+// A cache of its own is what makes this reachable at all: through
+// [alphaTables] the branch needs 64 distinct charsets and leaves the process
+// cache full for every test after it.
+func TestAlphaCacheKeepsAnsweringWhenFull(t *testing.T) {
 	t.Parallel()
 
-	cs := nonComparableCharset{pad: []byte{1}}
-	require.False(t, reflect.ValueOf(Charset(cs)).Comparable(),
-		"the fixture is comparable, so it does not exercise the hazard")
+	c := &alphaCache{max: 2}
+	first := c.tableOf(ASCII())
+	require.Same(t, first, c.tableOf(ASCII()))
+	require.NotNil(t, c.tableOf(CP037()))
+	require.Equal(t, int64(2), c.len.Load())
 
-	var first *alphaTable
-	require.NotPanics(t, func() { first = alphaTableOf(cs) })
-	require.NotNil(t, first)
-	require.NotSame(t, first, alphaTableOf(cs), "a non-comparable charset reached the cache")
+	// Full. A charset first seen now gets a correct table that is simply not
+	// retained, so two lookups are two tables and both translate properly.
+	third := c.tableOf(oddballCharset{})
+	fourth := c.tableOf(oddballCharset{})
+	require.NotNil(t, third)
+	require.NotSame(t, third, fourth, "the cache stored past its bound")
+	require.Equal(t, newAlphaTable(oddballCharset{}).enc, third.enc)
+	require.Equal(t, int64(2), c.len.Load())
 
-	// And the table it gets is the ordinary one, so the uncached path is not
-	// a second implementation.
-	for i := range 256 {
-		var sb strings.Builder
-		sb.WriteRune(cs.ToUnicode(byte(i)))
-		var packed [utf8MaxRuneLen]byte
-		binary.LittleEndian.PutUint32(packed[:], first.enc[i])
-		require.Equal(t, sb.String(), string(packed[:first.width[i]]))
+	// And the entries that were already in keep being shared.
+	require.Same(t, first, c.tableOf(ASCII()))
+}
+
+// TestAlphaTableOfRefusesACharsetThatCannotBeAKey is the hazard of keying a
+// cache by an interface. [Charset] promises nothing about comparability, so a
+// caller whose charset carries a slice, a map or a function would panic the map
+// lookup rather than any code of their own — and inside sync.Map's store path
+// that panic would escape with its mutex held, so it cannot be recovered from
+// either.
+//
+// The answer is nil, which [Reader.ReadAlphanumericJustified] reads as "no
+// table, translate per byte". An *uncached table* was the first answer and is
+// worse than none: it costs 256 translations and a 1.5KiB allocation per
+// [Reader], and Unmarshal builds one per record.
+func TestAlphaTableOfRefusesACharsetThatCannotBeAKey(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		charset Charset
+		want    bool
+	}{
+		{name: "slice field", charset: nonComparableCharset{pad: []byte{1}}},
+		{name: "embedded interface", charset: embeddingCharset{Charset: ASCII()}},
+		{name: "map field", charset: mapCharset{}},
+		{name: "empty struct", charset: ASCII(), want: true},
+		{name: "pointer to an embedded interface", charset: &embeddingCharset{Charset: ASCII()}, want: true},
+		{name: "pointer to a slice field", charset: &nonComparableCharset{pad: []byte{1}}, want: true},
 	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// reflect.Value.Comparable is the exact answer and is what the
+			// type walk has to agree with wherever it says yes. Where it
+			// says no the walk may be stricter, which is the safe
+			// direction; the cases above state which is which.
+			exact := reflect.ValueOf(tc.charset).Comparable()
+			require.Equal(t, tc.want, comparableCharset(tc.charset))
+			if comparableCharset(tc.charset) {
+				require.True(t, exact, "the walk approved a value == would panic on")
+			}
+
+			c := &alphaCache{max: alphaTablesMax}
+			var got *alphaTable
+			require.NotPanics(t, func() { got = c.tableOf(tc.charset) })
+			if !tc.want {
+				require.Nil(t, got, "a charset that cannot be a key got a table")
+				require.Zero(t, c.len.Load())
+				return
+			}
+			require.NotNil(t, got)
+		})
+	}
+}
+
+// TestUnmarshalDerivesTheTableOncePerCharset is the assertion the cache exists
+// for, and the one that fails if the table ever goes back to being per-[Reader].
+//
+// [Unmarshal] builds a Reader per record, so a per-Reader table would translate
+// 256 byte values *per record*: the count below would be 256 times the record
+// count rather than 256 in total. Every other test of the table would pass
+// either way, because they all read through one Reader and so through the
+// per-Reader memo rather than through the cache.
+func TestUnmarshalDerivesTheTableOncePerCharset(t *testing.T) {
+	t.Parallel()
+
+	// A pointer, so it is comparable and therefore cacheable, and distinct
+	// from every other charset the suite uses.
+	cs := &countingCharset{Charset: CP037()}
+	enc := charsetEncoding(cs)
+
+	// Two alphanumeric fields, because a record with one would still pass if
+	// the table were resolved per *field* rather than per Reader.
+	data := []byte{0xC1, 0xC2, 0xC3, 0xF1, 0xF2}
+
+	const records = 20
+	for range records {
+		var rec twoTextFields
+		require.NoError(t, Unmarshal(enc, data, &rec))
+		require.Equal(t, "ABC", rec.first)
+		require.Equal(t, "12", rec.second)
+	}
+	require.Equal(t, int64(256), cs.toUnicode.Load(),
+		"the table was derived more than once across %d records", records)
+}
+
+// twoTextFields is the smallest record that exercises the per-record path: two
+// alphanumeric fields and nothing else, so the only translation is theirs.
+type twoTextFields struct {
+	first, second string
+}
+
+func (r *twoTextFields) UnmarshalCOBOL(rd *Reader) error {
+	var err error
+	if r.first, err = rd.ReadAlphanumeric(3); err != nil {
+		return err
+	}
+	r.second, err = rd.ReadAlphanumeric(2)
+	return err
 }
 
 // wideCharset spells runes no code page would: three UTF-8 bytes for one half
@@ -1757,3 +1874,37 @@ func (nonComparableCharset) FromUnicode(r rune) (byte, bool) {
 }
 
 func (nonComparableCharset) Space() byte { return 0x20 }
+
+// embeddingCharset is the decorator shape a caller reaches for first: embed
+// [Charset], override what differs. Embedding an *interface* is what makes it
+// not comparable, which is worth a fixture of its own because nothing about the
+// shape looks like it carries a slice — and because the pointer to it is
+// comparable, so the remedy is one character.
+type embeddingCharset struct {
+	Charset
+}
+
+func (embeddingCharset) Name() string { return "embedding" }
+
+// mapCharset carries a map, the other way a struct stops being comparable.
+type mapCharset struct {
+	alias map[rune]rune
+}
+
+func (mapCharset) Name() string { return "map" }
+
+func (c mapCharset) ToUnicode(b byte) rune {
+	if r, ok := c.alias[rune(b)]; ok {
+		return r
+	}
+	return rune(b)
+}
+
+func (mapCharset) FromUnicode(r rune) (byte, bool) {
+	if r < 0 || r > 0xFF {
+		return 0, false
+	}
+	return byte(r), true
+}
+
+func (mapCharset) Space() byte { return 0x20 }
