@@ -209,13 +209,15 @@ func occursBounds(f *Field, clause *cobol.OccursClause) (int, int, error) {
 // control resolves the data-name of a DEPENDING ON phrase to the item holding the
 // occurrence count.
 //
+// The data-name is matched case-insensitively; see [sameName].
+//
 // It is resolved against the items already placed, so a controlling field written
 // after the table it controls is an error rather than a forward reference: the
 // count has to be readable before the table's extent is known, and a field whose
 // own offset depends on that extent never is.
 func (l *layouter) control(f *Field, name *cobol.Word) (*Item, error) {
 	for _, placed := range l.placed {
-		if placed.Field.Filler || placed.Field.Name != name.Value {
+		if placed.Field.Filler || !sameName(placed.Field.Name, name.Value) {
 			continue
 		}
 		if reason := unusableAsCount(placed.Field); reason != "" {

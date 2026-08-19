@@ -224,6 +224,8 @@ func (b *builder) addSubordinate(entry *cobol.DataDescriptionEntry) error {
 // it is left to [NewLayout] rather than reported here as though the level
 // numbers were at fault.
 //
+// Both scans match the data-name case-insensitively; see [sameName].
+//
 // The sibling scan returns nil for a matching sibling whatever that sibling is,
 // including one no REDEFINES may legally name. Deciding that is [NewLayout]'s,
 // which has the sizes; all this function settles is whether the entry is beside
@@ -251,12 +253,12 @@ func (b *builder) redefinesEnclosing(entry *cobol.DataDescriptionEntry, parent *
 	name := clause.Name.Value
 
 	for _, sibling := range parent.Children {
-		if !sibling.Filler && sibling.Name == name {
+		if !sibling.Filler && sameName(sibling.Name, name) {
 			return nil
 		}
 	}
 	for i := len(b.open) - 1; i >= 0; i-- {
-		if open := b.open[i]; !open.Filler && open.Name == name {
+		if open := b.open[i]; !open.Filler && sameName(open.Name, name) {
 			return open
 		}
 	}
@@ -456,13 +458,14 @@ func descendants(f *Field) int {
 	return n
 }
 
-// indexOf reports the position of the first field named name, or -1. A
-// data-name may repeat within a record when every reference to it is qualified;
-// an unqualified RENAMES of such a name is not valid COBOL, so taking the first
-// match costs nothing a correct copybook relies on.
+// indexOf reports the position of the first field named name, or -1. The match
+// is case-insensitive; see [sameName]. A data-name may repeat within a record
+// when every reference to it is qualified; an unqualified RENAMES of such a name
+// is not valid COBOL, so taking the first match costs nothing a correct copybook
+// relies on.
 func indexOf(fields []*Field, name string) int {
 	for i, f := range fields {
-		if !f.Filler && f.Name == name {
+		if !f.Filler && sameName(f.Name, name) {
 			return i
 		}
 	}
