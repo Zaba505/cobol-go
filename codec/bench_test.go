@@ -542,6 +542,39 @@ func BenchmarkReadPackedInt64(b *testing.B) {
 	}
 }
 
+// BenchmarkReadComp6Int64 measures [Reader.ReadComp6Int64] at each of
+// benchPackedDigits, beside BenchmarkReadPackedInt64 rather than folded into
+// it. COMP-6 is a byte narrower than COMP-3 at every even digit count and the
+// same width at every odd one, and it has no sign nibble to validate, so the
+// two are separate bodies in the decoder and neither one's figure stands in for
+// the other's.
+//
+// Corpus: the first n digits of 123456789012345678, unsigned — COMP-6 has
+// nowhere to put a sign — encoded under [IBMEnterprise] for the reason
+// BenchmarkReadPackedInt64's corpus is.
+func BenchmarkReadComp6Int64(b *testing.B) {
+	enc := IBMEnterprise()
+
+	for _, digits := range benchPackedDigits {
+		b.Run("digits="+strconv.Itoa(digits), func(b *testing.B) {
+			v := benchDigits(b, digits)
+			field := benchField(b, enc, comp6Width(digits), func(w *Writer) error {
+				return w.WriteComp6Int64(v, digits)
+			})
+			r := benchReader(b, enc, field)
+			requireReadsBack(b, v, func() (int64, error) { return r.ReadComp6Int64(digits) })
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := r.ReadComp6Int64(digits); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkDecodeRecord measures a whole testRecord read through one [Reader],
 // which is how a file is read: the Reader is constructed once and the record is
 // decoded many times. One iteration is one record, so ns/op is per record and
@@ -556,7 +589,7 @@ func BenchmarkReadPackedInt64(b *testing.B) {
 // and is not a view into anything the Reader reuses — so there is no capacity
 // on the struct for a later record to decode into. Moving the declaration
 // inside the loop would change the figure by the one struct, not by the
-// nineteen field allocations.
+// per-field allocations the accessors that still have one make.
 //
 // Corpus: benchRecord under benchRecordEncoding.
 func BenchmarkDecodeRecord(b *testing.B) {

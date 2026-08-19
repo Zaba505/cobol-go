@@ -614,7 +614,7 @@ func (r *Reader) readZonedInt(digits, max int, s SignPosition) (int64, error) {
 // is the digit bytes [zonedCodec.decodeField] validates.
 //
 // Every error is stamped with the offset of the byte at fault rather than the
-// offset the field ended at, for the reason [Reader.readPackedDigits] stamps
+// offset the field ended at, for the reason [Reader.readPackedField] stamps
 // the byte holding a bad nibble: a zoned field is several bytes wide, and "the
 // field ended at offset N" does not say which byte was wrong.
 func (r *Reader) readZonedDigits(digits, max int, s SignPosition) ([]byte, bool, error) {
@@ -700,16 +700,16 @@ func (r *Reader) ReadPackedInt64(digits int) (int64, error) {
 // without allocating. As with every numeric accessor the return is the unscaled
 // integer; see [Reader.ReadPackedInt32].
 func (r *Reader) ReadPackedBig(digits int) (*big.Int, error) {
-	ds, negative, err := r.readPackedDigits(digits, maxPackedDigits)
+	b, first, negative, err := r.readPackedField(digits, maxPackedDigits)
 	if err != nil {
 		return nil, err
 	}
 	v := new(big.Int)
 	ten := big.NewInt(10)
 	d := new(big.Int)
-	for _, n := range ds {
+	for i := 0; i < digits; i++ {
 		v.Mul(v, ten)
-		v.Add(v, d.SetInt64(int64(n)))
+		v.Add(v, d.SetInt64(int64(nibbleOf(b, first+i))))
 	}
 	if negative {
 		v.Neg(v)
@@ -719,14 +719,18 @@ func (r *Reader) ReadPackedBig(digits int) (*big.Int, error) {
 
 // readPackedInt is the shared body of the two integer packed accessors, whose
 // only difference is the digit count they accept.
+//
+// It folds the field's nibbles straight into the result rather than unpacking
+// them into a slice first, which is what makes an integer packed read allocate
+// nothing at all; see [Reader.readPackedField].
 func (r *Reader) readPackedInt(digits, max int) (int64, error) {
-	ds, negative, err := r.readPackedDigits(digits, max)
+	b, first, negative, err := r.readPackedField(digits, max)
 	if err != nil {
 		return 0, err
 	}
 	var v int64
-	for _, d := range ds {
-		v = v*10 + int64(d)
+	for i := 0; i < digits; i++ {
+		v = v*10 + int64(nibbleOf(b, first+i))
 	}
 	if negative {
 		v = -v
@@ -734,9 +738,39 @@ func (r *Reader) readPackedInt(digits, max int) (int64, error) {
 	return v, nil
 }
 
-// readPackedDigits reads one packed decimal field and returns its digits, most
-// significant first and one per element with values 0-9, together with whether
-// the sign nibble made it negative.
+// nibbleOf returns nibble i of b, counting the high nibble of the first byte as
+// nibble zero.
+//
+// It is what stands in for the unpacked nibble slice the packed bodies used to
+// build: a field's digits are a contiguous run of nibble indices, so every
+// caller walks that run and folds it, and no intermediate slice exists to
+// allocate. Indexing one byte at a time rather than loading several is
+// deliberate. [Reader.read] hands back a buffer sliced to the field's own
+// width, so a load wider than the field either runs off the end of an owned
+// slice or, behind the reused buffer, quietly reads the *next* field's bytes
+// and reports a neighbour as this field's bad nibble — a fault that shows up
+// only in a file long enough to have a next field.
+func nibbleOf(b []byte, i int) byte {
+	if i%2 == 0 {
+		return b[i/2] >> 4
+	}
+	return b[i/2] & 0x0F
+}
+
+// readPackedField reads one packed decimal field and validates every nibble of
+// it, returning the field's own bytes together with the index of the nibble
+// holding its most significant digit and whether the sign nibble made it
+// negative.
+//
+// The digits are nibbles first through first+digits-1 of b, read with
+// [nibbleOf]. Returning them that way rather than as a slice of one digit per
+// element is what removes the allocation the integer accessors used to pay:
+// each of them folds the run into a number as it walks it, and [big.Int] is the
+// only thing any packed read now puts on the heap.
+//
+// b views the buffer the [Reader] reuses and is valid only until the next read,
+// so every caller must consume it before returning — none of them returns
+// anything that views it.
 //
 // Every nibble is validated: the pad, each digit, and the sign. Rejecting them
 // is the only defence a reader has against a record whose offsets have slipped,
@@ -756,49 +790,50 @@ func (r *Reader) readPackedInt(digits, max int) (int64, error) {
 // nothing else. It is field order: the pad nibble, then the digit nibbles from
 // most significant to least, then the sign, which makes the reported offset the
 // earliest byte that went wrong. See codec/SPEC.md, "Fault precedence".
-func (r *Reader) readPackedDigits(digits, max int) ([]byte, bool, error) {
+func (r *Reader) readPackedField(digits, max int) (b []byte, first int, negative bool, err error) {
 	if digits < 1 || digits > max {
-		return nil, false, &OffsetError{
+		return nil, 0, false, &OffsetError{
 			Offset: r.off,
 			Err:    PackedDigitCountError{Digits: digits, Max: max},
 		}
 	}
 	start := r.off
-	b, err := r.read(packedWidth(digits))
+	b, err = r.read(packedWidth(digits))
 	if err != nil {
-		return nil, false, err
+		return nil, 0, false, err
 	}
 	// nibbleAt is the offset of the byte holding nibble i, counted from the
 	// first byte of the field.
 	nibbleAt := func(i int) int64 { return start + int64(i/2) }
 
-	nibbles := make([]byte, 0, 2*len(b))
-	for _, c := range b {
-		nibbles = append(nibbles, c>>4, c&0x0F)
-	}
 	// The pad nibble exists exactly when the digit count is even, because
-	// digits+1 nibbles is then odd and rounds up to a whole byte.
-	if digits%2 == 0 && nibbles[0] != 0 {
-		return nil, false, &OffsetError{
-			Offset: nibbleAt(0),
-			Err:    PackedPadError{Nibble: nibbles[0]},
+	// digits+1 nibbles is then odd and rounds up to a whole byte. It is
+	// nibble zero, the high nibble of the first byte.
+	if digits%2 == 0 {
+		if pad := nibbleOf(b, 0); pad != 0 {
+			return nil, 0, false, &OffsetError{
+				Offset: nibbleAt(0),
+				Err:    PackedPadError{Nibble: pad},
+			}
 		}
 	}
-	first := len(nibbles) - 1 - digits
-	ds := nibbles[first : len(nibbles)-1]
-	for i, d := range ds {
-		if d > 9 {
-			return nil, false, &OffsetError{
+	// The sign takes the last nibble of the field, so the digits end one
+	// nibble short of it.
+	sign := 2*len(b) - 1
+	first = sign - digits
+	for i := 0; i < digits; i++ {
+		if d := nibbleOf(b, first+i); d > 9 {
+			return nil, 0, false, &OffsetError{
 				Offset: nibbleAt(first + i),
 				Err:    PackedDigitError{Nibble: d},
 			}
 		}
 	}
-	negative, err := packedSignIsNegative(nibbles[len(nibbles)-1])
+	negative, err = packedSignIsNegative(nibbleOf(b, sign))
 	if err != nil {
-		return nil, false, &OffsetError{Offset: nibbleAt(len(nibbles) - 1), Err: err}
+		return nil, 0, false, &OffsetError{Offset: nibbleAt(sign), Err: err}
 	}
-	return ds, negative, nil
+	return b, first, negative, nil
 }
 
 // ReadComp6Int32 reads the next COMP-6 field of digits digits as an int32,
@@ -847,39 +882,47 @@ func (r *Reader) ReadComp6Int64(digits int) (int64, error) {
 // holds. As with every numeric accessor the return is the unscaled integer; see
 // [Reader.ReadComp6Int32].
 func (r *Reader) ReadComp6Big(digits int) (*big.Int, error) {
-	ds, err := r.readComp6Digits(digits, maxPackedDigits)
+	b, first, err := r.readComp6Field(digits, maxPackedDigits)
 	if err != nil {
 		return nil, err
 	}
 	v := new(big.Int)
 	ten := big.NewInt(10)
 	d := new(big.Int)
-	for _, n := range ds {
+	for i := 0; i < digits; i++ {
 		v.Mul(v, ten)
-		v.Add(v, d.SetInt64(int64(n)))
+		v.Add(v, d.SetInt64(int64(nibbleOf(b, first+i))))
 	}
 	return v, nil
 }
 
 // readComp6Int is the shared body of the two integer COMP-6 accessors, whose
 // only difference is the digit count they accept.
+//
+// It folds the field's nibbles straight into the result, for the reason
+// [Reader.readPackedInt] does.
 func (r *Reader) readComp6Int(digits, max int) (int64, error) {
-	ds, err := r.readComp6Digits(digits, max)
+	b, first, err := r.readComp6Field(digits, max)
 	if err != nil {
 		return 0, err
 	}
 	var v int64
-	for _, d := range ds {
-		v = v*10 + int64(d)
+	for i := 0; i < digits; i++ {
+		v = v*10 + int64(nibbleOf(b, first+i))
 	}
 	return v, nil
 }
 
-// readComp6Digits reads one COMP-6 field and returns its digits, most
-// significant first and one per element with values 0-9.
+// readComp6Field reads one COMP-6 field and validates every nibble of it,
+// returning the field's own bytes together with the index of the nibble holding
+// its most significant digit.
 //
-// It returns no sign, because COMP-6 stores none. That is the whole of the
-// difference from [Reader.readPackedDigits], and it is why the two are separate
+// The digits are nibbles first through first+digits-1 of b, read with
+// [nibbleOf], and b views the reused buffer under the same rule
+// [Reader.readPackedField] returns it under.
+//
+// It reports no sign, because COMP-6 stores none. That is the whole of the
+// difference from [Reader.readPackedField], and it is why the two are separate
 // bodies rather than one with a flag: there is no sign nibble to skip, so the
 // digits run to the very end of the field and the pad nibble appears on the
 // opposite parity of digits.
@@ -890,51 +933,50 @@ func (r *Reader) readComp6Int(digits, max int) (int64, error) {
 // mistake worth failing on.
 //
 // A nibble error carries the offset of the byte the nibble sits in, for the
-// reason [Reader.readPackedDigits] does, and the nibbles are checked in field
+// reason [Reader.readPackedField] does, and the nibbles are checked in field
 // order — pad, then digits from most significant to least — for the reason it
 // does too. That precedence is normative here as well; see codec/SPEC.md,
 // "Fault precedence".
-func (r *Reader) readComp6Digits(digits, max int) ([]byte, error) {
+func (r *Reader) readComp6Field(digits, max int) (b []byte, first int, err error) {
 	if digits < 1 || digits > max {
-		return nil, &OffsetError{
+		return nil, 0, &OffsetError{
 			Offset: r.off,
 			Err:    PackedDigitCountError{Digits: digits, Max: max},
 		}
 	}
 	start := r.off
-	b, err := r.read(comp6Width(digits))
+	b, err = r.read(comp6Width(digits))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// nibbleAt is the offset of the byte holding nibble i, counted from the
 	// first byte of the field.
 	nibbleAt := func(i int) int64 { return start + int64(i/2) }
 
-	nibbles := make([]byte, 0, 2*len(b))
-	for _, c := range b {
-		nibbles = append(nibbles, c>>4, c&0x0F)
-	}
 	// The pad nibble exists exactly when the digit count is odd, which is the
 	// opposite parity from COMP-3: there is no sign nibble making the count
 	// up, so an odd digit count is what leaves half a byte over. It is the
 	// high nibble of the first byte, as COMP-3's is.
-	if digits%2 == 1 && nibbles[0] != 0 {
-		return nil, &OffsetError{
-			Offset: nibbleAt(0),
-			Err:    PackedPadError{Nibble: nibbles[0]},
+	if digits%2 == 1 {
+		if pad := nibbleOf(b, 0); pad != 0 {
+			return nil, 0, &OffsetError{
+				Offset: nibbleAt(0),
+				Err:    PackedPadError{Nibble: pad},
+			}
 		}
 	}
-	first := len(nibbles) - digits
-	ds := nibbles[first:]
-	for i, d := range ds {
-		if d > 9 {
-			return nil, &OffsetError{
+	// There is no sign nibble, so the digits run to the last nibble of the
+	// field inclusive.
+	first = 2*len(b) - digits
+	for i := 0; i < digits; i++ {
+		if d := nibbleOf(b, first+i); d > 9 {
+			return nil, 0, &OffsetError{
 				Offset: nibbleAt(first + i),
 				Err:    PackedDigitError{Nibble: d},
 			}
 		}
 	}
-	return ds, nil
+	return b, first, nil
 }
 
 // ReadBinaryInt16 reads the next binary (COMP, COMP-4, BINARY) field of digits
