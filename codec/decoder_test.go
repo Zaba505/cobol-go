@@ -6,6 +6,7 @@
 package codec
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"io"
@@ -4987,6 +4988,48 @@ func TestResetDoesNotAllocate(t *testing.T) {
 		require.Zero(t, testing.AllocsPerRun(100, write),
 			"rewinding a Writer onto its own buffer allocates")
 	})
+
+	// The stream arm of the same claim, which is what #131 exists to make
+	// available: rewinding onto an [io.Reader] costs nothing either, so a
+	// caller whose records arrive on a stream gets the amortisation #115
+	// offered only to a caller holding bytes.
+	t.Run("reader over a stream", func(t *testing.T) {
+		field := []byte{0x04, 0xD2}
+		src := bytes.NewReader(field)
+
+		r, err := NewReader(src, enc)
+		require.NoError(t, err)
+
+		read := func() {
+			src.Reset(field)
+			r.ResetStream(src)
+			if _, err := r.ReadBinaryInt16(testRecordSeqDigits); err != nil {
+				t.Error(err)
+			}
+		}
+		read()
+
+		require.Zero(t, testing.AllocsPerRun(100, read),
+			"rewinding a Reader onto a stream allocates")
+	})
+
+	t.Run("writer over a stream", func(t *testing.T) {
+		field := []byte{0x04, 0xD2}
+
+		w, err := NewWriter(io.Discard, enc)
+		require.NoError(t, err)
+
+		write := func() {
+			w.ResetStream(io.Discard)
+			if err := w.WriteBytes(field); err != nil {
+				t.Error(err)
+			}
+		}
+		write()
+
+		require.Zero(t, testing.AllocsPerRun(100, write),
+			"rewinding a Writer onto a stream allocates")
+	})
 }
 
 // TestZeroValueIsStillUnusable pins the invariant both type doc comments assert
@@ -5018,4 +5061,302 @@ func TestZeroValueIsStillUnusable(t *testing.T) {
 			_ = (&Writer{}).WriteBytes([]byte{0x00}) //nolint:errcheck // the panic is the assertion
 		}, "a Writer nobody constructed wrote bytes under an unvalidated encoding")
 	})
+}
+
+// TestReaderResetStream is [TestReaderReset] for the source arm #131 added: a
+// Reader rewound onto an [io.Reader] rather than onto bytes, which is the only
+// rewind available to a caller whose records and whose framing come off one
+// stream.
+func TestReaderResetStream(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	t.Run("offset restarts and the encoding survives", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader([]byte("ABCDEF")), enc)
+		require.NoError(t, err)
+
+		_, err = r.ReadBytes(4)
+		require.NoError(t, err)
+		require.EqualValues(t, 4, r.Offset())
+
+		r.ResetStream(bytes.NewReader([]byte("GHIJKL")))
+		require.Zero(t, r.Offset())
+		require.Equal(t, enc, r.Encoding())
+
+		got, err := r.ReadBytes(4)
+		require.NoError(t, err)
+		require.Equal(t, []byte("GHIJ"), got)
+	})
+
+	t.Run("rewinds a Reader built over bytes", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewBytesReader([]byte("BYTES!"), enc)
+		require.NoError(t, err)
+
+		_, err = r.ReadBytes(3)
+		require.NoError(t, err)
+
+		// The bytes are dropped: what follows comes from the stream, and
+		// from its first byte.
+		r.ResetStream(bytes.NewReader([]byte("STREAM")))
+		require.Zero(t, r.Offset())
+
+		got, err := r.ReadBytes(6)
+		require.NoError(t, err)
+		require.Equal(t, []byte("STREAM"), got)
+	})
+
+	t.Run("rewinding onto the same stream reads on from where it stopped", func(t *testing.T) {
+		t.Parallel()
+
+		// The shape the method exists for: one stream, one Reader, a
+		// rewind per record. The rewind moves the *offset* and not the
+		// stream, so the records come off it in order.
+		stream := bytes.NewReader([]byte("AAAABBBBCCCC"))
+		r, err := NewReader(stream, enc)
+		require.NoError(t, err)
+
+		for _, want := range []string{"AAAA", "BBBB", "CCCC"} {
+			r.ResetStream(stream)
+			require.Zero(t, r.Offset())
+
+			got, err := r.ReadBytes(4)
+			require.NoError(t, err)
+			require.Equal(t, []byte(want), got)
+			require.EqualValues(t, 4, r.Offset(),
+				"the offset counts from the rewind, so it is the record's and not the file's")
+		}
+	})
+
+	t.Run("reads no further than the field it was asked for", func(t *testing.T) {
+		t.Parallel()
+
+		// What makes a shared stream workable at all: the Reader does not
+		// buffer, so the caller's own framing reads the byte after the
+		// last field and not the byte after some read-ahead.
+		stream := bufio.NewReader(bytes.NewReader([]byte("REC1\nREC2\n")))
+		r, err := NewReader(stream, enc)
+		require.NoError(t, err)
+
+		for _, want := range []string{"REC1", "REC2"} {
+			r.ResetStream(stream)
+
+			got, err := r.ReadBytes(4)
+			require.NoError(t, err)
+			require.Equal(t, []byte(want), got)
+
+			// The delimiter is the caller's to consume, and it is still
+			// there to be consumed.
+			delim, err := stream.ReadByte()
+			require.NoError(t, err)
+			require.EqualValues(t, '\n', delim)
+		}
+	})
+
+	t.Run("nil hands the Reader back holding nothing", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader([]byte("ABCDEF")), enc)
+		require.NoError(t, err)
+
+		// The pooling shape, and the answer to "what does nil mean here":
+		// the same as Reset(nil). The Reader holds neither stream nor
+		// record, and the next read reports end of input rather than
+		// panicking on a nil io.Reader.
+		require.NotPanics(t, func() { r.ResetStream(nil) })
+		require.Zero(t, r.Offset())
+
+		_, err = r.ReadBytes(1)
+		require.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("a Reader handed back can be rewound again", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader([]byte("ABCDEF")), enc)
+		require.NoError(t, err)
+
+		r.ResetStream(nil)
+		r.ResetStream(bytes.NewReader([]byte("GHIJKL")))
+
+		got, err := r.ReadBytes(6)
+		require.NoError(t, err)
+		require.Equal(t, []byte("GHIJKL"), got)
+	})
+}
+
+// TestReaderResetStreamErrorsCountFromTheRewind is
+// TestReaderResetErrorsMatchTheStream's other half: the stream arm's own
+// errors, asserted to be counted from the rewind rather than from the start of
+// the stream. [Reader.readInto] is still the only place an offset is stamped,
+// and the rewind is what that stamp is relative to.
+func TestReaderResetStreamErrorsCountFromTheRewind(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	stream := bytes.NewReader([]byte("AAAABB"))
+	r, err := NewReader(stream, enc)
+	require.NoError(t, err)
+
+	_, err = r.ReadBytes(4)
+	require.NoError(t, err)
+
+	// Two bytes are left, and the next record asks for four of them.
+	r.ResetStream(stream)
+	_, err = r.ReadBytes(4)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+
+	var offErr *OffsetError
+	require.ErrorAs(t, err, &offErr)
+	require.EqualValues(t, 2, offErr.Offset,
+		"the offset names where this record stopped, not where the stream did")
+	require.EqualValues(t, 2, r.Offset())
+
+	// And a record that begins at the end of the stream is io.EOF at zero,
+	// which is how a caller stepping through records detects the last one.
+	r.ResetStream(stream)
+	_, err = r.ReadBytes(4)
+	require.ErrorIs(t, err, io.EOF)
+	require.ErrorAs(t, err, &offErr)
+	require.Zero(t, offErr.Offset)
+}
+
+// TestReaderResetStreamReadsSeveralRecords is #131's acceptance criterion in
+// the reading direction, and TestReaderResetReadsSeveralRecords over the source
+// its caller actually has: several records read from **one stream** through one
+// Reader rewound between them, with the values of the earlier records required
+// to survive the later rewinds.
+//
+// The records are concatenated into a single stream rather than handed over one
+// slice at a time, because that is the case #115 could not serve — a caller
+// holding each record's bytes would have used [Reader.Reset].
+func TestReaderResetStreamReadsSeveralRecords(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	want := []testRecord{
+		{
+			ID:      "A12345",
+			Name:    "WIDGET GRIP",
+			Code:    "42",
+			Raw:     []byte{0x00, 0x01, 0xFF},
+			Amount:  -12345,
+			Qty:     42,
+			Units:   9999,
+			Seq:     1234,
+			Rate:    1.5,
+			Factor:  2.5,
+			Balance: -12345,
+			Count:   42,
+		},
+		{
+			ID:      "B98765",
+			Name:    "SPROCKET",
+			Code:    "7",
+			Raw:     []byte{0xDE, 0xAD, 0xBE},
+			Amount:  54321,
+			Qty:     7,
+			Units:   1,
+			Seq:     -4321,
+			Rate:    -0.25,
+			Factor:  -8.75,
+			Balance: 54321,
+			Count:   999,
+		},
+		{
+			ID:      "C00001",
+			Name:    "",
+			Code:    "",
+			Raw:     []byte{0x00, 0x00, 0x00},
+			Amount:  0,
+			Qty:     0,
+			Units:   0,
+			Seq:     0,
+			Rate:    0,
+			Factor:  0,
+			Balance: 0,
+			Count:   0,
+		},
+	}
+
+	var file []byte
+	for i := range want {
+		rec := want[i]
+		b, err := Marshal(enc, &rec)
+		require.NoError(t, err)
+		require.Len(t, b, testRecordWidth)
+		file = append(file, b...)
+	}
+
+	stream := bytes.NewReader(file)
+	r, err := NewReader(stream, enc)
+	require.NoError(t, err)
+
+	got := make([]testRecord, len(want))
+	for i := range want {
+		r.ResetStream(stream)
+		require.NoError(t, got[i].UnmarshalCOBOL(r))
+		require.EqualValues(t, testRecordWidth, r.Offset(),
+			"the offset restarts per record, so it ends at the record's width and not at the file's")
+		require.Equal(t, want[i], got[i])
+	}
+
+	// The whole point: no record's values were disturbed by the records read
+	// after it, through the Reader's scratch or through the rewinds.
+	require.Equal(t, want, got)
+
+	// The stream is drained exactly, so a rewind consumed nothing of its own.
+	require.Zero(t, stream.Len())
+}
+
+// TestResetStreamKeepsWhatTheEncodingDerived is #131's first acceptance
+// criterion asserted directly rather than through an allocation count: a rewind
+// onto a stream re-derives nothing that came from the [Encoding], and the
+// Encoding itself cannot change.
+//
+// TestResetDoesNotAllocate says the same thing in the enforceable currency of
+// zero allocations, but it says it about the rewind *and* the read together, so
+// a rewind that rebuilt a table into a buffer it had already allocated would
+// slip through it. This one names the derived state — the zoned codec, the
+// alphanumeric table and the fact that it has been looked up — and requires it
+// to be the same state afterwards.
+func TestResetStreamKeepsWhatTheEncodingDerived(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	r, err := NewReader(bytes.NewReader([]byte("AB1234")), enc)
+	require.NoError(t, err)
+
+	// An alphanumeric field first, so the lazy table lookup has happened and
+	// there is something to keep; then a zoned one, so the zoned codec is
+	// on the path too.
+	_, err = r.ReadAlphanumeric(2)
+	require.NoError(t, err)
+	require.True(t, r.alphaLookedUp, "this test asserts nothing until the table has been looked up")
+
+	alpha, zoned, zonedErr := r.alpha, r.zoned, r.zonedErr
+	require.NotNil(t, alpha)
+
+	r.ResetStream(bytes.NewReader([]byte("CD5678")))
+
+	require.Equal(t, enc, r.Encoding(), "the Encoding cannot change across a rewind")
+	require.True(t, r.alphaLookedUp, "the rewind un-looked-up the alphanumeric table")
+	require.Same(t, alpha, r.alpha, "the rewind derived a second alphanumeric table")
+	require.Equal(t, zoned, r.zoned, "the rewind derived the zoned tables again")
+	require.Equal(t, zonedErr, r.zonedErr)
+
+	// And the kept state still decodes: the point of keeping it.
+	got, err := r.ReadAlphanumeric(2)
+	require.NoError(t, err)
+	require.Equal(t, "CD", got)
+	n, err := r.ReadZonedInt32(4, SignUnsigned)
+	require.NoError(t, err)
+	require.EqualValues(t, 5678, n)
 }

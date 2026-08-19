@@ -3869,3 +3869,240 @@ func TestBytesWriterFirstFieldJumpsToTheFloor(t *testing.T) {
 	require.GreaterOrEqual(t, cap(w.Bytes()), smallRecordBuffer,
 		"a four-byte first field grew the buffer to four bytes, so a record costs an allocation a field")
 }
+
+// TestWriterResetStream is [TestWriterReset] for the destination arm #131
+// added: a Writer rewound onto an [io.Writer] rather than onto a buffer, which
+// is the rewind that keeps a stream instead of taking it away.
+func TestWriterResetStream(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	t.Run("offset restarts and the encoding survives", func(t *testing.T) {
+		t.Parallel()
+
+		var first, second bytes.Buffer
+		w, err := NewWriter(&first, enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteAlphanumeric("AB", 4))
+		require.EqualValues(t, 4, w.Offset())
+
+		w.ResetStream(&second)
+		require.Zero(t, w.Offset())
+		require.Equal(t, enc, w.Encoding())
+
+		require.NoError(t, w.WriteAlphanumeric("CD", 4))
+		require.Equal(t, []byte("AB  "), first.Bytes(),
+			"bytes already written to a stream stay written; there is no buffering to lose")
+		require.Equal(t, []byte("CD  "), second.Bytes())
+	})
+
+	t.Run("rewinding onto the same stream writes the records in order", func(t *testing.T) {
+		t.Parallel()
+
+		// The shape the method exists for: one file, one Writer, a rewind
+		// per record, and offsets that are the record's rather than the
+		// file's.
+		var sink bytes.Buffer
+		w, err := NewWriter(&sink, enc)
+		require.NoError(t, err)
+
+		for _, rec := range []string{"AB", "CD", "EF"} {
+			w.ResetStream(&sink)
+			require.Zero(t, w.Offset())
+			require.NoError(t, w.WriteAlphanumeric(rec, 4))
+			require.EqualValues(t, 4, w.Offset(),
+				"the offset counts from the rewind, so it is the record's and not the file's")
+		}
+
+		require.Equal(t, []byte("AB  CD  EF  "), sink.Bytes())
+	})
+
+	t.Run("rewinds a Writer built over bytes", func(t *testing.T) {
+		t.Parallel()
+
+		w, err := NewBytesWriter(make([]byte, 0, 64), enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteAlphanumeric("AB", 4))
+
+		// The buffer is dropped: what follows goes to the stream, and
+		// Bytes reports nothing, because this Writer's bytes are not in a
+		// buffer any more.
+		var sink bytes.Buffer
+		w.ResetStream(&sink)
+		require.Zero(t, w.Offset())
+		require.Nil(t, w.Bytes())
+
+		require.NoError(t, w.WriteAlphanumeric("CD", 4))
+		require.Equal(t, []byte("CD  "), sink.Bytes())
+		require.Nil(t, w.Bytes())
+	})
+
+	t.Run("nil hands the Writer back holding nothing", func(t *testing.T) {
+		t.Parallel()
+
+		var sink bytes.Buffer
+		w, err := NewWriter(&sink, enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteAlphanumeric("AB", 4))
+
+		// The pooling shape, and the answer to "what does nil mean here":
+		// the same as Reset(nil). The Writer holds neither stream nor
+		// buffer, so nothing of the caller's is kept alive, and a write
+		// after the hand-back goes to a buffer nobody reads rather than
+		// panicking on a nil io.Writer.
+		require.NotPanics(t, func() { w.ResetStream(nil) })
+		require.Zero(t, w.Offset())
+		require.Nil(t, w.Bytes())
+
+		require.NoError(t, w.WriteAlphanumeric("CD", 4))
+		require.Equal(t, []byte("AB  "), sink.Bytes(),
+			"a Writer handed back does not go on writing to the stream it had")
+
+		// Where those bytes did go, stated rather than left to be
+		// discovered: a handed-back Writer is a byte-backed Writer like
+		// any other, so the write succeeds and [Writer.Bytes] hands it
+		// back. Quiet, which is why the doc says to rewind first.
+		require.Equal(t, []byte("CD  "), w.Bytes())
+	})
+
+	t.Run("a Writer handed back can be rewound again", func(t *testing.T) {
+		t.Parallel()
+
+		var sink bytes.Buffer
+		w, err := NewWriter(&sink, enc)
+		require.NoError(t, err)
+
+		w.ResetStream(nil)
+		w.ResetStream(&sink)
+
+		require.NoError(t, w.WriteAlphanumeric("CD", 4))
+		require.Equal(t, []byte("CD  "), sink.Bytes())
+	})
+
+	t.Run("errors are stamped with the offset within the record", func(t *testing.T) {
+		t.Parallel()
+
+		// [Writer.write] is still the only place an offset is stamped, and
+		// the rewind is what that stamp is relative to: a record that
+		// fails two bytes in reports two, whatever the file already holds.
+		sink := &failingWriter{limit: 6}
+		w, err := NewWriter(sink, enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteAlphanumeric("AB", 4))
+
+		w.ResetStream(sink)
+		err = w.WriteAlphanumeric("CD", 4)
+		require.Error(t, err)
+
+		var offErr *OffsetError
+		require.ErrorAs(t, err, &offErr)
+		require.EqualValues(t, 2, offErr.Offset,
+			"the offset names where this record stopped, not where the file did")
+		require.EqualValues(t, 2, w.Offset())
+
+		// And the failure does not stick to the Writer. This is the
+		// pooling case — a record fails to encode and the caller rewinds
+		// or hands the Writer back — and it is the assertion
+		// TestReaderResetStreamErrorsCountFromTheRewind makes on the
+		// decode arm, which the encode arm needs too.
+		var good bytes.Buffer
+		w.ResetStream(&good)
+		require.Zero(t, w.Offset())
+		require.NoError(t, w.WriteAlphanumeric("EF", 4))
+		require.EqualValues(t, 4, w.Offset())
+		require.Equal(t, []byte("EF  "), good.Bytes())
+	})
+}
+
+// TestRoundTripReusedReaderAndWriterOverAStream is #131's acceptance criterion
+// in both directions at once, and TestRoundTripReusedReaderAndWriter over the
+// source and destination its caller actually has: one [Writer] rewound onto one
+// stream per record, and one [Reader] rewound onto one stream per record to
+// read them back, with every record required to survive the ones handled after
+// it.
+//
+// It is the case #115 could not serve at all. Neither codec ever holds a
+// record's bytes: the writer's go straight to the stream and the reader's come
+// straight off it, which is why the file is one [bytes.Buffer] rather than a
+// slice per record.
+func TestRoundTripReusedReaderAndWriterOverAStream(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	want := []testRecord{
+		{
+			ID:      "A12345",
+			Name:    "WIDGET GRIP",
+			Code:    "42",
+			Raw:     []byte{0x00, 0x01, 0xFF},
+			Amount:  -12345,
+			Qty:     42,
+			Units:   9999,
+			Seq:     1234,
+			Rate:    1.5,
+			Factor:  2.5,
+			Balance: -12345,
+			Count:   42,
+		},
+		{
+			ID:      "B98765",
+			Name:    "SPROCKET",
+			Code:    "7",
+			Raw:     []byte{0xFE, 0x80, 0x02},
+			Amount:  54321,
+			Qty:     7,
+			Units:   1,
+			Seq:     -4321,
+			Rate:    -0.25,
+			Factor:  -8.75,
+			Balance: 54321,
+			Count:   7,
+		},
+		{
+			ID:      "C24680",
+			Name:    "BRACKET ASSY",
+			Code:    "99",
+			Raw:     []byte{0x7F, 0x00, 0x01},
+			Amount:  1,
+			Qty:     1,
+			Units:   5,
+			Seq:     9999,
+			Rate:    0.5,
+			Factor:  -1.25,
+			Balance: -1,
+			Count:   999,
+		},
+	}
+
+	var file bytes.Buffer
+	w, err := NewWriter(&file, enc)
+	require.NoError(t, err)
+
+	for i := range want {
+		rec := want[i]
+		w.ResetStream(&file)
+		require.NoError(t, rec.MarshalCOBOL(w))
+		require.EqualValues(t, testRecordWidth, w.Offset(),
+			"the offset restarts per record, so it ends at the record's width")
+	}
+	require.Len(t, file.Bytes(), len(want)*testRecordWidth)
+
+	r, err := NewReader(&file, enc)
+	require.NoError(t, err)
+
+	got := make([]testRecord, len(want))
+	for i := range want {
+		r.ResetStream(&file)
+		require.NoError(t, got[i].UnmarshalCOBOL(r))
+		require.EqualValues(t, testRecordWidth, r.Offset())
+
+		// Every record decoded so far, including the ones read before the
+		// rewinds that followed them.
+		require.Equal(t, want[:i+1], got[:i+1])
+	}
+
+	require.Equal(t, want, got)
+	require.Zero(t, file.Len(), "the stream is drained exactly; a rewind consumed nothing of its own")
+}
