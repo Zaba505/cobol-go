@@ -59,10 +59,22 @@
 // record. The [Encoding] itself cannot change; a different one needs a
 // different [Reader].
 //
-// Both hold the caller's slice rather than copying it, until the next Reset and
-// no longer. Nothing a read returns views it — every accessor decodes through
-// the [Reader]'s own scratch — so values from earlier records survive both the
-// next Reset and a later write into the caller's buffer.
+// Both hold the caller's slice rather than copying it, until the next rewind
+// and no longer. Nothing a read returns views it — every accessor decodes
+// through the [Reader]'s own scratch — so values from earlier records survive
+// both the next rewind and a later write into the caller's buffer.
+//
+// [Reader.ResetStream] and [Writer.ResetStream] are the same rewind onto the
+// other kind of source: an [io.Reader] or an [io.Writer], for the caller whose
+// records and whose framing come off one stream and who therefore never holds a
+// record's bytes to pass to Reset. Rewinding onto the same stream every time is
+// the ordinary use, and it makes [Reader.Offset], [Writer.Offset] and every
+// [OffsetError] count from the last rewind — the record-relative offsets Reset
+// already gives. Nothing is read ahead and nothing is held back, so the
+// caller's own framing reads and writes the bytes either side of each record.
+//
+// A nil argument to any of the four means the same thing: the hand-back, for a
+// codec going into a pool. It holds neither a stream nor a slice afterwards.
 //
 // # Scope of this package as it stands
 //

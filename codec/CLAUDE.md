@@ -204,7 +204,7 @@ Four invariants a change here must keep, all pinned by tests:
   allocation at all is the field's bytes reaching the heap. See the benchmarks
   section for why zero is assertable where a count is not.
 
-## Sources and destinations: a stream, or bytes the caller holds (#115)
+## Sources and destinations: a stream, or bytes the caller holds (#115, #131)
 
 A `Reader` reads an `io.Reader` **or** a `[]byte`, and a `Writer` writes an
 `io.Writer` **or** appends to a `[]byte`. Which one is decided by a single
@@ -273,6 +273,56 @@ are their first callers.
   the caller's slice until the next `Reset` and no longer; `Reset(nil)` is what
   a pooled codec passes on the way back, and `TestReaderReset` pins both halves
   of that.
+- **The rewind exists on both sources, and the stream one is called
+  `ResetStream` (#131).** `Reset(data []byte)` served only a caller holding a
+  record's bytes; a caller reading from a stream — `cpybkc`'s delimited and
+  line-sequential framings, which hand `codec` the same `*bufio.Reader` they
+  draw the framing from — had no way to reuse a codec at all, so the
+  amortisation `#115` exists to offer was unreachable from the input type most
+  callers start with. `ResetStream(io.Reader)` and `ResetStream(io.Writer)`
+  close that, and they keep exactly what `Reset` keeps.
+  - **The name.** Go cannot overload, and `Reset` is taken by the byte-shaped
+    half, so the stream half needed a second name. `ResetReader`/`ResetWriter`
+    would mirror `bufio.Reader.Reset(io.Reader)`'s *argument* while stuttering
+    against the receiver — `Reader.ResetReader` reads as "reset the reader's
+    reader" — and would be **two** names for one operation, one per side, where
+    the operation is identical. `ResetStream` is one name on both types, says
+    what changes rather than what the argument is, and pairs with `Reset` as
+    "onto a stream" against "onto bytes". It matches nothing in the standard
+    library, which is the cost, and it is the smaller cost. Both `Reset` doc
+    comments name it, because a caller holding an `io.Reader` finds `Reset`
+    first and would otherwise conclude the package cannot serve them.
+  - **A nil argument means the hand-back, on all four methods.** `Reset(nil)` was
+    already the pooling shape — hold nothing, keep nothing of the caller's alive
+    — and `ResetStream(nil)` is spelled as exactly that: it delegates to
+    `Reset(nil)`, so the codec falls into the byte-backed arm over an empty
+    source. A read then answers `io.EOF` and a write goes to a buffer nobody
+    reads, rather than either panicking on a nil interface. That is what keeps
+    the answer from being "panics on the next read" without inventing a third
+    state, and `TestZeroValueIsStillUnusable` is untouched by it: a codec
+    *nobody constructed* still takes the stream arm and still panics, because
+    its `Encoding` was never validated and nothing must make it look workable.
+  - **Rewinding onto the same stream is the point**, and it is what makes
+    `Offset` and every `OffsetError` record-relative on a stream, as they
+    already were on bytes. Nothing is read ahead — the `Reader` does not buffer,
+    which `#108` measured and declined — so the caller's framing reads the byte
+    after the last field. `TestReaderResetStream` pins that with a `bufio.Reader`
+    shared between the codec and the test's own delimiter read, which is the
+    adopter's shape.
+  - **Each `ResetStream` drops the other arm's source** — `data = nil`,
+    `buf = nil` — rather than leaving it behind an unused discriminator. The
+    retention promise is "until the next rewind and no longer", and a rewind
+    onto a stream is a rewind.
+  - **What it is worth**, measured on the pull request that landed it (go1.26.2,
+    AMD Ryzen 9 5950X, `-benchtime 2s -count 5`, `benchRecord` under
+    `GnuCOBOLASCII`): `BenchmarkResetStreamDecodeRecord` 321 ns / 37 B / 6
+    allocs against `BenchmarkStreamDecodeRecord`'s 580 / 613 / 7, and
+    `BenchmarkResetStreamEncodeRecord` 403 / 80 / 14 against
+    `BenchmarkStreamEncodeRecord`'s 623 / 528 / 15. The allocation removed is
+    the codec itself — one per record, and the 576-byte `Reader` is most of the
+    bytes; the ns/op gap is that allocation plus the encoding-derived work no
+    longer redone. It lands the stream-shaped caller on the same figures the
+    byte-shaped one has had since #115.
 - **The `Writer` is still not buffered.** It has no `Flush` and no `Close`, so
   holding bytes back from an `io.Writer` would truncate any caller that just
   stops writing. A byte-backed `Writer` is a different thing: the bytes it
@@ -641,7 +691,7 @@ exist because the figures it replaces could not be attributed to any data:
   Pinning **zero** does not, and `TestReadingDoesNotAllocate` does exactly that
   for five accessors, because zero is zero on every toolchain and is the one
   number that says a buffer did not escape. `TestResetDoesNotAllocate` pins the
-  same number for `Reset` on both sides. Those two are the package's only tests
+  same number for `Reset` and `ResetStream` on both sides. Those two are the package's only tests
   without `t.Parallel()`, since `testing.AllocsPerRun` sets `GOMAXPROCS` to 1
   and panics when called from a parallel test.
 - **Every benchmark fixes and documents its corpus**, and every parameter is a

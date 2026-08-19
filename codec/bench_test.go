@@ -906,3 +906,137 @@ func BenchmarkResetEncodeRecord(b *testing.B) {
 	b.StopTimer()
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
 }
+
+// BenchmarkStreamDecodeRecord is the baseline #131 exists to beat: a caller
+// whose records arrive on a stream, building a [Reader] per record because
+// before ResetStream that was the only thing it could do.
+//
+// It is BenchmarkUnmarshalRecord's shape — construction paid once per record —
+// with the source an [io.Reader] rather than a []byte, because [Unmarshal] is
+// not available to this caller either: it takes the record's bytes, and this
+// caller does not hold them. Its pair is BenchmarkResetStreamDecodeRecord, and
+// the difference between the two is the whole of what the story is worth.
+// allocs/op is the figure to compare; the Reader is one of them and the rest
+// are the record's own.
+//
+// Corpus: benchRecord under benchRecordEncoding, the same record every other
+// whole-record benchmark uses, so the difference is attributable to the Reader
+// and not to the data. The stream is a [bytes.Reader] rewound per iteration,
+// which is the cheapest stream there is — the figure is therefore the codec's
+// cost and not the source's.
+func BenchmarkStreamDecodeRecord(b *testing.B) {
+	enc := benchRecordEncoding()
+
+	fixture := benchRecord()
+	data, err := Marshal(enc, &fixture)
+	require.NoError(b, err)
+	require.Len(b, data, testRecordWidth)
+
+	src := bytes.NewReader(data)
+
+	var rec testRecord
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		src.Reset(data)
+		r, err := NewReader(src, enc)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := rec.UnmarshalCOBOL(r); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
+}
+
+// BenchmarkResetStreamDecodeRecord is BenchmarkStreamDecodeRecord with the
+// [Reader] hoisted out of the loop and rewound by [Reader.ResetStream] instead,
+// which is what #131 added the method for. The two differ by the construction
+// and by nothing else — same encoding, same record, same stream, rewound the
+// same way — so the gap between them is what building a Reader per record costs
+// a stream-shaped caller, and it is the figure a caller pooling Readers across
+// goroutines would see.
+//
+// It is BenchmarkResetDecodeRecord's mirror on the other source. That one
+// restarts on bytes the caller holds; this one restarts on a stream, which is
+// the case #115 left unreachable.
+//
+// Corpus: benchRecord under benchRecordEncoding.
+func BenchmarkResetStreamDecodeRecord(b *testing.B) {
+	enc := benchRecordEncoding()
+
+	fixture := benchRecord()
+	data, err := Marshal(enc, &fixture)
+	require.NoError(b, err)
+	require.Len(b, data, testRecordWidth)
+
+	src := bytes.NewReader(data)
+	r, err := NewReader(src, enc)
+	require.NoError(b, err)
+
+	var rec testRecord
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		src.Reset(data)
+		r.ResetStream(src)
+		if err := rec.UnmarshalCOBOL(r); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
+}
+
+// BenchmarkStreamEncodeRecord is BenchmarkStreamDecodeRecord's mirror: a
+// [Writer] built per record onto a stream, which is what a caller writing
+// records to a file did before [Writer.ResetStream].
+//
+// The destination is [io.Discard] rather than a buffer, as BenchmarkEncodeRecord's
+// is, so what is measured is the encoding and the construction rather than the
+// sink's own growth.
+//
+// Corpus: benchRecord under benchRecordEncoding.
+func BenchmarkStreamEncodeRecord(b *testing.B) {
+	enc := benchRecordEncoding()
+	rec := benchRecord()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w, err := NewWriter(io.Discard, enc)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := rec.MarshalCOBOL(w); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
+}
+
+// BenchmarkResetStreamEncodeRecord is BenchmarkStreamEncodeRecord with the
+// [Writer] hoisted out of the loop and rewound by [Writer.ResetStream], the
+// encoding side of #131. The two differ by the construction alone.
+//
+// Corpus: benchRecord under benchRecordEncoding.
+func BenchmarkResetStreamEncodeRecord(b *testing.B) {
+	rec := benchRecord()
+
+	w, err := NewWriter(io.Discard, benchRecordEncoding())
+	require.NoError(b, err)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w.ResetStream(io.Discard)
+		if err := rec.MarshalCOBOL(w); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
+}

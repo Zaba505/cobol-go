@@ -31,9 +31,10 @@ import (
 // the bytes it appends *are* its output, handed over by [Writer.Bytes] — and
 // [Writer.Reset] rewinds one onto the next record without allocating, which is
 // what makes one *byte-backed* Writer per file, or a pool of them, the cheap
-// way to encode a sequence of records. A Writer over a stream is not reset per
-// record: its offset is the file's, and [Writer.Reset] would take the stream
-// away from it.
+// way to encode a sequence of records. A Writer over a stream is rewound by
+// [Writer.ResetStream] instead, which keeps the destination rather than
+// replacing it with a buffer, so a stream-shaped caller reuses one Writer the
+// same way.
 type Writer struct {
 	// w is the stream a Writer built by [NewWriter] writes to, and is unused
 	// by the byte-backed Writers — those built by [NewBytesWriter] or
@@ -166,13 +167,66 @@ func newWriter(enc Encoding) (*Writer, error) {
 // **destination**: the stream is dropped, this buffer takes its place, and
 // nothing further reaches the stream. Bytes already written to it stay written
 // — there is no buffering here to lose — but a Writer that is meant to go on
-// filling a file must never be Reset, and a pool of Writers over streams is not
-// a thing this method makes possible. Build one Writer per stream, and pool the
-// byte-backed ones.
+// filling a file must never be Reset.
+//
+// The rewind that *keeps* a stream is [Writer.ResetStream], and it is what a
+// caller writing records straight to a file wants: it restarts the offset
+// without taking the destination away, so pooling Writers over streams is
+// possible after all.
 func (w *Writer) Reset(buf []byte) {
 	w.toBytes = true
 	w.w = nil
 	w.buf = buf[:0]
+	w.off = 0
+}
+
+// ResetStream rewinds w onto wr, so that the next field written starts a new
+// record and [Writer.Offset] reports 0 again.
+//
+// It is [Writer.Reset] with the other kind of destination and [Reader.ResetStream]
+// in the other direction. Everything derived from the [Encoding] survives it —
+// the zoned decimal byte tables — and the Encoding itself cannot change; a
+// different one needs a different Writer.
+//
+// Rewinding onto the **same** stream is the ordinary use, and it is the one
+// [Writer.Reset] could not express: it makes [Writer.Offset] and the offset in
+// every [OffsetError] count from the last rewind, so they are the position
+// within the record being written rather than within the whole file.
+//
+//	w := pool.Get().(*codec.Writer)
+//	defer func() { w.ResetStream(nil); pool.Put(w) }()
+//	for _, rec := range records {
+//		w.ResetStream(f) // f is the same file every time
+//		if err := rec.MarshalCOBOL(w); err != nil {
+//			return err
+//		}
+//	}
+//
+// Nothing is held back and nothing is lost across a rewind, because a Writer
+// over a stream does not buffer: every field written before it has already
+// reached wr, and the next record's bytes follow them.
+//
+// A nil wr means what Reset(nil) means: the hand-back, for a Writer going into
+// a pool. The Writer holds neither a stream nor the caller's buffer afterwards,
+// so it keeps nothing alive, and writing to a Writer that has been handed back
+// is a use of it after the fact — its bytes go to a buffer nobody reads rather
+// than to a nil [io.Writer] and a panic.
+//
+// ResetStream works on a Writer built by [NewBytesWriter], or rewound by
+// [Writer.Reset], too: the buffer is dropped, the stream takes its place, and
+// [Writer.Bytes] then reports nil because this Writer's bytes go to wr.
+func (w *Writer) ResetStream(wr io.Writer) {
+	if wr == nil {
+		w.Reset(nil)
+		return
+	}
+	w.toBytes = false
+	w.w = wr
+	// The caller's buffer is dropped rather than left behind the unused arm,
+	// for the reason [Reader.ResetStream] drops the record it was reading:
+	// Reset promises to hold it until the next rewind and no longer, and this
+	// is that rewind.
+	w.buf = nil
 	w.off = 0
 }
 
