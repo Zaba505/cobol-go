@@ -293,8 +293,9 @@ field, there is no sign to return or to emit, and the two differences interact.
 Neither body unpacks the field into a slice of digits. `nibbleOf(b, i)` reads
 nibble `i` of the field's own bytes, the digits are the contiguous run
 `first` … `first+digits-1`, and each caller folds that run as it walks it, so an
-integer packed or COMP-6 read allocates nothing at all and a `big.Int` is the
-only thing either family puts on the heap (#116). Index a nibble at a time
+integer packed or COMP-6 read allocates nothing at all, and the `Big` accessors
+are the only ones in either family still reaching the heap — for the `big.Int`
+they return and the temporaries it is folded with, never for the field (#116). Index a nibble at a time
 rather than loading a word: `Reader.read` returns a buffer sliced to the
 field's width, so a wider load runs off an owned slice or, behind the reused
 buffer, reads the *next* field's bytes and reports a neighbour as this field's

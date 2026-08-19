@@ -2476,12 +2476,12 @@ func TestComp6FaultPrecedence(t *testing.T) {
 //
 // It runs the narrowest field of each usage — one digit, one byte for both —
 // because that is where the margin is largest: the reused scratch is
-// maxNumericWidth bytes and [Reader.read] slices one of them out of it, so
-// anything reading a machine word instead of a nibble would take fifteen bytes
-// that belong to the field before. Those bytes are poison here, the nines and
-// A-F nibbles of a wide field read immediately beforehand, so a read that
-// strayed into them returns a wrong number or a spurious PackedDigitError
-// rather than passing by luck on a zeroed buffer.
+// maxNumericWidth bytes and [Reader.read] slices one byte of it out for the
+// field, so every other byte of the scratch is a byte a load wider than the
+// field could reach. Those bytes are poison here, the nines and A-F nibbles of
+// a wide field read immediately beforehand, so a read that strayed into them
+// returns a wrong number or a spurious PackedDigitError rather than passing by
+// luck on a zeroed buffer.
 //
 // Both sources are covered. They differ in where the field's bytes come from —
 // [io.ReadFull] against a copy out of the caller's slice — and only the
@@ -2593,9 +2593,16 @@ func TestPackedReadsNoFurtherThanItsOwnBytes(t *testing.T) {
 							// preceding field of a record would.
 							// ReadAlphanumeric and not ReadBytes:
 							// ReadBytes takes the allocating path and
-							// would leave the scratch untouched.
+							// would leave the scratch untouched. The
+							// translated text goes to the alpha buffer,
+							// but the field's own bytes come through
+							// Reader.read, which is the numeric scratch
+							// at this width — asserted rather than
+							// assumed, since the whole test rests on it.
 							_, err := r.ReadAlphanumeric(len(poison))
 							require.NoError(t, err)
+							require.Equal(t, poison, r.num[:len(poison)],
+								"the poison never reached the buffer the field is read into")
 
 							got, err := read(r)
 							require.NoError(t, err)
@@ -3988,7 +3995,10 @@ func TestReadBytesIsTheOnlyAccessorHandingOutBytes(t *testing.T) {
 // and COMP-6 accessors used to unpack every nibble of the field into a slice
 // the fold then walked once and dropped, and it escaped because the function
 // building it returned it. They fold the field's own nibbles now, so they
-// belong beside the accessors that never had an intermediate at all.
+// belong beside the accessors that never had an intermediate at all. Each is
+// stated at the int64 accessor only, because the int32 one is the same
+// readPackedInt/readComp6Int body under a narrower digit maximum and a
+// conversion — there is no second allocation site for a case to reach.
 //
 // It asserts zero rather than pinning a count. A count moves with the toolchain
 // and wants an owner — codec/CLAUDE.md says so of the benchmarks, and that
@@ -4019,22 +4029,23 @@ func TestReadingDoesNotAllocate(t *testing.T) {
 			},
 		},
 		{
-			// Five digits, so the field carries a pad nibble, three
-			// bytes and a sign — every nibble role the fold validates.
+			// Six digits: an even count, which is the parity at which a
+			// COMP-3 field carries a pad nibble, so the field holds
+			// every nibble role the fold validates — pad, digits, sign.
 			name:  "comp-3",
-			field: []byte{0x12, 0x34, 0x5C},
+			field: []byte{0x01, 0x23, 0x45, 0x6C},
 			read: func(r *Reader) error {
-				_, err := r.ReadPackedInt64(5)
+				_, err := r.ReadPackedInt64(6)
 				return err
 			},
 		},
 		{
-			// Four digits, the even count at which COMP-6 has no pad
-			// nibble and is a byte narrower than the COMP-3 above.
+			// Five digits: the opposite parity, which is where COMP-6
+			// carries its pad nibble, and no sign nibble at all.
 			name:  "comp-6",
-			field: []byte{0x12, 0x34},
+			field: []byte{0x01, 0x23, 0x45},
 			read: func(r *Reader) error {
-				_, err := r.ReadComp6Int64(4)
+				_, err := r.ReadComp6Int64(5)
 				return err
 			},
 		},
