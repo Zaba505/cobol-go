@@ -12,9 +12,10 @@ import (
 )
 
 // TestSameName pins the comparison every data-name resolution in this package
-// routes through, including the two properties a bare strings.EqualFold gives
-// that a caller might not expect to be relied on: FILLER is excluded by the
-// callers rather than here, and the empty name matches only the empty name.
+// routes through, including the two properties that distinguish it from a bare
+// strings.EqualFold: the fold is ASCII rather than Unicode simple folding, and
+// the empty string is not a name and so matches nothing, which keeps an unnamed
+// FILLER item unmatchable even by a call site that forgets its Filler guard.
 func TestSameName(t *testing.T) {
 	t.Parallel()
 
@@ -31,8 +32,15 @@ func TestSameName(t *testing.T) {
 		{name: "hyphen is not folded away", a: "CUST-NAME", b: "CUSTNAME", want: false},
 		{name: "different names", a: "HEADER", b: "TRAILER", want: false},
 		{name: "prefix is not a match", a: "HDR", b: "HDR-TYPE", want: false},
-		{name: "empty matches empty", a: "", b: "", want: true},
+		{name: "empty is not a name and matches nothing", a: "", b: "", want: false},
 		{name: "empty matches nothing else", a: "", b: "A", want: false},
+		// The fold is ASCII, not Unicode simple folding: with
+		// strings.EqualFold both of these would be true. They are the
+		// cases that tell the two implementations apart, so they are
+		// what makes the choice deliberate rather than inherited.
+		{name: "long s is not folded into ascii s", a: "MA\u017fTER", b: "MASTER", want: false},
+		{name: "kelvin sign is not the letter k", a: "\u212aEY", b: "KEY", want: false},
+		{name: "dotless i is not the letter i", a: "M\u0131N", b: "MIN", want: false},
 	}
 
 	for _, tc := range testCases {

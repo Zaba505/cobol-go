@@ -684,10 +684,16 @@ COBOL words are **case-insensitive**, and user-defined words are words: a
 data-name declared `Header` is the same name as `HEADER` and as `header`, so a
 `REDEFINES HEADER`, a `RENAMES` endpoint or an `OCCURS ... DEPENDING ON` phrase
 resolves to it whichever of the three spellings either side is written in. The
-tokenizer preserves the source case of every word and the parser upper-cases
-reserved words but deliberately not user-defined ones, so the fold belongs in
-whatever *matches* two names and never in what is stored — a printer that
-re-emits a data-name must re-emit the spelling the source used.
+fold is over the ASCII letters and nothing else, because a `Word` is built from
+ASCII letters, digits, hyphen and underscore (see [Lexical
+Elements](#lexical-elements-tokens), "User-defined word").
+
+The fold belongs in whatever *matches* two names and never in what is stored: the
+tokenizer emits each `Word` with its source bytes, and while the parser
+upper-cases the reserved words and clause keywords it stores as strings — a
+`UsageClause`'s `Usage`, a `SignClause`'s `Position` — it stores every
+user-defined `Word` as written. A printer therefore re-emits a data-name in the
+spelling the source used.
 
 Structural placeholders left in prose (e.g. `« object-computer-clause »`,
 `« file-clause »`, `« i-o-control-clause »`, `« use-spec »`, `« alphabet-spec »`)

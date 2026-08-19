@@ -136,10 +136,10 @@ func usageFromString(s string) (Usage, bool) {
 // Semantics: "Level numbers are relative").
 //
 // Name is the data-name with its source case preserved, and is empty for a
-// FILLER item — see [Field.Filler]. Names are *matched* case-insensitively, as
-// COBOL matches them (see [sameName]); the fold is in the comparison and never
-// in what is stored, so the printer re-emits the spelling the source used.
-// Picture is the parsed PICTURE
+// FILLER item — see [Field.Filler]. Names are matched case-insensitively, as
+// COBOL matches them: the fold is in the comparison and never in what is stored,
+// so a printer re-emits the spelling the source used, and a caller wanting an
+// exact match compares this field itself. Picture is the parsed PICTURE
 // character-string, nil for a group item and for the elementary items that take
 // no PICTURE clause (USAGE INDEX, USAGE POINTER, COMP-1, COMP-2). Usage is the
 // item's own USAGE clause where it has one and the USAGE inherited from its
