@@ -4421,7 +4421,11 @@ func TestReaderResetErrorsMatchTheStream(t *testing.T) {
 	testCases := []struct {
 		name string
 		data []byte
-		want error
+		// drain reads the record dry before the read under test, so the
+		// failing read starts at the end of the data rather than at its
+		// beginning.
+		drain bool
+		want  error
 	}{
 		{
 			name: "empty record is EOF at offset zero",
@@ -4433,6 +4437,16 @@ func TestReaderResetErrorsMatchTheStream(t *testing.T) {
 			data: []byte{0x00, 0x01},
 			want: io.ErrUnexpectedEOF,
 		},
+		{
+			// The boundary the hand-written EOF branch exists for: a
+			// record that ended exactly on a field boundary is EOF and
+			// not a short read, so a record read to its end and asked
+			// for one more field answers what a stream answers.
+			name:  "a record ended exactly is EOF at its width",
+			data:  []byte{0x00, 0x01, 0x02, 0x03},
+			drain: true,
+			want:  io.EOF,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -4441,11 +4455,19 @@ func TestReaderResetErrorsMatchTheStream(t *testing.T) {
 
 			stream, err := NewReader(bytes.NewReader(tc.data), enc)
 			require.NoError(t, err)
-			_, streamErr := stream.ReadBytes(4)
 
 			r, err := NewBytesReader(nil, enc)
 			require.NoError(t, err)
 			r.Reset(tc.data)
+
+			if tc.drain {
+				_, err = stream.ReadBytes(len(tc.data))
+				require.NoError(t, err)
+				_, err = r.ReadBytes(len(tc.data))
+				require.NoError(t, err)
+			}
+
+			_, streamErr := stream.ReadBytes(4)
 			_, resetErr := r.ReadBytes(4)
 
 			require.ErrorIs(t, resetErr, tc.want)
@@ -4453,7 +4475,8 @@ func TestReaderResetErrorsMatchTheStream(t *testing.T) {
 
 			var offErr *OffsetError
 			require.ErrorAs(t, resetErr, &offErr)
-			require.EqualValues(t, len(tc.data), offErr.Offset)
+			require.EqualValues(t, len(tc.data), offErr.Offset,
+				"the offset names where reading stopped, counted from the Reset")
 			require.EqualValues(t, len(tc.data), r.Offset())
 			require.Equal(t, stream.Offset(), r.Offset())
 		})
@@ -4511,5 +4534,36 @@ func TestResetDoesNotAllocate(t *testing.T) {
 
 		require.Zero(t, testing.AllocsPerRun(100, write),
 			"rewinding a Writer onto its own buffer allocates")
+	})
+}
+
+// TestZeroValueIsStillUnusable pins the invariant both type doc comments assert
+// and that a second kind of source could quietly have taken away: a [Reader] or
+// a [Writer] nobody constructed does not work.
+//
+// It is not a hypothetical. Discriminating on a nil [io.Reader] rather than on
+// [Reader.fromBytes] would make the zero Reader read as an *empty record* and
+// answer [io.EOF] — a plausible answer from a Reader whose [Encoding] was never
+// validated — and the zero Writer would go further and *succeed*, appending
+// bytes under an encoding with none of its four axes set. Both panic instead,
+// exactly as they did before there was a byte-backed path, and the panic is the
+// nil interface being used rather than anything this package raises.
+func TestZeroValueIsStillUnusable(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reader", func(t *testing.T) {
+		t.Parallel()
+
+		require.Panics(t, func() {
+			_, _ = (&Reader{}).ReadBytes(1) //nolint:errcheck // the panic is the assertion
+		}, "a Reader nobody constructed read as an empty record instead of failing")
+	})
+
+	t.Run("writer", func(t *testing.T) {
+		t.Parallel()
+
+		require.Panics(t, func() {
+			_ = (&Writer{}).WriteBytes([]byte{0x00}) //nolint:errcheck // the panic is the assertion
+		}, "a Writer nobody constructed wrote bytes under an unvalidated encoding")
 	})
 }

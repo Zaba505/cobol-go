@@ -3628,12 +3628,14 @@ func TestMarshalMatchesTheStreamWriter(t *testing.T) {
 // several records with [Writer.Reset] and [Reader.Reset], with every record
 // required to survive the ones written and read after it.
 //
-// The two halves are separate for a reason. The writer's buffer is reused at
-// its capacity, so record two is written over record one's bytes; the values
-// decoded from record one therefore have to be copies, and would fail here if
-// any accessor handed out a window into either the caller's slice or the
-// Reader's scratch. Encoding every record before decoding any of them is what
-// makes that overwrite happen while the earlier values are still live.
+// The pair is driven record by record, and the [Writer]'s own buffer is what
+// the [Reader] is pointed at — no copy in between. That is what puts the
+// aliasing guarantee on the path: the writer's buffer is reused at its
+// capacity, so record two is encoded *over* record one's bytes while record
+// one's decoded values are still live, and any accessor handing out a window
+// into either the caller's slice or the Reader's scratch fails here. Copying
+// each record out first, which an earlier draft of this test did, quietly
+// removes exactly that.
 func TestRoundTripReusedReaderAndWriter(t *testing.T) {
 	t.Parallel()
 
@@ -3684,13 +3686,16 @@ func TestRoundTripReusedReaderAndWriter(t *testing.T) {
 		},
 	}
 
-	// One Writer for every record, its buffer reused at capacity. Each
-	// record's bytes are copied out because the next Reset writes over
-	// them — which is what [Writer.Bytes] documents.
+	// One Writer and one Reader for every record: encode into the writer's
+	// reused buffer, decode straight back out of it, and keep going. Every
+	// record after the first is written over the bytes the record before it
+	// was decoded from.
 	w, err := NewBytesWriter(nil, enc)
 	require.NoError(t, err)
+	r, err := NewBytesReader(nil, enc)
+	require.NoError(t, err)
 
-	records := make([][]byte, len(want))
+	got := make([]testRecord, len(want))
 	var scratch []byte
 	for i, rec := range want {
 		w.Reset(scratch)
@@ -3700,21 +3705,21 @@ func TestRoundTripReusedReaderAndWriter(t *testing.T) {
 
 		scratch = w.Bytes()
 		require.Len(t, scratch, testRecordWidth)
-		records[i] = append([]byte(nil), scratch...)
-	}
 
-	// One Reader for every record, rewound onto each in turn.
-	r, err := NewBytesReader(nil, enc)
-	require.NoError(t, err)
-
-	got := make([]testRecord, len(want))
-	for i, data := range records {
-		r.Reset(data)
+		r.Reset(scratch)
 		require.NoError(t, got[i].UnmarshalCOBOL(r))
 		require.EqualValues(t, testRecordWidth, r.Offset())
+
+		// Every record decoded so far, including the ones whose bytes
+		// have since been written over.
+		require.Equal(t, want[:i+1], got[:i+1])
 	}
 
+	// And once more at the end, with the buffer holding only the last
+	// record: nothing decoded earlier was a view into it.
 	require.Equal(t, want, got)
+	require.Equal(t, scratch, w.Bytes(),
+		"the writer kept one buffer across every record")
 }
 
 // TestBytesWriterGrowsForAFieldWiderThanTheFloor covers the arm of
@@ -3733,6 +3738,8 @@ func TestBytesWriterGrowsForAFieldWiderThanTheFloor(t *testing.T) {
 
 	require.NoError(t, w.WriteAlphanumeric("ACME", width))
 	require.EqualValues(t, width, w.Offset())
+	require.GreaterOrEqual(t, cap(w.Bytes()), width,
+		"the field asked for more than the doubling would have given, so the growth took the field's own width")
 
 	want := append([]byte("ACME"), bytes.Repeat([]byte(" "), width-4)...)
 	require.Equal(t, want, w.Bytes())
@@ -3741,4 +3748,24 @@ func TestBytesWriterGrowsForAFieldWiderThanTheFloor(t *testing.T) {
 	require.NoError(t, w.WriteAlphanumeric("CO", 4))
 	require.Equal(t, append(want, []byte("CO  ")...), w.Bytes())
 	require.EqualValues(t, width+4, w.Offset())
+}
+
+// TestBytesWriterFirstFieldJumpsToTheFloor pins the other arm of
+// [Writer.grow]'s policy — the 64-byte floor — which is what keeps a record's
+// worth of fields to one allocation between them rather than one each. It is
+// the arm [Marshal] takes on every record, and the only thing that reported it
+// before was an allocation count in a benchmark CI never runs.
+//
+// It asserts a bound rather than an exact capacity: the floor is a minimum this
+// package chose, and a `make` is free to hand back more.
+func TestBytesWriterFirstFieldJumpsToTheFloor(t *testing.T) {
+	t.Parallel()
+
+	w, err := NewBytesWriter(nil, GnuCOBOLASCII())
+	require.NoError(t, err)
+
+	require.NoError(t, w.WriteAlphanumeric("AB", 4))
+	require.Equal(t, []byte("AB  "), w.Bytes())
+	require.GreaterOrEqual(t, cap(w.Bytes()), smallRecordBuffer,
+		"a four-byte first field grew the buffer to four bytes, so a record costs an allocation a field")
 }

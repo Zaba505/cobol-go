@@ -30,14 +30,24 @@ import (
 // caller that simply stops writing. A byte-backed Writer is the other thing —
 // the bytes it appends *are* its output, handed over by [Writer.Bytes] — and
 // [Writer.Reset] rewinds one onto the next record without allocating, which is
-// what makes one Writer per file, or a pool of them, the cheap way to encode a
-// sequence of records.
+// what makes one *byte-backed* Writer per file, or a pool of them, the cheap
+// way to encode a sequence of records. A Writer over a stream is not reset per
+// record: its offset is the file's, and [Writer.Reset] would take the stream
+// away from it.
 type Writer struct {
-	// w is the stream a Writer built by [NewWriter] writes to, and is nil
-	// for exactly the byte-backed Writers — those built by [NewBytesWriter]
-	// or rewound by [Writer.Reset] — which append to buf instead.
-	// [NewWriter] rejects a nil [io.Writer], so nil here is unambiguous.
+	// w is the stream a Writer built by [NewWriter] writes to, and is unused
+	// by the byte-backed Writers — those built by [NewBytesWriter] or
+	// rewound by [Writer.Reset] — which append to buf instead.
 	w io.Writer
+	// toBytes says which of the two it is, and it is a field rather than a
+	// nil check on w for the reason [Reader.fromBytes] is: the zero value of
+	// a Writer has to stay unusable. "nil w means append to the buffer"
+	// would make a Writer nobody constructed *succeed* — producing bytes
+	// under an [Encoding] with none of its four axes set, and reporting no
+	// error at all, which is the one failure this package is built to
+	// prevent. With this field it takes the stream arm and fails on the nil
+	// [io.Writer] exactly as it did before there was a second destination.
+	toBytes bool
 	// buf is what a byte-backed Writer appends to and what [Writer.Bytes]
 	// returns. It is the caller's own slice, reused at its capacity from
 	// [Writer.Reset] onward, which is where the per-record buffer
@@ -81,6 +91,18 @@ func NewWriter(w io.Writer, enc Encoding) (*Writer, error) {
 // gets those bytes back in front of the record; passing buf[:0] reuses the
 // capacity and keeps nothing. [Writer.Offset] counts from 0 either way, since
 // it reports what this Writer has written and not how long the slice is.
+// [Writer.Reset] is the other half of this and does *not* keep what the buffer
+// held: it truncates, because a rewind that reported offset 0 over bytes it had
+// left in place would be a rewind of the counter only.
+//
+// Appending means appending, with everything that implies about the caller's
+// backing array: bytes past len(buf) are overwritten, so a slice that is a
+// prefix of a larger array the caller still needs — an arena, or a header
+// carved out of a bigger buffer — must be handed over as
+// buf[:len(buf):len(buf)] for the first write to reallocate instead. Nothing
+// is capped here, because the capacity a caller does mean to lend is the whole
+// point of the byte-backed path: [Marshal] passes nil, and a pooled Writer
+// passes the slice it filled last time.
 //
 // enc is validated exactly as [NewWriter] validates it, and construction fails
 // with the same [EncodingError] naming the same field. The one difference is
@@ -92,6 +114,7 @@ func NewBytesWriter(buf []byte, enc Encoding) (*Writer, error) {
 	if err != nil {
 		return nil, err
 	}
+	wr.toBytes = true
 	wr.buf = buf
 	return wr, nil
 }
@@ -135,19 +158,31 @@ func newWriter(enc Encoding) (*Writer, error) {
 // Writer must expect the bytes [Writer.Bytes] returned to be overwritten, since
 // they are the same array.
 //
-// Reset works on a Writer built by [NewWriter] too: the stream is dropped and
-// the buffer takes its place. That is a change of destination and not of
-// position, so a Writer half way through a record on a stream is not one to
-// reset.
+// Unlike [NewBytesWriter], which appends to what buf holds, Reset **discards**
+// it. A rewind is a rewind: [Writer.Offset] reporting 0 has to mean the next
+// byte written is the first one [Writer.Bytes] returns.
+//
+// Reset works on a Writer built by [NewWriter] too, and there it is a change of
+// **destination**: the stream is dropped, this buffer takes its place, and
+// nothing further reaches the stream. Bytes already written to it stay written
+// — there is no buffering here to lose — but a Writer that is meant to go on
+// filling a file must never be Reset, and a pool of Writers over streams is not
+// a thing this method makes possible. Build one Writer per stream, and pool the
+// byte-backed ones.
 func (w *Writer) Reset(buf []byte) {
+	w.toBytes = true
 	w.w = nil
 	w.buf = buf[:0]
 	w.off = 0
 }
 
 // Bytes returns what has been written to a byte-backed [Writer] — one built by
-// [NewBytesWriter] or rewound by [Writer.Reset] — including anything the buffer
-// it was given already held.
+// [NewBytesWriter] or rewound by [Writer.Reset].
+//
+// For a Writer from [NewBytesWriter] that includes whatever the buffer it was
+// given already held, since that constructor appends to it. For one from
+// [Writer.Reset] it does not, since Reset truncates: what comes back is the
+// current record and nothing before it.
 //
 // The slice is the Writer's own, valid until the next write or [Writer.Reset]
 // and no longer, in the way [bytes.Buffer.Bytes] is. A caller keeping the
@@ -173,11 +208,15 @@ func (w *Writer) Offset() int64 { return w.off }
 //
 // Appending cannot fail: there is no short write and no error to stamp, so the
 // byte-backed arm is the offset and nothing else.
+//
+// Which arm runs is [Writer.toBytes] and never a nil check on w, so that a
+// Writer nobody constructed fails on its nil [io.Writer] rather than quietly
+// producing bytes under an unvalidated [Encoding].
 func (w *Writer) write(p []byte) error {
 	if len(p) == 0 {
 		return nil
 	}
-	if w.w == nil {
+	if w.toBytes {
 		if cap(w.buf)-len(w.buf) < len(p) {
 			w.grow(len(p))
 		}
@@ -209,6 +248,10 @@ const smallRecordBuffer = 64
 // each. It is only reached on the byte-backed path, and only when the caller's
 // own capacity — the whole point of [Writer.Reset] — has run out.
 func (w *Writer) grow(n int) {
+	// The doubling is a hint and the need below is the requirement, which is
+	// what makes an overflowed double harmless rather than a bug: past half
+	// the address space the growth stops being geometric and the buffer grows
+	// by exactly what the field asked for.
 	next := 2 * cap(w.buf)
 	if next < smallRecordBuffer {
 		next = smallRecordBuffer

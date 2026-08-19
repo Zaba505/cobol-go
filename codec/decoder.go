@@ -28,19 +28,33 @@ import (
 // per *file* — or one pooled across a fleet of them — the cheap way to step
 // through records, rather than one per record.
 type Reader struct {
-	// r is the stream a Reader built by [NewReader] reads, and is nil for
-	// exactly the byte-backed Readers — those built by [NewBytesReader] or
-	// rewound by [Reader.Reset] — whose source is data instead. [NewReader]
-	// rejects a nil [io.Reader], so nil here is unambiguous.
+	// r is the stream a Reader built by [NewReader] reads, and is unused by
+	// the byte-backed Readers — those built by [NewBytesReader] or rewound
+	// by [Reader.Reset] — whose source is data instead.
 	r io.Reader
-	// data is the source of a byte-backed Reader: the caller's own slice,
-	// held rather than copied, and read from at off. It is a field on the
-	// struct rather than a *bytes.Reader behind r because the point of the
-	// byte-backed path is that a record costs no allocation at all —
-	// wrapping the slice would put one back, per record, exactly where
-	// [Reader.Reset] exists to remove it.
+	// fromBytes says which of the two it is, and it is a field rather than a
+	// nil check on either of them because the zero value of a Reader has to
+	// stay unusable. A Reader nobody constructed has a nil r and a nil data,
+	// and "nil r means read the bytes" would read that as an empty record and
+	// answer [io.EOF] — a plausible answer, from a Reader whose [Encoding]
+	// was never validated. With this field it takes the stream arm instead
+	// and fails on the nil [io.Reader] exactly as it did before there was a
+	// second kind of source.
+	fromBytes bool
+	// data is the *unread remainder* of a byte-backed Reader's source: the
+	// caller's own slice, held rather than copied, resliced as fields are
+	// consumed. It is a field on the struct rather than a *bytes.Reader
+	// behind r because the point of the byte-backed path is that a record
+	// costs no allocation at all — wrapping the slice would put one back,
+	// per record, exactly where [Reader.Reset] exists to remove it.
 	//
-	// The Reader holds this slice until the next Reset and no longer; see
+	// Consuming by reslicing rather than by indexing at off is what keeps
+	// off a pure counter of bytes read. The two are equal today, but off is
+	// what [Reader.Offset] and every [OffsetError] mean, and the first
+	// accessor to move one without the other would otherwise turn this
+	// field into an out-of-range index in the middle of a decode.
+	//
+	// The Reader holds the slice until the next Reset and no longer; see
 	// Reset for what that means for a caller reusing its buffer.
 	data []byte
 	enc  Encoding
@@ -189,6 +203,7 @@ func NewBytesReader(data []byte, enc Encoding) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
+	rd.fromBytes = true
 	rd.data = data
 	return rd, nil
 }
@@ -237,6 +252,7 @@ func newReader(enc Encoding) (*Reader, error) {
 // Reset works on a Reader built by [NewReader] too: the stream is dropped and
 // the bytes take its place.
 func (r *Reader) Reset(data []byte) {
+	r.fromBytes = true
 	r.r = nil
 	r.data = data
 	r.off = 0
@@ -328,10 +344,16 @@ func (r *Reader) checkWidth(n int) error {
 // The byte-backed arm is [io.ReadFull]'s contract done by hand: a short fill is
 // [io.ErrUnexpectedEOF], and one that copied nothing at all is [io.EOF], so a
 // record ending exactly on a field boundary reads the same either way. It
-// *copies* into buf rather than reslicing data, which costs the copy and buys
-// two invariants: no accessor can hand out a window into the caller's slice,
-// and [Reader.read]'s promise that its result is overwritten by the next read
-// stays true of every source.
+// *copies* into buf rather than handing back a window onto data, which costs
+// the copy and buys two invariants: no accessor can hand out a view into the
+// caller's slice, and [Reader.read]'s promise that its result is overwritten by
+// the next read stays true of every source. What it does reslice is its own
+// [Reader.data], so the source shrinks as it is consumed and off stays a pure
+// counter rather than an index into it.
+//
+// Which arm runs is [Reader.fromBytes] and never a nil check, so that a Reader
+// nobody constructed still fails on its nil [io.Reader] instead of reading as
+// an empty record.
 func (r *Reader) readInto(buf []byte) error {
 	if len(buf) == 0 {
 		return nil
@@ -340,16 +362,17 @@ func (r *Reader) readInto(buf []byte) error {
 		got int
 		err error
 	)
-	if r.r != nil {
-		got, err = io.ReadFull(r.r, buf)
-	} else {
-		got = copy(buf, r.data[r.off:])
+	if r.fromBytes {
+		got = copy(buf, r.data)
+		r.data = r.data[got:]
 		if got < len(buf) {
 			err = io.ErrUnexpectedEOF
 			if got == 0 {
 				err = io.EOF
 			}
 		}
+	} else {
+		got, err = io.ReadFull(r.r, buf)
 	}
 	r.off += int64(got)
 	if err != nil {

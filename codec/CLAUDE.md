@@ -207,11 +207,29 @@ are their first callers.
 - **The byte source is a slice on the struct, not a `*bytes.Reader` behind the
   interface.** Wrapping puts back the per-record allocation the whole story
   exists to remove: `Unmarshal` went 11 -> 10 allocs/record and 607 -> 520 ns
-  by not wrapping. The cost is 24 bytes of struct, which took `Reader` from 512
-  to 536 and so into the next size class — `BenchmarkNewReader` 266 -> 274 ns,
+  by not wrapping. The cost is 25 bytes of struct, which took `Reader` from 512
+  to 544 and so into the next size class — `BenchmarkNewReader` 266 -> 274 ns,
   512 -> 576 B, one allocation either way. That trade is disclosed rather than
   smoothed over, exactly as the `maxAlphaScratch` one above it is, and the pair
-  of benchmarks that disagree about it are the same pair.
+  of benchmarks that disagree about it are the same pair. Every ns/op figure in
+  this section is one machine's, measured on the pull request that landed the
+  change; the allocation counts are the ones to compare.
+- **Which arm runs is an explicit `fromBytes`/`toBytes` field, never a nil check
+  on `r`/`w`.** This is the one thing about the two-source design that is not
+  obvious and cost a review round. "Nil stream means read the bytes" makes the
+  **zero value usable**: a `Reader{}` nobody constructed reads as an empty
+  record and answers `io.EOF`, and a `Writer{}` goes further and *succeeds*,
+  appending bytes under an `Encoding` with none of its four axes set. Both are
+  exactly the silent failure the no-default rule at the top of this file exists
+  to prevent. With the field they take the stream arm and fail on the nil
+  interface, as they did before there were two kinds of source, and
+  `TestZeroValueIsStillUnusable` pins that.
+- **`Reader.data` is the unread remainder and is consumed by reslicing**, not
+  indexed at `off`. The two are equal today, but `off` is what `Offset` and
+  every `OffsetError` mean by "bytes read", and indexing a slice with it welds
+  that meaning to "position in the source": the first accessor to move one
+  without the other turns the read path into an out-of-range panic mid-decode.
+  Reslicing keeps `off` a pure counter.
 - **Both arms live inside `readInto` and `write`.** Those are the two methods
   that move `off` and stamp `OffsetError`, and the rule that they are the only
   ones is what keeps a second source from becoming a second error-stamping
@@ -224,6 +242,17 @@ are their first callers.
   record, and `read`'s promise that its result dies at the next read would stop
   being true of every source. `TestReaderResetReadsSeveralRecords` overwrites
   every record after decoding them all and requires the values to stand.
+- **`Reset` truncates its buffer where `NewBytesWriter` appends to it.** A
+  rewind has to: `Offset` reporting 0 means the next byte written is the first
+  byte `Bytes()` returns. The constructor is a destination rather than a rewind,
+  so it keeps what the caller put there — a header, say. Both doc comments say
+  so and point at each other, because the argument and its name are identical
+  and only the semantics differ.
+- **`Reset` on a stream-backed `Writer` is a change of destination**, and the
+  doc says plainly that nothing further reaches the stream and that a pool of
+  stream `Writer`s is not what this method makes possible. It cannot be made to
+  report that: `Reset` has no error return, and this package raises no panics.
+  Pool the byte-backed ones, build one `Writer` per stream.
 - **`Reset` keeps everything the `Encoding` derived** — the zoned tables, the
   alpha table lookup, the scratch buffers, the writer's capacity — and the
   `Encoding` itself cannot change. A swappable encoding under a half-read
@@ -243,7 +272,10 @@ are their first callers.
   `append`'s own growth reaches a record's width in four allocations where one
   will do, and `Marshal` pays that per record. Dropping the floor regresses
   `BenchmarkMarshalRecord` from 16 allocs/record to 19, which is worse than the
-  `bytes.Buffer` it replaced.
+  `bytes.Buffer` it replaced. Both arms of that policy are pinned by tests
+  rather than by the benchmark alone — `TestBytesWriterFirstFieldJumpsToTheFloor`
+  and `TestBytesWriterGrowsForAFieldWiderThanTheFloor` — because CI runs the
+  tests and never the benchmarks.
 
 ## Packed decimal: COMP-3 and COMP-6 are separate bodies on purpose
 
