@@ -2174,6 +2174,61 @@ func requirePackedFault(t *testing.T, err error, want packedFault, nibble byte, 
 	require.Equal(t, offset, offErr.Offset)
 }
 
+// runFaultPrecedenceCase reads src with each of the given accessors and
+// requires the reported fault to be the expected one.
+//
+// It runs every case twice: once with the field at the start of the record, and
+// once behind a short prefix consumed by an earlier read. nibbleAt is
+// fieldStart+i/2, and a field beginning at offset 0 exercises only the second
+// term — an implementation that dropped the field's start offset altogether
+// would pass a table that never moved the field. The prefix is an odd number of
+// bytes so that a start offset folded into the nibble index rather than added
+// to the byte index shows up as well.
+func runFaultPrecedenceCase(
+	t *testing.T,
+	readers map[string]func(*Reader, int) error,
+	src []byte,
+	digits int,
+	want packedFault,
+	wantNibble byte,
+	wantOffset int64,
+) {
+	t.Helper()
+
+	starts := []struct {
+		name string
+		at   int64
+	}{
+		{name: "at the start of the record", at: 0},
+		{name: "after a three-byte field", at: 3},
+	}
+
+	for _, start := range starts {
+		t.Run(start.name, func(t *testing.T) {
+			t.Parallel()
+
+			for name, read := range readers {
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+
+					record := append(bytes.Repeat([]byte{0xFF}, int(start.at)), src...)
+					r, err := NewReader(bytes.NewReader(record), GnuCOBOLASCII())
+					require.NoError(t, err)
+
+					if start.at > 0 {
+						_, err = r.ReadBytes(int(start.at))
+						require.NoError(t, err)
+						require.Equal(t, start.at, r.Offset())
+					}
+
+					err = read(r, digits)
+					requirePackedFault(t, err, want, wantNibble, start.at+wantOffset)
+				})
+			}
+		})
+	}
+}
+
 // TestPackedFaultPrecedence pins which fault a COMP-3 field carrying more than
 // one of them reports, and which byte the offset names.
 //
@@ -2298,22 +2353,11 @@ func TestPackedFaultPrecedence(t *testing.T) {
 
 			// Every accessor shares readPackedDigits, so the precedence must
 			// not depend on which one the generated code calls.
-			readers := map[string]func(*Reader, int) error{
+			runFaultPrecedenceCase(t, map[string]func(*Reader, int) error{
 				"ReadPackedInt32": func(r *Reader, d int) error { _, err := r.ReadPackedInt32(d); return err },
 				"ReadPackedInt64": func(r *Reader, d int) error { _, err := r.ReadPackedInt64(d); return err },
 				"ReadPackedBig":   func(r *Reader, d int) error { _, err := r.ReadPackedBig(d); return err },
-			}
-			for name, read := range readers {
-				t.Run(name, func(t *testing.T) {
-					t.Parallel()
-
-					r, err := NewReader(bytes.NewReader(tc.src), GnuCOBOLASCII())
-					require.NoError(t, err)
-
-					err = read(r, tc.digits)
-					requirePackedFault(t, err, tc.want, tc.wantNibble, tc.wantOffset)
-				})
-			}
+			}, tc.src, tc.digits, tc.want, tc.wantNibble, tc.wantOffset)
 		})
 	}
 }
@@ -2343,6 +2387,18 @@ func TestComp6FaultPrecedence(t *testing.T) {
 			digits:     3,
 			want:       faultPad,
 			wantNibble: 0x09,
+			wantOffset: 0,
+		},
+		{
+			// COMP-6 rejects A-F in every nibble, the pad included, so the
+			// pad role gets a nibble out of the digit range as well as the
+			// digit-valued one above. A pad check spelled > 9 would pass the
+			// row above and this one, and fail the row below.
+			name:       "a pad nibble in A-F beats a bad digit",
+			src:        []byte{0xC1, 0xA3},
+			digits:     3,
+			want:       faultPad,
+			wantNibble: 0x0C,
 			wantOffset: 0,
 		},
 		{
@@ -2404,22 +2460,11 @@ func TestComp6FaultPrecedence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			readers := map[string]func(*Reader, int) error{
+			runFaultPrecedenceCase(t, map[string]func(*Reader, int) error{
 				"ReadComp6Int32": func(r *Reader, d int) error { _, err := r.ReadComp6Int32(d); return err },
 				"ReadComp6Int64": func(r *Reader, d int) error { _, err := r.ReadComp6Int64(d); return err },
 				"ReadComp6Big":   func(r *Reader, d int) error { _, err := r.ReadComp6Big(d); return err },
-			}
-			for name, read := range readers {
-				t.Run(name, func(t *testing.T) {
-					t.Parallel()
-
-					r, err := NewReader(bytes.NewReader(tc.src), GnuCOBOLASCII())
-					require.NoError(t, err)
-
-					err = read(r, tc.digits)
-					requirePackedFault(t, err, tc.want, tc.wantNibble, tc.wantOffset)
-				})
-			}
+			}, tc.src, tc.digits, tc.want, tc.wantNibble, tc.wantOffset)
 		})
 	}
 }

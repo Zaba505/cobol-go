@@ -561,12 +561,17 @@ nibble of `0` and is rejected on the `C` alone.
 
 A corrupt packed field almost never carries exactly one bad nibble. Of the
 16,777,216 three-byte values a `PIC S9(4) COMP-3` field can hold, **15,384,000 —
-91.7% — are invalid in more than one of the three roles at once**: a bad pad
-*and* a bad digit, a bad digit *and* a bad sign, or all three. For
-`PIC S9(5) COMP-3`, which has no pad nibble, the figure is 9,485,760, or 56.5%.
-So for the large majority of the genuinely corrupt fields this validation exists
-to catch, "the error the reader reports" is not determined by the checks above —
+91.7% — are invalid in more than one role at once**: a bad pad *and* a bad
+digit, a bad digit *and* a bad sign, or all three. `PIC S9(5) COMP-3` is the
+same three bytes but has no pad nibble, so it has two roles rather than three
+and only digits-and-sign to span; the figure there is 9,485,760, or 56.5%. So
+for the large majority of the genuinely corrupt fields this validation exists to
+catch, "the error the reader reports" is not determined by the checks above —
 only by the order they are applied in.
+
+(Both counts are of fields invalid in more than one *role*, so several bad
+digits count once. Two bad digits are just as unordered as a bad pad beside a
+bad sign, and the rule below covers them too.)
 
 **That order is normative.** A reader that finds more than one invalid nibble in
 a `COMP-3` or `COMP-6` field **MUST** report the **earliest one in field order**:
