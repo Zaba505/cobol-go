@@ -514,9 +514,20 @@ func (l *Layout) Items() []*Item {
 // Find returns the item of the first field named name, in the [Layout.Items]
 // order, or nil when the layout holds no such field. FILLER items have no name
 // and are never returned.
+//
+// The match is case-insensitive, as every data-name match in this package is:
+// COBOL words are case-insensitive, so Find("header") returns the item of a
+// field declared as Header. That is a deliberate choice about public API and not
+// a consequence of the internal resolvers folding case — a caller holding a name
+// it read out of [Field.Name] matches under either rule, and a caller passing a
+// name it read out of a copybook, a record layout document or a user's input
+// matches only under this one. The alternative would let Find fail to find an
+// item that a REDEFINES clause in the same copybook resolves to, which is the
+// kind of difference nobody expects to have to reason about. Callers wanting an
+// exact match have [Layout.Items] and [Field.Name], which preserves source case.
 func (l *Layout) Find(name string) *Item {
 	for _, item := range l.Items() {
-		if !item.Field.Filler && item.Field.Name == name {
+		if !item.Field.Filler && sameName(item.Field.Name, name) {
 			return item
 		}
 	}
@@ -649,11 +660,12 @@ func (l *layouter) placeChildren(f *Field, item *Item) error {
 // redefinedBy resolves a child's REDEFINES clause against the items of its group
 // already placed, returning nil when it carries no such clause.
 //
-// The match is by name alone. REDEFINES requires the two entries to hold the
-// same level *in the hierarchy* — which they do by being items of one group —
-// and not to carry the same level number, so comparing Level here would reject
-// the copybooks IBM has admitted since 1976 (root SPEC.md, Semantics:
-// "REDEFINES asks for the same level, not the same level number").
+// The match is by name alone, and by name case-insensitively; see [sameName].
+// REDEFINES requires the two entries to hold the same level *in the hierarchy* —
+// which they do by being items of one group — and not to carry the same level
+// number, so comparing Level here would reject the copybooks IBM has admitted
+// since 1976 (root SPEC.md, Semantics: "REDEFINES asks for the same level, not
+// the same level number").
 func (l *layouter) redefinedBy(child *Field, group *Item) (*Item, error) {
 	clause := redefinesOf(child.Entry)
 	if clause == nil || clause.Name == nil {
@@ -661,7 +673,7 @@ func (l *layouter) redefinedBy(child *Field, group *Item) (*Item, error) {
 	}
 
 	for _, placed := range group.Children {
-		if !placed.Field.Filler && placed.Field.Name == clause.Name.Value {
+		if !placed.Field.Filler && sameName(placed.Field.Name, clause.Name.Value) {
 			return placed, nil
 		}
 	}

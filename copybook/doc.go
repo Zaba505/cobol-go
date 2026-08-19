@@ -29,6 +29,19 @@
 // ZERO, VALUE on an ordinary item — remain reachable without this package
 // re-modelling the AST.
 //
+// # Data-names
+//
+// COBOL words are case-insensitive, data-names included, so this package matches
+// them that way everywhere it resolves one: the target of a REDEFINES clause,
+// the endpoints of a level-66 RENAMES range, the data-name of an OCCURS ...
+// DEPENDING ON phrase, and the public [Layout.Find]. A copybook declaring
+// Header and redefining HEADER means one item, as every compiler reads it.
+//
+// The fold is in the comparison and never in what is stored: [Field.Name] is the
+// data-name with its source case preserved, so a printer re-emits the spelling
+// the source used. A caller wanting an exact match has [Layout.Items] and that
+// field.
+//
 // # Storage layout
 //
 // [NewLayout] is the second half: hand it a record and a [Dialect] and it
