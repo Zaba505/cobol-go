@@ -15,16 +15,34 @@ import (
 	"strings"
 )
 
-// Writer writes the fields of a COBOL data file to an [io.Writer], one field at
-// a time and in record order. It is the inverse of [Reader]: same shape,
-// opposite direction, same encoding.
+// Writer writes the fields of a COBOL data file to an [io.Writer], or appends
+// them to a []byte the caller already holds, one field at a time and in record
+// order. It is the inverse of [Reader]: same shape, opposite direction, same
+// encoding.
 //
 // There is deliberately no usable zero value: a Writer is only obtainable from
-// [NewWriter], which requires a complete [Encoding]. A Writer is not safe for
-// concurrent use — the write position is state. It does not buffer, so there is
-// nothing to flush; a caller wanting buffering wraps its own [io.Writer].
+// [NewWriter] or [NewBytesWriter], each of which requires a complete
+// [Encoding]. A Writer is not safe for concurrent use — the write position is
+// state.
+//
+// It does not buffer an [io.Writer], and must not be made to: a Writer has no
+// Flush and no Close, so bytes held back from the stream would be lost by every
+// caller that simply stops writing. A byte-backed Writer is the other thing —
+// the bytes it appends *are* its output, handed over by [Writer.Bytes] — and
+// [Writer.Reset] rewinds one onto the next record without allocating, which is
+// what makes one Writer per file, or a pool of them, the cheap way to encode a
+// sequence of records.
 type Writer struct {
-	w   io.Writer
+	// w is the stream a Writer built by [NewWriter] writes to, and is nil
+	// for exactly the byte-backed Writers — those built by [NewBytesWriter]
+	// or rewound by [Writer.Reset] — which append to buf instead.
+	// [NewWriter] rejects a nil [io.Writer], so nil here is unambiguous.
+	w io.Writer
+	// buf is what a byte-backed Writer appends to and what [Writer.Bytes]
+	// returns. It is the caller's own slice, reused at its capacity from
+	// [Writer.Reset] onward, which is where the per-record buffer
+	// [Marshal] used to allocate went.
+	buf []byte
 	enc Encoding
 	off int64
 	// zoned and zonedErr are the encoding's zoned decimal byte table and the
@@ -46,12 +64,99 @@ func NewWriter(w io.Writer, enc Encoding) (*Writer, error) {
 	if w == nil {
 		return nil, ErrNilWriter
 	}
+	wr, err := newWriter(enc)
+	if err != nil {
+		return nil, err
+	}
+	wr.w = w
+	return wr, nil
+}
+
+// NewBytesWriter returns a [Writer] that appends to buf under the given
+// encoding, and whose output is read back with [Writer.Bytes]. It is
+// [NewWriter] over a buffer the caller already holds, and it is the writing
+// side of [NewBytesReader].
+//
+// buf is appended to as it stands, so a caller passing a slice with bytes in it
+// gets those bytes back in front of the record; passing buf[:0] reuses the
+// capacity and keeps nothing. [Writer.Offset] counts from 0 either way, since
+// it reports what this Writer has written and not how long the slice is.
+//
+// enc is validated exactly as [NewWriter] validates it, and construction fails
+// with the same [EncodingError] naming the same field. The one difference is
+// what it does *not* reject: a nil buf is an empty buffer to append to and not
+// an error, because a nil slice is a slice of no bytes rather than a missing
+// destination. That is what [Marshal] passes.
+func NewBytesWriter(buf []byte, enc Encoding) (*Writer, error) {
+	wr, err := newWriter(enc)
+	if err != nil {
+		return nil, err
+	}
+	wr.buf = buf
+	return wr, nil
+}
+
+// newWriter builds the half of a [Writer] that comes from the encoding —
+// which is exactly the half [Writer.Reset] keeps — and leaves the destination
+// to its caller, for the reason [newReader] does the same.
+func newWriter(enc Encoding) (*Writer, error) {
 	if err := enc.Validate(); err != nil {
 		return nil, err
 	}
 	zoned, zonedErr := newZonedCodec(enc)
-	return &Writer{w: w, enc: enc, zoned: zoned, zonedErr: zonedErr}, nil
+	return &Writer{enc: enc, zoned: zoned, zonedErr: zonedErr}, nil
 }
+
+// Reset rewinds w onto buf, truncating it to no length so that the next field
+// written is the record's first byte and [Writer.Offset] reports 0 again. The
+// capacity survives, which is the point: a Writer reset onto the buffer it
+// filled last time writes the next record into the same bytes.
+//
+// It is [Reader.Reset] in the other direction, and everything derived from the
+// [Encoding] survives it in the same way. The Encoding itself cannot change;
+// a different one needs a different Writer.
+//
+//	w := pool.Get().(*codec.Writer)
+//	defer func() { w.Reset(nil); pool.Put(w) }()
+//	for _, rec := range records {
+//		w.Reset(scratch)
+//		if err := rec.MarshalCOBOL(w); err != nil {
+//			return err
+//		}
+//		if _, err := f.Write(w.Bytes()); err != nil {
+//			return err
+//		}
+//		scratch = w.Bytes()
+//	}
+//
+// **The Writer holds buf; it does not copy it.** The slice is retained until
+// the next Reset and no longer, so a caller returning a Writer to a pool passes
+// nil to drop the reference — and a caller that keeps writing through the
+// Writer must expect the bytes [Writer.Bytes] returned to be overwritten, since
+// they are the same array.
+//
+// Reset works on a Writer built by [NewWriter] too: the stream is dropped and
+// the buffer takes its place. That is a change of destination and not of
+// position, so a Writer half way through a record on a stream is not one to
+// reset.
+func (w *Writer) Reset(buf []byte) {
+	w.w = nil
+	w.buf = buf[:0]
+	w.off = 0
+}
+
+// Bytes returns what has been written to a byte-backed [Writer] — one built by
+// [NewBytesWriter] or rewound by [Writer.Reset] — including anything the buffer
+// it was given already held.
+//
+// The slice is the Writer's own, valid until the next write or [Writer.Reset]
+// and no longer, in the way [bytes.Buffer.Bytes] is. A caller keeping the
+// record past that point copies it; [Marshal] can hand its result straight over
+// because it drops the Writer.
+//
+// A Writer over an [io.Writer] has written nothing here and returns nil: its
+// bytes went to the stream.
+func (w *Writer) Bytes() []byte { return w.buf }
 
 // Encoding reports the encoding the [Writer] was constructed with.
 func (w *Writer) Encoding() Encoding { return w.enc }
@@ -62,9 +167,22 @@ func (w *Writer) Encoding() Encoding { return w.enc }
 func (w *Writer) Offset() int64 { return w.off }
 
 // write emits p. It is the single place the offset advances and the single
-// place write errors are stamped with it.
+// place write errors are stamped with it — for the streaming destination and
+// the byte-backed one alike, which is why the two arms are here rather than in
+// two methods.
+//
+// Appending cannot fail: there is no short write and no error to stamp, so the
+// byte-backed arm is the offset and nothing else.
 func (w *Writer) write(p []byte) error {
 	if len(p) == 0 {
+		return nil
+	}
+	if w.w == nil {
+		if cap(w.buf)-len(w.buf) < len(p) {
+			w.grow(len(p))
+		}
+		w.buf = append(w.buf, p...)
+		w.off += int64(len(p))
 		return nil
 	}
 	n, err := w.w.Write(p)
@@ -76,6 +194,31 @@ func (w *Writer) write(p []byte) error {
 		return &OffsetError{Offset: w.off, Err: io.ErrShortWrite}
 	}
 	return nil
+}
+
+// smallRecordBuffer is the capacity a byte-backed [Writer] jumps to on its
+// first field rather than growing into a byte at a time. It is
+// [bytes.Buffer]'s own bootstrap size and it is here for the same reason:
+// a record is written field by field, so a buffer growing by what append asks
+// for reaches a record's width in four or five allocations where one will do.
+// [Marshal] is what makes that a per-record cost rather than a per-file one.
+const smallRecordBuffer = 64
+
+// grow makes room in buf for n more bytes, geometrically and with a floor, so
+// that a record's fields cost one allocation between them rather than one
+// each. It is only reached on the byte-backed path, and only when the caller's
+// own capacity — the whole point of [Writer.Reset] — has run out.
+func (w *Writer) grow(n int) {
+	next := 2 * cap(w.buf)
+	if next < smallRecordBuffer {
+		next = smallRecordBuffer
+	}
+	if need := len(w.buf) + n; next < need {
+		next = need
+	}
+	buf := make([]byte, len(w.buf), next)
+	copy(buf, w.buf)
+	w.buf = buf
 }
 
 // WriteBytes writes p as it stands, applying no character translation and no
@@ -763,9 +906,13 @@ func binaryBigFits(v *big.Int, digits, width int, s Signedness, t Truncation) bo
 // enc is the first argument and is required, for the reason [Encoding] exists:
 // none of its four axes has a default, and every one of them fails silently
 // when wrong.
+//
+// The returned slice is the caller's own: the [Writer] that produced it is
+// dropped here and nothing else holds it. A caller encoding many records can
+// keep one Writer and call [Writer.Reset] per record instead, which reuses both
+// the Writer and the buffer that would otherwise be allocated for each of them.
 func Marshal(enc Encoding, v Marshaler) ([]byte, error) {
-	var buf bytes.Buffer
-	w, err := NewWriter(&buf, enc)
+	w, err := NewBytesWriter(nil, enc)
 	if err != nil {
 		return nil, err
 	}
@@ -775,5 +922,5 @@ func Marshal(enc Encoding, v Marshaler) ([]byte, error) {
 	if err := v.MarshalCOBOL(w); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	return w.Bytes(), nil
 }

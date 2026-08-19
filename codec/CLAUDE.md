@@ -195,6 +195,56 @@ Four invariants a change here must keep, all pinned by tests:
   allocation at all is the field's bytes reaching the heap. See the benchmarks
   section for why zero is assertable where a count is not.
 
+## Sources and destinations: a stream, or bytes the caller holds (#115)
+
+A `Reader` reads an `io.Reader` **or** a `[]byte`, and a `Writer` writes an
+`io.Writer` **or** appends to a `[]byte`. Which one is decided by a single
+field being nil — `Reader.r`, `Writer.w` — which is unambiguous because
+`NewReader`/`NewWriter` reject a nil interface. `NewBytesReader` and
+`NewBytesWriter` are the byte-backed constructors, and `Unmarshal`/`Marshal`
+are their first callers.
+
+- **The byte source is a slice on the struct, not a `*bytes.Reader` behind the
+  interface.** Wrapping puts back the per-record allocation the whole story
+  exists to remove: `Unmarshal` went 11 -> 10 allocs/record and 607 -> 520 ns
+  by not wrapping. The cost is 24 bytes of struct, which took `Reader` from 512
+  to 536 and so into the next size class — `BenchmarkNewReader` 266 -> 274 ns,
+  512 -> 576 B, one allocation either way. That trade is disclosed rather than
+  smoothed over, exactly as the `maxAlphaScratch` one above it is, and the pair
+  of benchmarks that disagree about it are the same pair.
+- **Both arms live inside `readInto` and `write`.** Those are the two methods
+  that move `off` and stamp `OffsetError`, and the rule that they are the only
+  ones is what keeps a second source from becoming a second error-stamping
+  path. `TestReaderResetErrorsMatchTheStream` holds the byte arm to the
+  stream's errors, offsets included: a short field is `io.ErrUnexpectedEOF` and
+  an empty one `io.EOF`, which is `io.ReadFull`'s contract restated by hand.
+- **The byte arm copies into the scratch; it does not reslice the source.**
+  Reslicing would be faster and would break both of the package's aliasing
+  invariants at once — an accessor could hand out a window into the caller's
+  record, and `read`'s promise that its result dies at the next read would stop
+  being true of every source. `TestReaderResetReadsSeveralRecords` overwrites
+  every record after decoding them all and requires the values to stand.
+- **`Reset` keeps everything the `Encoding` derived** — the zoned tables, the
+  alpha table lookup, the scratch buffers, the writer's capacity — and the
+  `Encoding` itself cannot change. A swappable encoding under a half-read
+  record is the silent failure this package exists to prevent, so a different
+  one needs a different `Reader`. This is what makes pooling worth it:
+  `BenchmarkResetDecodeRecord` is 268 ns/9 allocs against `Unmarshal`'s
+  520/10, and `BenchmarkResetEncodeRecord` 393/14 against `Marshal`'s 631/16.
+- **The retention is documented and tested, not incidental.** Both sides hold
+  the caller's slice until the next `Reset` and no longer; `Reset(nil)` is what
+  a pooled codec passes on the way back, and `TestReaderReset` pins both halves
+  of that.
+- **The `Writer` is still not buffered.** It has no `Flush` and no `Close`, so
+  holding bytes back from an `io.Writer` would truncate any caller that just
+  stops writing. A byte-backed `Writer` is a different thing: the bytes it
+  appends *are* its output, handed over by `Bytes()`. What it does own is a
+  growth policy — `Writer.grow`, geometric with a 64-byte floor — because
+  `append`'s own growth reaches a record's width in four allocations where one
+  will do, and `Marshal` pays that per record. Dropping the floor regresses
+  `BenchmarkMarshalRecord` from 16 allocs/record to 19, which is worse than the
+  `bytes.Buffer` it replaced.
+
 ## Packed decimal: COMP-3 and COMP-6 are separate bodies on purpose
 
 `COMP-6` (GnuCOBOL, Micro Focus) is packed decimal with **no sign nibble**, so
@@ -506,7 +556,8 @@ exist because the figures it replaces could not be attributed to any data:
   remains a deliberate non-goal: it moves with the toolchain and wants an owner.
   Pinning **zero** does not, and `TestReadingDoesNotAllocate` does exactly that
   for three accessors, because zero is zero on every toolchain and is the one
-  number that says a buffer did not escape. It is also the package's one test
+  number that says a buffer did not escape. `TestResetDoesNotAllocate` pins the
+  same number for `Reset` on both sides. Those two are the package's only tests
   without `t.Parallel()`, since `testing.AllocsPerRun` sets `GOMAXPROCS` to 1
   and panics when called from a parallel test.
 - **Every benchmark fixes and documents its corpus**, and every parameter is a

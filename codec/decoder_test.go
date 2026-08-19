@@ -3847,10 +3847,11 @@ func TestReadBytesIsTheOnlyAccessorHandingOutBytes(t *testing.T) {
 // no backing array of its own, so any allocation at all is the field's bytes
 // reaching the heap.
 //
-// It is the package's one test without t.Parallel(), at either level.
-// [testing.AllocsPerRun] sets GOMAXPROCS to 1 for the duration of its run and
-// panics outright when called from a parallel test, so the choice is this
-// exception or no allocation assertion at all.
+// It is one of the package's two tests without t.Parallel(), at either level,
+// TestResetDoesNotAllocate being the other. [testing.AllocsPerRun] sets
+// GOMAXPROCS to 1 for the duration of its run and panics outright when called
+// from a parallel test, so the choice is that exception or no allocation
+// assertion at all.
 func TestReadingDoesNotAllocate(t *testing.T) {
 	enc := GnuCOBOLASCII()
 
@@ -4150,4 +4151,365 @@ func TestReadAlphanumericZeroWidthTranslatesNothing(t *testing.T) {
 			}), next)
 		})
 	}
+}
+
+// TestNewBytesReader mirrors TestNewReader over the byte-backed constructor,
+// including the one case where the two deliberately differ: a nil []byte is a
+// record of no bytes and not a missing source, so it is not the ErrNilReader
+// case and there is nothing for it to be.
+func TestNewBytesReader(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil data is an empty record", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewBytesReader(nil, GnuCOBOLASCII())
+		require.NoError(t, err)
+		require.Zero(t, r.Offset())
+
+		_, err = r.ReadBytes(1)
+		require.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("incomplete encoding names the field", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := NewBytesReader(nil, Encoding{})
+
+		var encErr EncodingError
+		require.ErrorAs(t, err, &encErr)
+		require.Equal(t, "Charset", encErr.Field)
+	})
+
+	t.Run("carries its encoding", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewBytesReader([]byte("A12345"), IBMEnterprise())
+		require.NoError(t, err)
+		require.Equal(t, IBMEnterprise(), r.Encoding())
+		require.Zero(t, r.Offset())
+	})
+}
+
+// TestNewBytesReaderValidatesExactlyAsNewReader is the assertion behind
+// [NewBytesReader]'s doc comment that it validates what [NewReader] validates
+// and fails with the same error: the two constructors share one body, and this
+// is what fails if a later change gives either its own.
+//
+// It compares the errors themselves rather than their kinds, so an
+// [EncodingError] naming a different field is a failure and not a pass.
+func TestNewBytesReaderValidatesExactlyAsNewReader(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		enc  Encoding
+	}{
+		{name: "no encoding at all", enc: Encoding{}},
+		{
+			name: "no sign convention",
+			enc:  Encoding{Charset: ASCII(), ByteOrder: binary.BigEndian, Float: FloatIEEE},
+		},
+		{
+			name: "no byte order",
+			enc:  Encoding{Charset: ASCII(), Sign: SignASCIIZone37, Float: FloatIEEE},
+		},
+		{
+			name: "no float format",
+			enc:  Encoding{Charset: ASCII(), Sign: SignASCIIZone37, ByteOrder: binary.BigEndian},
+		},
+		{name: "complete encoding", enc: GnuCOBOLASCII()},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, streamErr := NewReader(bytes.NewReader(nil), tc.enc)
+			_, bytesErr := NewBytesReader(nil, tc.enc)
+			require.Equal(t, streamErr, bytesErr)
+		})
+	}
+}
+
+// TestReaderReset covers the method's contract one clause at a time: the
+// position restarts, the encoding and everything derived from it survives, the
+// source may be swapped for another record's bytes, and a Reader built over a
+// stream may be rewound onto bytes.
+func TestReaderReset(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	t.Run("offset restarts and the encoding survives", func(t *testing.T) {
+		t.Parallel()
+
+		data := []byte("ABCDEF")
+		r, err := NewBytesReader(data, enc)
+		require.NoError(t, err)
+
+		_, err = r.ReadBytes(4)
+		require.NoError(t, err)
+		require.EqualValues(t, 4, r.Offset())
+
+		r.Reset(data)
+		require.Zero(t, r.Offset())
+		require.Equal(t, enc, r.Encoding())
+
+		got, err := r.ReadBytes(4)
+		require.NoError(t, err)
+		require.Equal(t, []byte("ABCD"), got)
+	})
+
+	t.Run("rewinds a Reader built over a stream", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewReader(bytes.NewReader([]byte("STREAM")), enc)
+		require.NoError(t, err)
+
+		_, err = r.ReadBytes(3)
+		require.NoError(t, err)
+
+		// The stream is dropped: what follows comes from the bytes, and
+		// from their first byte.
+		r.Reset([]byte("BYTES!"))
+		require.Zero(t, r.Offset())
+
+		got, err := r.ReadBytes(6)
+		require.NoError(t, err)
+		require.Equal(t, []byte("BYTES!"), got)
+	})
+
+	t.Run("nil drops the caller's bytes", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewBytesReader([]byte("ABCDEF"), enc)
+		require.NoError(t, err)
+
+		// The pooling shape: a Reader handed back holds nothing, so the
+		// record it last read is collectable.
+		r.Reset(nil)
+		_, err = r.ReadBytes(1)
+		require.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("holds the slice rather than copying it", func(t *testing.T) {
+		t.Parallel()
+
+		data := []byte("ABCDEF")
+		r, err := NewBytesReader(data, enc)
+		require.NoError(t, err)
+
+		// Reset takes the slice, so a write into it before the read is
+		// seen by the read. This is the documented lifetime stated as a
+		// test: a caller refilling one buffer per record must not do it
+		// while the Reader is still reading.
+		r.Reset(data)
+		copy(data, "ZZZ")
+
+		got, err := r.ReadBytes(6)
+		require.NoError(t, err)
+		require.Equal(t, []byte("ZZZDEF"), got)
+	})
+}
+
+// TestReaderResetReadsSeveralRecords is the acceptance criterion of #115 in the
+// reading direction: one [Reader] carried across several records, each read
+// after a [Reader.Reset], with the values of the earlier records required to
+// survive the later ones.
+//
+// It is TestReadValuesDoNotAliasTheReusedBuffer one level up. That test reads
+// two records from one stream, so the only thing that could alias is the
+// Reader's own scratch; this one reads each record from a slice the caller
+// holds, so a value aliasing *the caller's bytes* would fail here and pass
+// there.
+func TestReaderResetReadsSeveralRecords(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	want := []testRecord{
+		{
+			ID:      "A12345",
+			Name:    "WIDGET GRIP",
+			Code:    "42",
+			Raw:     []byte{0x00, 0x01, 0xFF},
+			Amount:  -12345,
+			Qty:     42,
+			Units:   9999,
+			Seq:     1234,
+			Rate:    1.5,
+			Factor:  2.5,
+			Balance: -12345,
+			Count:   42,
+		},
+		{
+			ID:      "B98765",
+			Name:    "SPROCKET",
+			Code:    "7",
+			Raw:     []byte{0xFE, 0x80, 0x02},
+			Amount:  54321,
+			Qty:     7,
+			Units:   1,
+			Seq:     -4321,
+			Rate:    -0.25,
+			Factor:  -8.75,
+			Balance: 54321,
+			Count:   7,
+		},
+		{
+			ID:      "C00001",
+			Name:    "",
+			Code:    "",
+			Raw:     []byte{0x00, 0x00, 0x00},
+			Amount:  0,
+			Qty:     0,
+			Units:   0,
+			Seq:     0,
+			Rate:    0,
+			Factor:  0,
+			Balance: 0,
+			Count:   0,
+		},
+	}
+
+	records := make([][]byte, len(want))
+	for i, rec := range want {
+		b, err := Marshal(enc, &rec)
+		require.NoError(t, err)
+		require.Len(t, b, testRecordWidth)
+		records[i] = b
+	}
+
+	r, err := NewBytesReader(nil, enc)
+	require.NoError(t, err)
+
+	got := make([]testRecord, len(want))
+	for i, data := range records {
+		r.Reset(data)
+		require.NoError(t, got[i].UnmarshalCOBOL(r))
+		require.EqualValues(t, testRecordWidth, r.Offset(),
+			"the offset restarts per record, so it ends at the record's width and not at the file's")
+		require.Equal(t, want[i], got[i])
+	}
+
+	// The whole point: no record's values were disturbed by the records
+	// read after it, through the Reader's scratch or through the caller's
+	// slices.
+	require.Equal(t, want, got)
+
+	// Nor does a value view the bytes it was decoded from: overwriting
+	// every record leaves every value as it was.
+	for _, data := range records {
+		for i := range data {
+			data[i] = 0xFF
+		}
+	}
+	require.Equal(t, want, got)
+}
+
+// TestReaderResetErrorsMatchTheStream holds the byte-backed source to the
+// errors the [io.Reader] one produces, which is what keeps [Reader.Reset] from
+// being a second error-stamping path. The offsets are the interesting half: a
+// record that runs out mid-field must report the byte it stopped at, counted
+// from the Reset and not from the file.
+func TestReaderResetErrorsMatchTheStream(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	testCases := []struct {
+		name string
+		data []byte
+		want error
+	}{
+		{
+			name: "empty record is EOF at offset zero",
+			data: nil,
+			want: io.EOF,
+		},
+		{
+			name: "short record is an unexpected EOF at what it held",
+			data: []byte{0x00, 0x01},
+			want: io.ErrUnexpectedEOF,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			stream, err := NewReader(bytes.NewReader(tc.data), enc)
+			require.NoError(t, err)
+			_, streamErr := stream.ReadBytes(4)
+
+			r, err := NewBytesReader(nil, enc)
+			require.NoError(t, err)
+			r.Reset(tc.data)
+			_, resetErr := r.ReadBytes(4)
+
+			require.ErrorIs(t, resetErr, tc.want)
+			require.Equal(t, streamErr, resetErr)
+
+			var offErr *OffsetError
+			require.ErrorAs(t, resetErr, &offErr)
+			require.EqualValues(t, len(tc.data), offErr.Offset)
+			require.EqualValues(t, len(tc.data), r.Offset())
+			require.Equal(t, stream.Offset(), r.Offset())
+		})
+	}
+}
+
+// TestResetDoesNotAllocate is #115's claim in the enforceable form
+// TestReadingDoesNotAllocate uses: rewinding a [Reader] or a [Writer] onto the
+// next record allocates nothing at all, which is the whole of why a pooled
+// codec beats one built per record.
+//
+// It asserts zero rather than pinning a count, for the reason codec/CLAUDE.md
+// gives: a count moves with the toolchain, and zero does not. Zero here means
+// the record's source is held rather than wrapped, and that the writer's buffer
+// is reused at its capacity rather than reallocated.
+//
+// It is the second of the package's two tests without t.Parallel(), at either
+// level. [testing.AllocsPerRun] sets GOMAXPROCS to 1 for the duration of its
+// run and panics outright when called from a parallel test.
+func TestResetDoesNotAllocate(t *testing.T) {
+	enc := GnuCOBOLASCII()
+
+	t.Run("reader", func(t *testing.T) {
+		field := []byte{0x04, 0xD2}
+
+		r, err := NewBytesReader(field, enc)
+		require.NoError(t, err)
+
+		read := func() {
+			r.Reset(field)
+			if _, err := r.ReadBinaryInt16(testRecordSeqDigits); err != nil {
+				t.Error(err)
+			}
+		}
+		read()
+
+		require.Zero(t, testing.AllocsPerRun(100, read),
+			"rewinding a Reader onto a record allocates")
+	})
+
+	t.Run("writer", func(t *testing.T) {
+		field := []byte{0x04, 0xD2}
+
+		w, err := NewBytesWriter(make([]byte, 0, len(field)), enc)
+		require.NoError(t, err)
+		buf := w.Bytes()
+
+		write := func() {
+			w.Reset(buf)
+			if err := w.WriteBytes(field); err != nil {
+				t.Error(err)
+			}
+		}
+		write()
+
+		require.Zero(t, testing.AllocsPerRun(100, write),
+			"rewinding a Writer onto its own buffer allocates")
+	})
 }
