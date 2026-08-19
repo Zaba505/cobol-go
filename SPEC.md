@@ -885,7 +885,9 @@ occurs-clause =
   validate separately).
 - **Level-numbers:** `01`–`49` define the record/group hierarchy (lower number =
   more inclusive); `77` is a standalone elementary item; `66` `RENAMES` regroups
-  fields; `88` defines a condition-name on the preceding item.
+  fields; `88` defines a condition-name on the preceding item. The numbers are
+  read **relatively**, not absolutely, so siblings need not share one number —
+  see Semantics, *Level numbers are relative*.
 - **`COMP-6`** is a dialect extension (GnuCOBOL, Micro Focus): packed decimal
   with no sign nibble. It is admitted here as a *spelling* only — the parser
   records the usage-type it was written with and assigns no storage width to
@@ -1233,6 +1235,62 @@ parse).
   representation*, not source syntax; see
   [`codec/SPEC.md`](codec/SPEC.md#from-picture-to-attributes).
 
+- **Level numbers are relative.** A level number states an entry's position in
+  the hierarchy relative to the entries before it, not an absolute depth. Walking
+  the entries of one record with a stack of the groups still open:
+
+  - an entry whose number is **greater** than the nearest open item's is
+    *subordinate* to it — which makes that item a group, so an entry numbered
+    above an item that has a `PICTURE` is an error;
+  - an entry whose number is **less than or equal to** the nearest open item's
+    *closes* items until it finds one numbered below it, and is subordinate to
+    that one.
+
+  Nothing requires the numbers to be consecutive or the siblings of one group to
+  agree on a number, so `05` and `04` and `03` may all be items of the same
+  `01`. This is the rule COBOL compilers apply, and the 85 Standard's stricter
+  reading — that every item at one level of the hierarchy carries an identical
+  number — is an additional constraint on the *source*, not a different tree.
+  IBM lists relaxing it among its extensions: *"Specifying level numbers that are
+  lower than other level numbers at the same hierarchical level in a data
+  description entry"* (Enterprise COBOL 6.4 Language Reference, SC27-8713-03,
+  *IBM extension language elements*), and the behaviour is older than that —
+  OS Full American National Standard COBOL (GC28-6396-6, Apr 1976, p. 94) shows
+  a `04 B-1` written beside a `05 C-1` and says "the compiler will accept the
+  nonstandard use of 04 and treat it as though it had been written as an 05".
+
+  Two consequences are worth stating outright. A lower-numbered entry sets the
+  number the *following* siblings must not exceed: after `04 B` closes back to a
+  record, a following `05 C` is subordinate to `B` rather than beside it. And an
+  entry can never be numbered **above** the item it is a sibling of, since being
+  a sibling is precisely what a number at or below that item's produces.
+
+- **`REDEFINES` asks for the same level, not the same level number.** The
+  redefining entry must be an item of the same group as the entry it redefines —
+  the same level *in the hierarchy* — but the two level numbers need not match:
+  *"data-name-1 and data-name-2 must have the same level in the hierarchy;
+  however, the level numbers need not be the same"* (Enterprise COBOL 6.4
+  Language Reference, SC27-8713-03, `REDEFINES` clause). A `REDEFINES` target is
+  therefore resolved **structurally**, by name among the items of the group
+  already placed, and no level number is compared. Given the rule above, a
+  redefining entry's number is necessarily less than or equal to its target's;
+  an entry numbered above its target is subordinate to it and so cannot redefine
+  it at all.
+
+  This is an IBM extension over the 85 Standard, which requires the identical
+  level numbers, and it is deliberately **not gated by dialect**. Three reasons:
+  the tree is built from level numbers alone, before any dialect is chosen —
+  `Dialect` selects storage widths, `SYNCHRONIZED` slack and the `REDEFINES`
+  *size* rule, all of them questions about bytes rather than about shape; none of
+  the dialects this package ships models a strictly 85-conformant compiler, and
+  no evidence was found that GnuCOBOL or Micro Focus reject unequal numbers, so
+  gating would have to be invented rather than sourced; and the package's job is
+  to read copybooks that a real compiler already compiled, where refusing source
+  that compiled is a worse failure than accepting source that a stricter compiler
+  would have refused. A caller that wants the strict reading enforced can compare
+  the level numbers of a group's children itself — they are preserved verbatim on
+  each field.
+
 - **`USAGE` default is `DISPLAY`.** An item with no `USAGE` clause is `DISPLAY`
   (character) representation; `COMP`/`BINARY`/`PACKED-DECIMAL` change the stored
   encoding but not the logical value. `USAGE` is inherited by subordinate items
@@ -1422,3 +1480,10 @@ round-trip fixtures are added in #23; this snippet is illustrative.)
 - IBM Enterprise COBOL for z/OS 6.3, *SKIP statements* — the listing-control
   statements' area, one-statement-per-line and optional-period rules.
   <https://www.ibm.com/docs/en/cobol-zos/6.3.0?topic=statements-skip>
+- IBM Enterprise COBOL for z/OS 6.4 Language Reference, SC27-8713-03 — the
+  *IBM extension language elements* table and the `REDEFINES` clause, for
+  unequal level numbers at the same hierarchical level.
+  <https://www.ibm.com/docs/en/cobol-zos/6.4.0?topic=reference-redefines-clause>
+- IBM OS Full American National Standard COBOL, GC28-6396-6 (Apr 1976), p. 94 —
+  the earliest statement of the same extension, with the manual's own
+  standard/nonstandard example.

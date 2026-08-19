@@ -144,6 +144,13 @@ func (b *builder) addStandalone(entry *cobol.DataDescriptionEntry) error {
 
 // addSubordinate adds a level 02–49 item beneath the nearest preceding item with
 // a lower level number.
+//
+// Level numbers are relative, so an entry numbered at or below the nearest open
+// item closes items until it finds one numbered below it and becomes that one's
+// child. That is what lets the siblings of a group carry unequal numbers — an
+// IBM extension over the 85 Standard, and what a REDEFINES written with a level
+// number differing from its target's relies on (root SPEC.md, Semantics:
+// "Level numbers are relative").
 func (b *builder) addSubordinate(entry *cobol.DataDescriptionEntry) error {
 	for len(b.open) > 0 && b.open[len(b.open)-1].Level >= entry.Level {
 		b.open = b.open[:len(b.open)-1]

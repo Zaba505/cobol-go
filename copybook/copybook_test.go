@@ -818,6 +818,21 @@ func TestBuildErrors(t *testing.T) {
 			message: `level-10 item "B" at line 3, column 7 is subordinate to "A", which has a PICTURE and so is an elementary item`,
 		},
 		{
+			// The boundary of the unequal-level-numbers extension a
+			// REDEFINES relies on: a lower-numbered entry closes
+			// groups until it is a sibling, but a higher-numbered one
+			// is subordinate to what precedes it and so can never be
+			// the sibling REDEFINES needs. Nothing about the
+			// REDEFINES clause changes that — the tree is built from
+			// level numbers alone.
+			name: "redefines numbered above an elementary target is subordinate to it instead",
+			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
+				return parseFragment(t, "01 REC.\n   05 A PIC X(6).\n   07 B REDEFINES A PIC X(6).\n")
+			},
+			target:  &LevelSequenceError{},
+			message: `level-07 item "B" at line 3, column 4 is subordinate to "A", which has a PICTURE and so is an elementary item`,
+		},
+		{
 			name: "condition name with nothing to qualify",
 			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
 				return parseFragment(t, "88 LONELY VALUE 'A'.\n")

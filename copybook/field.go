@@ -128,6 +128,13 @@ func usageFromString(s string) (Usage, bool) {
 // RENAMES entries occupy no storage and are not fields; they hang off the field
 // or the record they qualify, as [Field.Conditions] and [Field.Aliases].
 //
+// It is the number the entry was *written* with and not a depth: COBOL reads
+// level numbers relatively, so the children of one group may carry different
+// numbers and two fields with the same number may sit at different depths. Read
+// the hierarchy from [Field.Parent] and [Field.Children]; comparing Level to
+// infer it is wrong on any copybook using the IBM extension (root SPEC.md,
+// Semantics: "Level numbers are relative").
+//
 // Name is the data-name with its source case preserved, and is empty for a
 // FILLER item — see [Field.Filler]. Picture is the parsed PICTURE
 // character-string, nil for a group item and for the elementary items that take
@@ -142,6 +149,7 @@ type Field struct {
 	// Pos is the position of the entry's level-number.
 	Pos cobol.Pos
 	// Level is the source level number: 01–49, or 77 for a standalone item.
+	// Siblings may carry different numbers; it is not a depth.
 	Level int
 	// Name is the data-name, empty for a FILLER item.
 	Name string
