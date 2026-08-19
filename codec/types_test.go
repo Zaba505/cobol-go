@@ -571,6 +571,35 @@ func TestZonedDigitValueMatchesTheScan(t *testing.T) {
 	}
 }
 
+func TestZonedDigitValueOnAnUnbuiltTableRejectsEverything(t *testing.T) {
+	t.Parallel()
+
+	// The zero value of zonedBytes is reachable — zonedBytesOf returns it
+	// beside each of its errors, and a zonedBytes{} literal is one — so what
+	// it does matters even though every in-package path guards on the error
+	// first. A table whose unwritten entry meant "digit 0" would read all 256
+	// bytes as a zero off an unbuilt table; storing digits biased by one is
+	// what makes the unwritten entry mean "no digit" instead.
+	//
+	// This is the one place the table deliberately does *not* reproduce the
+	// scan. The scan read 0x00 as a 0 here, because an unbuilt digits array
+	// spells every digit 0x00 and slices.Index found digit 0 at index 0; the
+	// table rejects it. One byte fewer accepted, on a value that only exists
+	// when construction has already failed, is the direction a decoder should
+	// differ in — and it is the direction that makes an unchecked error loud
+	// instead of quiet.
+	var z zonedBytes
+
+	for b := range 256 {
+		_, err := z.digitValue(byte(b))
+		require.Equalf(t, ZonedDigitError{Byte: byte(b)}, err, "byte %#02X", b)
+	}
+
+	// The scan, for contrast, accepted exactly one of them.
+	_, err := digitValueByScan(&z, 0x00)
+	require.NoError(t, err)
+}
+
 func TestZonedSeparateSignValueWhenPlusAndMinusCollide(t *testing.T) {
 	t.Parallel()
 

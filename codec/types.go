@@ -241,22 +241,30 @@ type zonedBytes struct {
 	charset string
 	// digits[d] is the byte spelling the plain (unsigned zone) digit d.
 	digits [10]byte
-	// digitOf inverts digits: digitOf[b] is the digit byte b spells, or
-	// noZonedDigit where it spells none. It is the read direction of a
-	// mapping whose write direction is one array index, and it is a table
-	// rather than a scan of digits because a scan costs d+1 comparisons per
-	// byte — which made reading all-nines data measurably slower than
-	// reading all-zeros.
+	// digitOf inverts digits: digitOf[b] is one more than the digit byte b
+	// spells, and noZonedDigit where it spells none. It is the read
+	// direction of a mapping whose write direction is one array index, and
+	// it is a table rather than a scan of digits because a scan costs d+1
+	// comparisons per byte — which made reading all-nines data measurably
+	// slower than reading all-zeros.
 	digitOf [256]byte
 	// plus and minus are the SIGN SEPARATE bytes, which are
 	// charset-sensitive and sign-convention-independent.
 	plus, minus byte
 }
 
-// noZonedDigit marks a byte spelling no digit in [zonedBytes.digitOf]. Digit
-// values are 0-9, so any value above 9 would do; 0xFF is chosen because a
-// half-built table then rejects rather than accepts.
-const noZonedDigit byte = 0xFF
+// noZonedDigit marks a byte spelling no digit in [zonedBytes.digitOf].
+//
+// It is *zero*, and the digits are stored biased by one so that it can be,
+// because the zero value of [zonedBytes] has to reject every byte rather than
+// read every byte as a 0. That value is reachable — zonedBytesOf returns it
+// beside each of its errors, and a zonedBytes{} literal is one. The scan this
+// table replaced rejected 255 of the 256 bytes on such a value; the table
+// rejects all 256, differing on 0x00 alone and in the direction that makes an
+// unchecked construction error loud. A sentinel above 9 would have inverted
+// that, accepting every byte as a zero. It also saves pre-filling 256 bytes on
+// every construction.
+const noZonedDigit byte = 0
 
 // zonedBytesOf derives the zoned decimal byte values of cs, reporting an
 // [UnrepresentableRuneError] naming the first character it has no byte for.
@@ -274,17 +282,15 @@ func zonedBytesOf(cs Charset) (zonedBytes, error) {
 		z.digits[d] = b
 	}
 
-	// Invert digits. The fill runs from 9 down to 0 so that the *lowest*
+	// Invert digits, biased by one so that an unwritten entry is
+	// noZonedDigit. The fill runs from 9 down to 0 so that the *lowest*
 	// digit wins a byte two digits share, which is what slices.Index gave
 	// before this table existed. Charset.FromUnicode is nowhere required to
 	// be injective, so a caller's charset may well spell two digits with one
 	// byte; a forward fill would then read that byte as the highest of them
 	// and silently change what such a file decodes to.
-	for i := range z.digitOf {
-		z.digitOf[i] = noZonedDigit
-	}
 	for d := len(z.digits) - 1; d >= 0; d-- {
-		z.digitOf[z.digits[d]] = byte(d)
+		z.digitOf[z.digits[d]] = byte(d) + 1
 	}
 	for _, sep := range []struct {
 		r   rune
@@ -314,7 +320,7 @@ func (z *zonedBytes) digitByte(d byte) (byte, error) {
 // record that says so.
 func (z *zonedBytes) digitValue(b byte) (byte, error) {
 	if d := z.digitOf[b]; d != noZonedDigit {
-		return d, nil
+		return d - 1, nil
 	}
 	return 0, ZonedDigitError{Byte: b, Charset: z.charset, Zero: z.digits[0], Nine: z.digits[9]}
 }
@@ -459,9 +465,10 @@ var zonedSignReadings = buildZonedSignReadings()
 // lowest index, though no shipped row holds a duplicate.
 //
 // The lenient zones are filled only where the low nibble is 0-9, which is the
-// scan's own guard. Filling a whole zone would newly accept the eighteen bytes
-// whose low nibble is A-F, and those are exactly the bytes that make a wrong
-// convention loud.
+// scan's own guard, and by re-applying that guard byte by byte rather than by
+// deriving bytes from the zone constants. Filling a whole zone would newly
+// accept the eighteen bytes whose low nibble is A-F, and those are exactly the
+// bytes that make a wrong convention loud.
 func buildZonedSignReadings() [len(zonedSignTables)][256]zonedSignReading {
 	var rs [len(zonedSignTables)][256]zonedSignReading
 	for s := range rs {
@@ -469,14 +476,23 @@ func buildZonedSignReadings() [len(zonedSignTables)][256]zonedSignReading {
 		for b := range rs[s] {
 			rs[s][b] = noZonedSignReading
 		}
-		for _, zone := range t.lenientPositiveZones {
-			for d := range zonedSignReading(10) {
-				rs[s][zone&0xF0|byte(d)] = d
+		// The lenient zones are transcribed as the scan's own predicate —
+		// low nibble a digit, high nibble one of the zones, negative
+		// before positive — rather than derived by masking the zone
+		// constants down to a high nibble. Masking would silently
+		// normalize a malformed row, one whose zone carried a low nibble,
+		// into ten bytes the scan matched none of; this arm accepts
+		// exactly what the scan accepted for any row, well-formed or not.
+		for b := range rs[s] {
+			if byte(b)&0x0F > 9 {
+				continue
 			}
-		}
-		for _, zone := range t.lenientNegativeZones {
-			for d := range zonedSignReading(10) {
-				rs[s][zone&0xF0|byte(d)] = d | zonedSignNegative
+			zone := byte(b) & 0xF0
+			switch {
+			case slices.Contains(t.lenientNegativeZones, zone):
+				rs[s][b] = zonedSignReading(byte(b)&0x0F) | zonedSignNegative
+			case slices.Contains(t.lenientPositiveZones, zone):
+				rs[s][b] = zonedSignReading(byte(b) & 0x0F)
 			}
 		}
 		for d := len(t.unsigned) - 1; d >= 0; d-- {

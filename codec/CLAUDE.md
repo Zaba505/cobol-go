@@ -256,7 +256,7 @@ detectable:
 (#112). `zonedBytes.digitOf` inverts `digits`, and `zonedSignReadings` inverts
 every row of `zonedSignTables`; both replaced a `slices.Index` scan whose cost
 grew with the digit, which made reading all-nines data 1.65x the cost of reading
-all-zeros. Three things about them are load bearing rather than incidental:
+all-zeros. Four things about them are load bearing rather than incidental:
 
 - **Each fill runs backwards.** `slices.Index` returned the *first* match, so
   the last write into the table has to be the earliest candidate. For digits
@@ -266,9 +266,18 @@ all-zeros. Three things about them are load bearing rather than incidental:
   positive, negative — so the documented precedence survives. `separateSignValue`
   stays a two-armed switch for the same reason in miniature: the first arm wins,
   so a charset spelling `'+'` and `'-'` alike reads that byte as positive.
-- **The lenient EBCDIC zones are filled only where the low nibble is 0-9.**
-  Filling a whole zone would newly accept eighteen bytes that are rejected
-  today, and those are exactly the bytes that make a wrong convention loud.
+- **`digitOf` stores digits biased by one, so its sentinel can be zero.** The
+  zero value of `zonedBytes` is reachable — `zonedBytesOf` returns it beside
+  each of its errors — and an unwritten entry therefore has to mean "no digit"
+  rather than "digit 0", or an unbuilt table reads every byte as a zero. It is
+  the one place the table deliberately differs from the scan, which read `0x00`
+  as a 0 there.
+- **The lenient EBCDIC zones are filled only where the low nibble is 0-9**, and
+  the guard is re-applied byte by byte rather than by masking the zone constants
+  down to a high nibble, so a malformed row is not silently normalized into ten
+  bytes the scan matched none of. Filling a whole zone would newly accept
+  eighteen bytes that are rejected today, and those are exactly the bytes that
+  make a wrong convention loud.
 - **`TestZonedSignByteValueMatchesTheScan` and `TestZonedDigitValueMatchesTheScan`
   keep a transcription of the scan and check the tables against it**, over all
   256 byte values and, for signs, all four conventions. A precomputed table is
