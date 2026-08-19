@@ -6,7 +6,6 @@
 package codec
 
 import (
-	"bytes"
 	"encoding/binary"
 	"io"
 	"math"
@@ -15,18 +14,51 @@ import (
 	"strings"
 )
 
-// Reader reads the fields of a COBOL data file from an [io.Reader], one field
-// at a time and in record order.
+// Reader reads the fields of a COBOL data file from an [io.Reader], or from a
+// []byte the caller already holds, one field at a time and in record order.
 //
 // There is deliberately no usable zero value: a Reader is only obtainable from
-// [NewReader], which requires a complete [Encoding]. A Reader is not safe for
-// concurrent use — the read position is state, and so are the scratch buffers
-// every field is read into, which makes concurrent use silent corruption of a
-// field rather than a racy counter.
+// [NewReader] or [NewBytesReader], each of which requires a complete
+// [Encoding]. A Reader is not safe for concurrent use — the read position is
+// state, and so are the scratch buffers every field is read into, which makes
+// concurrent use silent corruption of a field rather than a racy counter.
+//
+// A Reader over bytes can be rewound onto the next record with [Reader.Reset],
+// which keeps everything the [Encoding] derived. That is what makes one Reader
+// per *file* — or one pooled across a fleet of them — the cheap way to step
+// through records, rather than one per record.
 type Reader struct {
-	r   io.Reader
-	enc Encoding
-	off int64
+	// r is the stream a Reader built by [NewReader] reads, and is unused by
+	// the byte-backed Readers — those built by [NewBytesReader] or rewound
+	// by [Reader.Reset] — whose source is data instead.
+	r io.Reader
+	// fromBytes says which of the two it is, and it is a field rather than a
+	// nil check on either of them because the zero value of a Reader has to
+	// stay unusable. A Reader nobody constructed has a nil r and a nil data,
+	// and "nil r means read the bytes" would read that as an empty record and
+	// answer [io.EOF] — a plausible answer, from a Reader whose [Encoding]
+	// was never validated. With this field it takes the stream arm instead
+	// and fails on the nil [io.Reader] exactly as it did before there was a
+	// second kind of source.
+	fromBytes bool
+	// data is the *unread remainder* of a byte-backed Reader's source: the
+	// caller's own slice, held rather than copied, resliced as fields are
+	// consumed. It is a field on the struct rather than a *bytes.Reader
+	// behind r because the point of the byte-backed path is that a record
+	// costs no allocation at all — wrapping the slice would put one back,
+	// per record, exactly where [Reader.Reset] exists to remove it.
+	//
+	// Consuming by reslicing rather than by indexing at off is what keeps
+	// off a pure counter of bytes read. The two are equal today, but off is
+	// what [Reader.Offset] and every [OffsetError] mean, and the first
+	// accessor to move one without the other would otherwise turn this
+	// field into an out-of-range index in the middle of a decode.
+	//
+	// The Reader holds the slice until the next Reset and no longer; see
+	// Reset for what that means for a caller reusing its buffer.
+	data []byte
+	enc  Encoding
+	off  int64
 	// zoned is the encoding's zoned decimal byte table, derived once rather
 	// than per field. zonedErr holds the failure of deriving it, which is
 	// reported by the first zoned accessor and by nothing else: a charset
@@ -44,8 +76,10 @@ type Reader struct {
 	// wide grows to the widest field asked of it and never shrinks, so a
 	// Reader that has read one PIC X(32760) field holds 32KB until it is
 	// dropped. That is the trade a reused buffer is: shrinking it would
-	// reintroduce the allocation on the next wide field, and a Reader is a
-	// short-lived object — [Unmarshal] builds one per record.
+	// reintroduce the allocation on the next wide field. [Unmarshal] builds
+	// a Reader per record and drops it, so it never holds one for long; a
+	// caller keeping one across records with [Reader.Reset] is choosing
+	// that capacity, which is the same choice as keeping the buffer.
 	num  [maxNumericWidth]byte
 	wide []byte
 	// alpha is the charset's UTF-8 translation table, and alphaNum and
@@ -143,11 +177,85 @@ func NewReader(r io.Reader, enc Encoding) (*Reader, error) {
 	if r == nil {
 		return nil, ErrNilReader
 	}
+	rd, err := newReader(enc)
+	if err != nil {
+		return nil, err
+	}
+	rd.r = r
+	return rd, nil
+}
+
+// NewBytesReader returns a [Reader] that reads the record in data under the
+// given encoding. It is [NewReader] over bytes the caller already holds, and it
+// is what [Unmarshal] builds.
+//
+// enc is validated exactly as [NewReader] validates it, and construction fails
+// with the same [EncodingError] naming the same field. The one difference is
+// what it does *not* reject: a nil data is an empty record and not an error,
+// because a nil slice is a slice of no bytes rather than a missing source. Such
+// a Reader is at end of input, and the first field asked of it fails with
+// [io.EOF] — the same answer [NewReader] over an empty stream gives.
+//
+// The Reader holds data rather than copying it; see [Reader.Reset] for the
+// lifetime that implies.
+func NewBytesReader(data []byte, enc Encoding) (*Reader, error) {
+	rd, err := newReader(enc)
+	if err != nil {
+		return nil, err
+	}
+	rd.fromBytes = true
+	rd.data = data
+	return rd, nil
+}
+
+// newReader builds the half of a [Reader] that comes from the encoding —
+// which is exactly the half [Reader.Reset] keeps — and leaves the source to
+// its caller. Both constructors go through it so that the validation they
+// promise to share cannot drift into two spellings of it.
+func newReader(enc Encoding) (*Reader, error) {
 	if err := enc.Validate(); err != nil {
 		return nil, err
 	}
 	zoned, zonedErr := newZonedCodec(enc)
-	return &Reader{r: r, enc: enc, zoned: zoned, zonedErr: zonedErr}, nil
+	return &Reader{enc: enc, zoned: zoned, zonedErr: zonedErr}, nil
+}
+
+// Reset rewinds r onto data, so that the next field read is data's first byte
+// and [Reader.Offset] reports 0 again.
+//
+// Everything derived from the [Encoding] survives — the zoned decimal byte
+// tables, the alphanumeric translation table, and the scratch buffers every
+// field is read into. The Encoding itself cannot change; a different one needs
+// a different Reader, because an encoding that could be swapped under a
+// half-read record is the silent failure [Encoding] exists to make impossible.
+//
+// This is what lets one Reader serve a whole file, or a pool serve a fleet of
+// them:
+//
+//	r := pool.Get().(*codec.Reader)
+//	defer func() { r.Reset(nil); pool.Put(r) }()
+//	for _, rec := range records {
+//		r.Reset(rec)
+//		if err := v.UnmarshalCOBOL(r); err != nil {
+//			return err
+//		}
+//	}
+//
+// **The Reader holds data; it does not copy it.** The slice is retained until
+// the next Reset and no longer, so a caller reusing one buffer per record must
+// not refill it while the Reader is still reading, and a caller returning a
+// Reader to a pool passes nil to drop the reference. Nothing a read *returns*
+// views data — every accessor decodes through the Reader's own scratch, and
+// [Reader.ReadBytes] allocates — so values from earlier records survive both
+// the next Reset and a later write into the caller's buffer.
+//
+// Reset works on a Reader built by [NewReader] too: the stream is dropped and
+// the bytes take its place.
+func (r *Reader) Reset(data []byte) {
+	r.fromBytes = true
+	r.r = nil
+	r.data = data
+	r.off = 0
 }
 
 // Encoding reports the encoding the [Reader] was constructed with.
@@ -229,12 +337,43 @@ func (r *Reader) checkWidth(n int) error {
 
 // readInto fills buf exactly. It is the single place the offset advances and
 // the single place read errors are stamped with it, which is what keeps the
-// offset from drifting between the owning and the reusing path above.
+// offset from drifting between the owning and the reusing path above — and
+// now between the streaming source and the byte-backed one, which is why the
+// two arms are here rather than in two methods.
+//
+// The byte-backed arm is [io.ReadFull]'s contract done by hand: a short fill is
+// [io.ErrUnexpectedEOF], and one that copied nothing at all is [io.EOF], so a
+// record ending exactly on a field boundary reads the same either way. It
+// *copies* into buf rather than handing back a window onto data, which costs
+// the copy and buys two invariants: no accessor can hand out a view into the
+// caller's slice, and [Reader.read]'s promise that its result is overwritten by
+// the next read stays true of every source. What it does reslice is its own
+// [Reader.data], so the source shrinks as it is consumed and off stays a pure
+// counter rather than an index into it.
+//
+// Which arm runs is [Reader.fromBytes] and never a nil check, so that a Reader
+// nobody constructed still fails on its nil [io.Reader] instead of reading as
+// an empty record.
 func (r *Reader) readInto(buf []byte) error {
 	if len(buf) == 0 {
 		return nil
 	}
-	got, err := io.ReadFull(r.r, buf)
+	var (
+		got int
+		err error
+	)
+	if r.fromBytes {
+		got = copy(buf, r.data)
+		r.data = r.data[got:]
+		if got < len(buf) {
+			err = io.ErrUnexpectedEOF
+			if got == 0 {
+				err = io.EOF
+			}
+		}
+	} else {
+		got, err = io.ReadFull(r.r, buf)
+	}
 	r.off += int64(got)
 	if err != nil {
 		return &OffsetError{Offset: r.off, Err: err}
@@ -1131,8 +1270,14 @@ func (r *Reader) ReadFloat64() (float64, error) {
 //
 // Bytes left over after v has read what it wants are not an error — a data file
 // is a sequence of records, and a record type reads its own length.
+//
+// It builds a [Reader] per record and drops it, which is one allocation and no
+// wrapper around data. A caller stepping through many records can do better
+// still by keeping one Reader and calling [Reader.Reset] per record: the
+// encoding's derived tables and the scratch buffers are then paid once for the
+// file rather than once for the record.
 func Unmarshal(enc Encoding, data []byte, v Unmarshaler) error {
-	r, err := NewReader(bytes.NewReader(data), enc)
+	r, err := NewBytesReader(data, enc)
 	if err != nil {
 		return err
 	}

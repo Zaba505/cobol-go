@@ -23,8 +23,9 @@
 //
 // So this package has no default for any of them and no usable zero-value
 // [Reader]. [Encoding] carries all four, every field of it has an invalid zero
-// value, and [NewReader] and [NewWriter] fail with an [EncodingError] naming
-// the field that was left out. See codec/SPEC.md, "The Four Axes of an
+// value, and every constructor — [NewReader], [NewBytesReader], [NewWriter],
+// [NewBytesWriter] — fails with an [EncodingError] naming the field that was
+// left out. See codec/SPEC.md, "The Four Axes of an
 // Encoding", which states that as a normative requirement on this package.
 //
 // The named bundles keep that ergonomic without making it implicit.
@@ -38,6 +39,28 @@
 // [ConvertedFromEBCDIC] exists because it is the combination real files hit and
 // no compiler produces: a mainframe-written file converted to ASCII has ASCII
 // characters but translated-EBCDIC signs.
+//
+// # A stream, or bytes the caller already holds
+//
+// A [Reader] reads either an [io.Reader] or a []byte, and a [Writer] writes
+// either an [io.Writer] or a []byte it appends to. The byte-backed pair —
+// [NewBytesReader] and [NewBytesWriter] — is what [Unmarshal] and [Marshal]
+// are built on, since a caller stepping through a data file has each record's
+// bytes in hand already and wrapping them in a reader is an allocation for
+// nothing.
+//
+// [Reader.Reset] and [Writer.Reset] rewind one onto the next record. Everything
+// the [Encoding] derived survives — the zoned decimal byte tables, the
+// alphanumeric translation table, the scratch buffers every field is read into,
+// and the writer's buffer at its capacity — so a codec kept for a file, or
+// pooled across a fleet of them, pays for those once rather than once per
+// record. The [Encoding] itself cannot change; a different one needs a
+// different [Reader].
+//
+// Both hold the caller's slice rather than copying it, until the next Reset and
+// no longer. Nothing a read returns views it — every accessor decodes through
+// the [Reader]'s own scratch — so values from earlier records survive both the
+// next Reset and a later write into the caller's buffer.
 //
 // # Scope of this package as it stands
 //

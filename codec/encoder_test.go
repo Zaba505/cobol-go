@@ -3413,3 +3413,359 @@ func TestRoundTripEncodeDecode(t *testing.T) {
 		})
 	}
 }
+
+// TestNewBytesWriter mirrors TestNewWriter over the byte-backed constructor,
+// including the case where the two deliberately differ: a nil []byte is an
+// empty buffer to append to and not a missing destination, so there is no
+// ErrNilWriter case for it to be.
+func TestNewBytesWriter(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil buffer is an empty buffer", func(t *testing.T) {
+		t.Parallel()
+
+		w, err := NewBytesWriter(nil, GnuCOBOLASCII())
+		require.NoError(t, err)
+		require.Zero(t, w.Offset())
+		require.Nil(t, w.Bytes())
+
+		require.NoError(t, w.WriteAlphanumeric("AB", 4))
+		require.Equal(t, []byte("AB  "), w.Bytes())
+		require.EqualValues(t, 4, w.Offset())
+	})
+
+	t.Run("appends to what the buffer already holds", func(t *testing.T) {
+		t.Parallel()
+
+		w, err := NewBytesWriter([]byte("HDR"), GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		require.NoError(t, w.WriteAlphanumeric("AB", 4))
+		require.Equal(t, []byte("HDRAB  "), w.Bytes())
+		require.EqualValues(t, 4, w.Offset(),
+			"the offset counts what this Writer wrote, not how long the slice is")
+	})
+
+	t.Run("incomplete encoding names the field", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := NewBytesWriter(nil, Encoding{
+			Charset:   ASCII(),
+			Sign:      SignASCIIZone37,
+			ByteOrder: binary.BigEndian,
+		})
+
+		var encErr EncodingError
+		require.ErrorAs(t, err, &encErr)
+		require.Equal(t, "Float", encErr.Field)
+	})
+
+	t.Run("carries its encoding", func(t *testing.T) {
+		t.Parallel()
+
+		w, err := NewBytesWriter(nil, IBMEnterprise())
+		require.NoError(t, err)
+		require.Equal(t, IBMEnterprise(), w.Encoding())
+		require.Zero(t, w.Offset())
+	})
+}
+
+// TestNewBytesWriterValidatesExactlyAsNewWriter is
+// TestNewBytesReaderValidatesExactlyAsNewReader in the other direction, and
+// exists for the same reason: the two constructors share one body, and this
+// fails if a later change gives either its own.
+func TestNewBytesWriterValidatesExactlyAsNewWriter(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		enc  Encoding
+	}{
+		{name: "no encoding at all", enc: Encoding{}},
+		{
+			name: "no sign convention",
+			enc:  Encoding{Charset: ASCII(), ByteOrder: binary.BigEndian, Float: FloatIEEE},
+		},
+		{
+			name: "no byte order",
+			enc:  Encoding{Charset: ASCII(), Sign: SignASCIIZone37, Float: FloatIEEE},
+		},
+		{
+			name: "no float format",
+			enc:  Encoding{Charset: ASCII(), Sign: SignASCIIZone37, ByteOrder: binary.BigEndian},
+		},
+		{name: "complete encoding", enc: GnuCOBOLASCII()},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, streamErr := NewWriter(&bytes.Buffer{}, tc.enc)
+			_, bytesErr := NewBytesWriter(nil, tc.enc)
+			require.Equal(t, streamErr, bytesErr)
+		})
+	}
+}
+
+// TestWriterReset covers the method's contract clause by clause, as
+// TestReaderReset does on the other side: the position restarts, the buffer is
+// truncated but its capacity kept, the encoding survives, and a Writer built
+// over a stream may be rewound onto a buffer.
+func TestWriterReset(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	t.Run("offset restarts and the encoding survives", func(t *testing.T) {
+		t.Parallel()
+
+		w, err := NewBytesWriter(nil, enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteAlphanumeric("AB", 4))
+
+		w.Reset(w.Bytes())
+		require.Zero(t, w.Offset())
+		require.Empty(t, w.Bytes())
+		require.Equal(t, enc, w.Encoding())
+
+		require.NoError(t, w.WriteAlphanumeric("CD", 4))
+		require.Equal(t, []byte("CD  "), w.Bytes())
+	})
+
+	t.Run("keeps the buffer's capacity", func(t *testing.T) {
+		t.Parallel()
+
+		buf := make([]byte, 0, 64)
+		w, err := NewBytesWriter(buf, enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteAlphanumeric("AB", 4))
+
+		w.Reset(w.Bytes())
+		require.NoError(t, w.WriteAlphanumeric("CD", 4))
+
+		// Same array throughout: the second record was written where the
+		// first one was, which is the allocation Reset removes.
+		require.Equal(t, 64, cap(w.Bytes()))
+		require.Equal(t, []byte("CD  "), w.Bytes())
+	})
+
+	t.Run("rewinds a Writer built over a stream", func(t *testing.T) {
+		t.Parallel()
+
+		var sink bytes.Buffer
+		w, err := NewWriter(&sink, enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteAlphanumeric("AB", 4))
+		require.Equal(t, []byte("AB  "), sink.Bytes())
+		require.Nil(t, w.Bytes(), "a Writer onto a stream has written nothing to a buffer")
+
+		// The stream is dropped: what follows goes to the buffer, and the
+		// stream keeps what it was already given.
+		w.Reset(nil)
+		require.Zero(t, w.Offset())
+		require.NoError(t, w.WriteAlphanumeric("CD", 4))
+		require.Equal(t, []byte("CD  "), w.Bytes())
+		require.Equal(t, []byte("AB  "), sink.Bytes())
+	})
+
+	t.Run("nil drops the caller's buffer", func(t *testing.T) {
+		t.Parallel()
+
+		buf := make([]byte, 0, 64)
+		w, err := NewBytesWriter(buf, enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteAlphanumeric("AB", 4))
+
+		// The pooling shape: a Writer handed back holds nothing, so the
+		// record it last wrote is collectable.
+		w.Reset(nil)
+		require.Nil(t, w.Bytes())
+	})
+}
+
+// TestMarshalMatchesTheStreamWriter holds [Marshal]'s byte-backed [Writer] to
+// the bytes a [Writer] onto an [io.Writer] produces for the same record. The
+// two share every encoding body and differ only in where the bytes land, and
+// this is what says so.
+func TestMarshalMatchesTheStreamWriter(t *testing.T) {
+	t.Parallel()
+
+	for _, enc := range []Encoding{GnuCOBOLASCII(), IBMEnterprise(), MicroFocusASCII()} {
+		t.Run(enc.Charset.Name(), func(t *testing.T) {
+			t.Parallel()
+
+			rec := testRecord{
+				ID:      "A12345",
+				Name:    "WIDGET GRIP",
+				Code:    "42",
+				Raw:     []byte{0x00, 0x01, 0xFF},
+				Amount:  -12345,
+				Qty:     42,
+				Units:   9999,
+				Seq:     1234,
+				Rate:    1.5,
+				Factor:  2.5,
+				Balance: -12345,
+				Count:   42,
+			}
+
+			var sink bytes.Buffer
+			w, err := NewWriter(&sink, enc)
+			require.NoError(t, err)
+			require.NoError(t, rec.MarshalCOBOL(w))
+
+			data, err := Marshal(enc, &rec)
+			require.NoError(t, err)
+			require.Equal(t, sink.Bytes(), data)
+			require.Equal(t, w.Offset(), int64(len(data)))
+		})
+	}
+}
+
+// TestRoundTripReusedReaderAndWriter is the acceptance criterion of #115 in
+// both directions at once: one [Writer] and one [Reader], rewound onto each of
+// several records with [Writer.Reset] and [Reader.Reset], with every record
+// required to survive the ones written and read after it.
+//
+// The pair is driven record by record, and the [Writer]'s own buffer is what
+// the [Reader] is pointed at — no copy in between. That is what puts the
+// aliasing guarantee on the path: the writer's buffer is reused at its
+// capacity, so record two is encoded *over* record one's bytes while record
+// one's decoded values are still live, and any accessor handing out a window
+// into either the caller's slice or the Reader's scratch fails here. Copying
+// each record out first, which an earlier draft of this test did, quietly
+// removes exactly that.
+func TestRoundTripReusedReaderAndWriter(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	want := []testRecord{
+		{
+			ID:      "A12345",
+			Name:    "WIDGET GRIP",
+			Code:    "42",
+			Raw:     []byte{0x00, 0x01, 0xFF},
+			Amount:  -12345,
+			Qty:     42,
+			Units:   9999,
+			Seq:     1234,
+			Rate:    1.5,
+			Factor:  2.5,
+			Balance: -12345,
+			Count:   42,
+		},
+		{
+			ID:      "B98765",
+			Name:    "SPROCKET",
+			Code:    "7",
+			Raw:     []byte{0xFE, 0x80, 0x02},
+			Amount:  54321,
+			Qty:     7,
+			Units:   1,
+			Seq:     -4321,
+			Rate:    -0.25,
+			Factor:  -8.75,
+			Balance: 54321,
+			Count:   7,
+		},
+		{
+			ID:      "C24680",
+			Name:    "BRACKET ASSY",
+			Code:    "99",
+			Raw:     []byte{0x7F, 0x00, 0x01},
+			Amount:  1,
+			Qty:     1,
+			Units:   5,
+			Seq:     9999,
+			Rate:    0.5,
+			Factor:  -1.25,
+			Balance: -1,
+			Count:   999,
+		},
+	}
+
+	// One Writer and one Reader for every record: encode into the writer's
+	// reused buffer, decode straight back out of it, and keep going. Every
+	// record after the first is written over the bytes the record before it
+	// was decoded from.
+	w, err := NewBytesWriter(nil, enc)
+	require.NoError(t, err)
+	r, err := NewBytesReader(nil, enc)
+	require.NoError(t, err)
+
+	got := make([]testRecord, len(want))
+	var scratch []byte
+	for i, rec := range want {
+		w.Reset(scratch)
+		require.NoError(t, rec.MarshalCOBOL(w))
+		require.EqualValues(t, testRecordWidth, w.Offset(),
+			"the offset restarts per record, so it ends at the record's width")
+
+		scratch = w.Bytes()
+		require.Len(t, scratch, testRecordWidth)
+
+		r.Reset(scratch)
+		require.NoError(t, got[i].UnmarshalCOBOL(r))
+		require.EqualValues(t, testRecordWidth, r.Offset())
+
+		// Every record decoded so far, including the ones whose bytes
+		// have since been written over.
+		require.Equal(t, want[:i+1], got[:i+1])
+	}
+
+	// And once more at the end, with the buffer holding only the last
+	// record: nothing decoded earlier was a view into it.
+	require.Equal(t, want, got)
+	require.Equal(t, scratch, w.Bytes(),
+		"the writer kept one buffer across every record")
+}
+
+// TestBytesWriterGrowsForAFieldWiderThanTheFloor covers the arm of
+// [Writer.grow] the record-sized cases never reach: one field wider than both
+// twice the buffer's capacity and the 64-byte floor, which is what a PIC X(n)
+// comment or a binary payload is. The growth policy is an optimisation, so what
+// is asserted is that it changes nothing about the bytes — the field is written
+// whole, at the offset it started at, whatever the buffer had to do to hold it.
+func TestBytesWriterGrowsForAFieldWiderThanTheFloor(t *testing.T) {
+	t.Parallel()
+
+	const width = 200
+
+	w, err := NewBytesWriter(make([]byte, 0, 8), GnuCOBOLASCII())
+	require.NoError(t, err)
+
+	require.NoError(t, w.WriteAlphanumeric("ACME", width))
+	require.EqualValues(t, width, w.Offset())
+	require.GreaterOrEqual(t, cap(w.Bytes()), width,
+		"the field asked for more than the doubling would have given, so the growth took the field's own width")
+
+	want := append([]byte("ACME"), bytes.Repeat([]byte(" "), width-4)...)
+	require.Equal(t, want, w.Bytes())
+
+	// And a second field lands after the first, not over it.
+	require.NoError(t, w.WriteAlphanumeric("CO", 4))
+	require.Equal(t, append(want, []byte("CO  ")...), w.Bytes())
+	require.EqualValues(t, width+4, w.Offset())
+}
+
+// TestBytesWriterFirstFieldJumpsToTheFloor pins the other arm of
+// [Writer.grow]'s policy — the 64-byte floor — which is what keeps a record's
+// worth of fields to one allocation between them rather than one each. It is
+// the arm [Marshal] takes on every record, and the only thing that reported it
+// before was an allocation count in a benchmark CI never runs.
+//
+// It asserts a bound rather than an exact capacity: the floor is a minimum this
+// package chose, and a `make` is free to hand back more.
+func TestBytesWriterFirstFieldJumpsToTheFloor(t *testing.T) {
+	t.Parallel()
+
+	w, err := NewBytesWriter(nil, GnuCOBOLASCII())
+	require.NoError(t, err)
+
+	require.NoError(t, w.WriteAlphanumeric("AB", 4))
+	require.Equal(t, []byte("AB  "), w.Bytes())
+	require.GreaterOrEqual(t, cap(w.Bytes()), smallRecordBuffer,
+		"a four-byte first field grew the buffer to four bytes, so a record costs an allocation a field")
+}

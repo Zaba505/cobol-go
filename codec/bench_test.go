@@ -770,3 +770,106 @@ func BenchmarkEncodeRecord(b *testing.B) {
 	b.StopTimer()
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
 }
+
+// BenchmarkMarshalRecord measures the per-record path on the writing side, the
+// mirror of BenchmarkUnmarshalRecord: [Marshal] builds a [Writer] over one
+// record and drops it, so construction and the record's own buffer are both
+// paid once per record rather than once per file.
+//
+// It is the counterweight to BenchmarkEncodeRecord, which writes every
+// iteration through one long-lived [Writer] onto [io.Discard] and so measures
+// neither. The difference between the two figures is exactly what a Writer and
+// a record's bytes cost, which is the quantity #115 moved.
+//
+// There is no charset axis here. BenchmarkUnmarshalRecord has one because the
+// reading side caches a translation table per charset and a Reader built per
+// record is the only place that cache is visible; the writing side derives no
+// such table, so the same axis would be two names for one measurement.
+//
+// Corpus: benchRecord under benchRecordEncoding, the same record every other
+// whole-record benchmark uses.
+func BenchmarkMarshalRecord(b *testing.B) {
+	enc := benchRecordEncoding()
+	rec := benchRecord()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		data, err := Marshal(enc, &rec)
+		if err != nil {
+			b.Fatal(err)
+		}
+		runtime.KeepAlive(data)
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
+}
+
+// BenchmarkResetDecodeRecord measures the per-record path a caller takes with
+// one [Reader] rewound onto each record by [Reader.Reset], which is what #115
+// added the method for. It is BenchmarkUnmarshalRecord with the Reader hoisted
+// out of the loop, so the difference between the two figures is the whole of
+// what building a Reader per record costs — and it is the figure a caller
+// pooling Readers across goroutines would see, since a pooled Reader is reset
+// exactly like this one.
+//
+// It is deliberately *not* BenchmarkDecodeRecord with an extra call.
+// BenchmarkDecodeRecord reads one long stream and never restarts, which is the
+// file-oriented shape; this one restarts at every record, which is the shape a
+// caller who already holds the bytes has. The two differ by the Reset and by
+// the source being a []byte rather than an [io.Reader].
+//
+// Corpus: benchRecord under benchRecordEncoding, as every other whole-record
+// benchmark.
+func BenchmarkResetDecodeRecord(b *testing.B) {
+	enc := benchRecordEncoding()
+
+	fixture := benchRecord()
+	data, err := Marshal(enc, &fixture)
+	require.NoError(b, err)
+	require.Len(b, data, testRecordWidth)
+
+	r, err := NewBytesReader(data, enc)
+	require.NoError(b, err)
+
+	var rec testRecord
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r.Reset(data)
+		if err := rec.UnmarshalCOBOL(r); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
+}
+
+// BenchmarkResetEncodeRecord is BenchmarkResetDecodeRecord's mirror: one
+// [Writer] rewound onto its own buffer by [Writer.Reset] per record, which is
+// what a caller encoding a sequence of records into memory does. Against
+// BenchmarkMarshalRecord it is the cost of the [Writer] and the record's buffer
+// removed; against BenchmarkEncodeRecord it is the same encoder writing into
+// bytes rather than onto [io.Discard], so the difference is what the record's
+// own storage costs once the buffer is no longer reallocated for it.
+//
+// Corpus: benchRecord under benchRecordEncoding.
+func BenchmarkResetEncodeRecord(b *testing.B) {
+	rec := benchRecord()
+
+	w, err := NewBytesWriter(make([]byte, 0, testRecordWidth), benchRecordEncoding())
+	require.NoError(b, err)
+	buf := w.Bytes()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w.Reset(buf)
+		if err := rec.MarshalCOBOL(w); err != nil {
+			b.Fatal(err)
+		}
+		buf = w.Bytes()
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
+}
