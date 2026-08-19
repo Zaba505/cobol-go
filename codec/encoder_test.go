@@ -3716,3 +3716,29 @@ func TestRoundTripReusedReaderAndWriter(t *testing.T) {
 
 	require.Equal(t, want, got)
 }
+
+// TestBytesWriterGrowsForAFieldWiderThanTheFloor covers the arm of
+// [Writer.grow] the record-sized cases never reach: one field wider than both
+// twice the buffer's capacity and the 64-byte floor, which is what a PIC X(n)
+// comment or a binary payload is. The growth policy is an optimisation, so what
+// is asserted is that it changes nothing about the bytes — the field is written
+// whole, at the offset it started at, whatever the buffer had to do to hold it.
+func TestBytesWriterGrowsForAFieldWiderThanTheFloor(t *testing.T) {
+	t.Parallel()
+
+	const width = 200
+
+	w, err := NewBytesWriter(make([]byte, 0, 8), GnuCOBOLASCII())
+	require.NoError(t, err)
+
+	require.NoError(t, w.WriteAlphanumeric("ACME", width))
+	require.EqualValues(t, width, w.Offset())
+
+	want := append([]byte("ACME"), bytes.Repeat([]byte(" "), width-4)...)
+	require.Equal(t, want, w.Bytes())
+
+	// And a second field lands after the first, not over it.
+	require.NoError(t, w.WriteAlphanumeric("CO", 4))
+	require.Equal(t, append(want, []byte("CO  ")...), w.Bytes())
+	require.EqualValues(t, width+4, w.Offset())
+}
