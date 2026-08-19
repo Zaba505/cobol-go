@@ -2352,7 +2352,7 @@ func TestPackedFaultPrecedence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Every accessor shares readPackedDigits, so the precedence must
+			// Every accessor shares readPackedField, so the precedence must
 			// not depend on which one the generated code calls.
 			runFaultPrecedenceCase(t, map[string]func(*Reader, int) error{
 				"ReadPackedInt32": func(r *Reader, d int) error { _, err := r.ReadPackedInt32(d); return err },
@@ -2466,6 +2466,150 @@ func TestComp6FaultPrecedence(t *testing.T) {
 				"ReadComp6Int64": func(r *Reader, d int) error { _, err := r.ReadComp6Int64(d); return err },
 				"ReadComp6Big":   func(r *Reader, d int) error { _, err := r.ReadComp6Big(d); return err },
 			}, tc.src, tc.digits, tc.want, tc.wantNibble, tc.wantOffset)
+		})
+	}
+}
+
+// TestPackedReadsNoFurtherThanItsOwnBytes pins the bound the folded nibble
+// walk depends on: a packed or COMP-6 read looks at the bytes of its own field
+// and at nothing else.
+//
+// It runs the narrowest field of each usage — one digit, one byte for both —
+// because that is where the margin is largest: the reused scratch is
+// maxNumericWidth bytes and [Reader.read] slices one of them out of it, so
+// anything reading a machine word instead of a nibble would take fifteen bytes
+// that belong to the field before. Those bytes are poison here, the nines and
+// A-F nibbles of a wide field read immediately beforehand, so a read that
+// strayed into them returns a wrong number or a spurious PackedDigitError
+// rather than passing by luck on a zeroed buffer.
+//
+// Both sources are covered. They differ in where the field's bytes come from —
+// [io.ReadFull] against a copy out of the caller's slice — and only the
+// byte-backed one has a real neighbour byte after the field, which is what a
+// wide load would reach on a file rather than on a fixture.
+func TestPackedReadsNoFurtherThanItsOwnBytes(t *testing.T) {
+	t.Parallel()
+
+	// A wide field of every nibble the validators reject, read first so that
+	// it is what the scratch buffer holds when the narrow field lands in it.
+	poison := bytes.Repeat([]byte{0x9A, 0xBC, 0xDE, 0xF9}, maxNumericWidth/4)
+	require.Len(t, poison, maxNumericWidth)
+
+	usages := []struct {
+		name string
+		// field is the narrowest field of this usage: one digit, holding 7.
+		field []byte
+		read  map[string]func(r *Reader) (string, error)
+	}{
+		{
+			name:  "comp-3",
+			field: []byte{0x7C},
+			read: map[string]func(r *Reader) (string, error){
+				"ReadPackedInt32": func(r *Reader) (string, error) {
+					v, err := r.ReadPackedInt32(1)
+					return strconv.FormatInt(int64(v), 10), err
+				},
+				"ReadPackedInt64": func(r *Reader) (string, error) {
+					v, err := r.ReadPackedInt64(1)
+					return strconv.FormatInt(v, 10), err
+				},
+				"ReadPackedBig": func(r *Reader) (string, error) {
+					v, err := r.ReadPackedBig(1)
+					if err != nil {
+						return "", err
+					}
+					return v.String(), nil
+				},
+			},
+		},
+		{
+			name:  "comp-6",
+			field: []byte{0x07},
+			read: map[string]func(r *Reader) (string, error){
+				"ReadComp6Int32": func(r *Reader) (string, error) {
+					v, err := r.ReadComp6Int32(1)
+					return strconv.FormatInt(int64(v), 10), err
+				},
+				"ReadComp6Int64": func(r *Reader) (string, error) {
+					v, err := r.ReadComp6Int64(1)
+					return strconv.FormatInt(v, 10), err
+				},
+				"ReadComp6Big": func(r *Reader) (string, error) {
+					v, err := r.ReadComp6Big(1)
+					if err != nil {
+						return "", err
+					}
+					return v.String(), nil
+				},
+			},
+		},
+	}
+
+	sources := []struct {
+		name string
+		open func(t *testing.T, data []byte) *Reader
+	}{
+		{
+			name: "stream",
+			open: func(t *testing.T, data []byte) *Reader {
+				t.Helper()
+
+				r, err := NewReader(bytes.NewReader(data), IBMEnterprise())
+				require.NoError(t, err)
+				return r
+			},
+		},
+		{
+			name: "bytes",
+			open: func(t *testing.T, data []byte) *Reader {
+				t.Helper()
+
+				r, err := NewBytesReader(data, IBMEnterprise())
+				require.NoError(t, err)
+				return r
+			},
+		},
+	}
+
+	// The bytes after the field, which no read of it may consume or look at.
+	trailer := bytes.Repeat([]byte{0xFF}, 16)
+
+	for _, u := range usages {
+		t.Run(u.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, src := range sources {
+				t.Run(src.name, func(t *testing.T) {
+					t.Parallel()
+
+					for name, read := range u.read {
+						t.Run(name, func(t *testing.T) {
+							t.Parallel()
+
+							data := slices.Concat(poison, u.field, trailer)
+							r := src.open(t, data)
+
+							// Fill the scratch with the poison, as a
+							// preceding field of a record would.
+							// ReadAlphanumeric and not ReadBytes:
+							// ReadBytes takes the allocating path and
+							// would leave the scratch untouched.
+							_, err := r.ReadAlphanumeric(len(poison))
+							require.NoError(t, err)
+
+							got, err := read(r)
+							require.NoError(t, err)
+							require.Equal(t, "7", got, "the value came from outside the field")
+							require.Equal(t, int64(len(poison)+len(u.field)), r.Offset(),
+								"the read consumed more than the field's own bytes")
+
+							rest, err := r.ReadBytes(len(trailer))
+							require.NoError(t, err)
+							require.Equal(t, trailer, rest, "the bytes after the field were disturbed")
+						})
+					}
+				})
+			}
 		})
 	}
 }
@@ -3840,6 +3984,12 @@ func TestReadBytesIsTheOnlyAccessorHandingOutBytes(t *testing.T) {
 // file was extended for: the read buffer no longer escapes, so an accessor that
 // decodes into a value allocates nothing at all.
 //
+// The two packed cases were the second half of that change: the integer packed
+// and COMP-6 accessors used to unpack every nibble of the field into a slice
+// the fold then walked once and dropped, and it escaped because the function
+// building it returned it. They fold the field's own nibbles now, so they
+// belong beside the accessors that never had an intermediate at all.
+//
 // It asserts zero rather than pinning a count. A count moves with the toolchain
 // and wants an owner — codec/CLAUDE.md says so of the benchmarks, and that
 // still holds — but zero is zero on every toolchain, and it is the one number
@@ -3865,6 +4015,26 @@ func TestReadingDoesNotAllocate(t *testing.T) {
 			field: []byte{0x04, 0xD2},
 			read: func(r *Reader) error {
 				_, err := r.ReadBinaryInt16(testRecordSeqDigits)
+				return err
+			},
+		},
+		{
+			// Five digits, so the field carries a pad nibble, three
+			// bytes and a sign — every nibble role the fold validates.
+			name:  "comp-3",
+			field: []byte{0x12, 0x34, 0x5C},
+			read: func(r *Reader) error {
+				_, err := r.ReadPackedInt64(5)
+				return err
+			},
+		},
+		{
+			// Four digits, the even count at which COMP-6 has no pad
+			// nibble and is a byte narrower than the COMP-3 above.
+			name:  "comp-6",
+			field: []byte{0x12, 0x34},
+			read: func(r *Reader) error {
+				_, err := r.ReadComp6Int64(4)
 				return err
 			},
 		},

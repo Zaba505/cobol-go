@@ -78,13 +78,13 @@ Never construct an `OffsetError` outside those paths without a reason, and never
 add a second offset field to a leaf error.
 
 There is one standing exception, and it is the shape any later one should take:
-`Reader.readPackedDigits` stamps a bad nibble with the offset of the **byte
+`Reader.readPackedField` stamps a bad nibble with the offset of the **byte
 holding it**, computed from the field's start offset in a single `nibbleAt`
 helper. A packed field is several bytes wide, and "the field ended at offset N"
 does not say which byte was corrupt.
 
 **Which** bad nibble that is, when there is more than one, is normative and not
-an artefact of the scan: both `readPackedDigits` and `readComp6Digits` check
+an artefact of the scan: both `readPackedField` and `readComp6Field` check
 nibbles in **field order** — pad, digits most significant first, then (COMP-3
 only) the sign — and report the **earliest** fault, so the offset names the
 first byte that went wrong. Most corrupt fields carry several faults at once, so
@@ -159,7 +159,9 @@ Why it matters at all: a fresh `make` per field is not expensive because it is a
 `make`. An identical one whose result does not escape is stack allocated and
 free. It is expensive because `read` *returned* the slice, forcing it onto the
 heap — one allocation per field before any value exists. Removing the escape
-took `BenchmarkDecodeRecord` from 20 allocs/record to 9 and 507 ns to 399.
+took `BenchmarkDecodeRecord` from 20 allocs/record to 9 and 507 ns to 399, and
+#116 took it to 6 by folding the packed and COMP-6 nibbles rather than
+unpacking them into a slice.
 
 **Both buffers are sliced with a full slice expression** — `r.num[:n:n]`, not
 `r.num[:n]`. A slice into a reused buffer carrying spare capacity is one
@@ -170,8 +172,10 @@ the runtime enforces. Do not drop the third index.
 Four invariants a change here must keep, all pinned by tests:
 
 - **Nothing an accessor returns may view the reused buffer.**
-  `zonedCodec.decodeField` and the packed/COMP-6 nibble slices allocate their
-  own, which is what makes this hold today.
+  `zonedCodec.decodeField` allocates its own, and the packed and COMP-6 bodies
+  return only numbers — `readPackedField`/`readComp6Field` hand back the
+  reused buffer itself, and every caller folds it into an `int64` or a
+  `big.Int` before returning, which is what makes this hold today (#116).
   `TestReadValuesDoNotAliasTheReusedBuffer` reads two records with one `Reader`
   and requires the first record's values to survive the second — but on its own
   that test cannot fail, because every value `testRecord` holds is a string or a
@@ -282,9 +286,20 @@ are their first callers.
 `COMP-6` (GnuCOBOL, Micro Focus) is packed decimal with **no sign nibble**, so
 `comp6Width` is `ceil(digits / 2)` against `packedWidth`'s `ceil((digits+1)/2)`
 and the pad nibble lands on the **opposite parity** — odd digit counts, not
-even. `readComp6Digits`/`writeComp6` are their own bodies rather than
-`readPackedDigits`/`writePacked` with a flag: the digits run to the end of the
+even. `readComp6Field`/`writeComp6` are their own bodies rather than
+`readPackedField`/`writePacked` with a flag: the digits run to the end of the
 field, there is no sign to return or to emit, and the two differences interact.
+
+Neither body unpacks the field into a slice of digits. `nibbleOf(b, i)` reads
+nibble `i` of the field's own bytes, the digits are the contiguous run
+`first` … `first+digits-1`, and each caller folds that run as it walks it, so an
+integer packed or COMP-6 read allocates nothing at all and a `big.Int` is the
+only thing either family puts on the heap (#116). Index a nibble at a time
+rather than loading a word: `Reader.read` returns a buffer sliced to the
+field's width, so a wider load runs off an owned slice or, behind the reused
+buffer, reads the *next* field's bytes and reports a neighbour as this field's
+bad nibble. `TestPackedReadsNoFurtherThanItsOwnBytes` reads the narrowest field
+of each usage behind a poisoned scratch and pins that.
 
 Three consequences to preserve:
 
@@ -525,7 +540,7 @@ straight back.
 overpunched into, and `-1` means unsigned or `SEPARATE` (plain zone throughout).
 `decodeField` returns the **index within the field** of the offending byte
 alongside its error, for the caller to stamp as `start+at` — the same reason
-`readPackedDigits` reports the byte holding a bad nibble.
+`readPackedField` reports the byte holding a bad nibble.
 
 Two asymmetries to preserve:
 
@@ -587,7 +602,7 @@ exist because the figures it replaces could not be attributed to any data:
   baseline, and CI does not run these (below). Pinning a *count* in a test
   remains a deliberate non-goal: it moves with the toolchain and wants an owner.
   Pinning **zero** does not, and `TestReadingDoesNotAllocate` does exactly that
-  for three accessors, because zero is zero on every toolchain and is the one
+  for five accessors, because zero is zero on every toolchain and is the one
   number that says a buffer did not escape. `TestResetDoesNotAllocate` pins the
   same number for `Reset` on both sides. Those two are the package's only tests
   without `t.Parallel()`, since `testing.AllocsPerRun` sets `GOMAXPROCS` to 1

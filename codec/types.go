@@ -891,7 +891,7 @@ func (c *zonedCodec) encodeField(dst, ds []byte, signAt int, negative bool) erro
 // at is the index within src of the offending byte and is meaningful only
 // alongside a non-nil error. A zoned field is several bytes wide, so the caller
 // stamps start+at rather than the offset the field ended at — the same reason
-// [Reader.readPackedDigits] stamps the byte holding a bad nibble.
+// [Reader.readPackedField] stamps the byte holding a bad nibble.
 func (c *zonedCodec) decodeField(src []byte, signAt int) (ds []byte, negative bool, at int, err error) {
 	if signAt >= len(src) {
 		return nil, false, 0, errZonedSignPosition
