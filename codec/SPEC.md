@@ -557,6 +557,53 @@ field. The pad check fires as well whenever the value's leading digit is
 non-zero, but it is not what the guarantee rests on: `01 23 4C` presents a pad
 nibble of `0` and is rejected on the `C` alone.
 
+### Fault precedence
+
+A corrupt packed field almost never carries exactly one bad nibble. Of the
+16,777,216 three-byte values a `PIC S9(4) COMP-3` field can hold, **15,384,000 —
+91.7% — are invalid in more than one role at once**: a bad pad *and* a bad
+digit, a bad digit *and* a bad sign, or all three. `PIC S9(5) COMP-3` is the
+same three bytes but has no pad nibble, so it has two roles rather than three
+and only digits-and-sign to span; the figure there is 9,485,760, or 56.5%. So
+for the large majority of the genuinely corrupt fields this validation exists to
+catch, "the error the reader reports" is not determined by the checks above —
+only by the order they are applied in.
+
+(Both counts are of fields invalid in more than one *role*, so several bad
+digits count once. Two bad digits are just as unordered as a bad pad beside a
+bad sign, and the rule below covers them too.)
+
+**That order is normative.** A reader that finds more than one invalid nibble in
+a `COMP-3` or `COMP-6` field **MUST** report the **earliest one in field order**:
+nibbles read left to right, which is the pad nibble, then the digit nibbles from
+most significant to least, then — for `COMP-3` — the sign nibble. The error type
+follows from the role of the nibble reported, and the offset it carries is the
+offset of the byte holding that nibble.
+
+Three consequences, stated so that they cannot be read as accidents of an
+implementation:
+
+- A non-zero pad nibble beside a bad digit is a **pad** error, not a digit error.
+- A bad digit beside an invalid sign nibble is a **digit** error, not a sign
+  error.
+- Of several bad digits, the **first** is reported — the most significant — not
+  the last and not whichever is cheapest to find.
+
+A reader that declines the pad check — it is a **SHOULD**, not a **MUST** — still
+applies the checks it does perform in this order.
+
+The reason to pin this rather than leave it to the implementation is that the
+offset is already normative. [Failure Modes](#normative-consequences) requires
+every such error to carry the byte offset at which the fault was found, and that
+requirement says nothing at all if a field with faults at bytes 0 and 2 may name
+either one. The two things that corrupt a packed field — a record whose offsets
+have slipped, and a naive text conversion — both damage it from some point
+onward, so the earliest bad byte is the one nearest to where the record actually
+went wrong; naming a later byte points the diagnosis past the evidence. The rule
+also survives reimplementation cheaply: "earliest in field order" is what a
+nibble-parallel check reporting its lowest set lane produces on its own, so a
+branchless rewrite has nothing to reproduce by hand.
+
 ### Charset invariance — and why that is a trap
 
 **`COMP-3` is charset-invariant: a packed field holds identical bytes in an
@@ -844,8 +891,10 @@ into a loud one by validation MUST be** (#73, #74, #75).
 2. `codec` **MUST** reject bytes invalid under the declared setting rather than
    coercing them, for zoned digits, zoned signs, packed digits, packed signs, and
    separate sign bytes. Every such error **MUST** carry the byte offset at which
-   it was found, so that a bad byte deep inside a record is diagnosable. (#72,
-   #73, #74, #77)
+   it was found, so that a bad byte deep inside a record is diagnosable. Where a
+   packed field carries more than one fault — the common case, not the corner one
+   — which fault that offset names is fixed by
+   [Fault precedence](#fault-precedence). (#72, #73, #74, #77, #110)
 3. `codec` **SHOULD** validate the packed pad nibble and **SHOULD** offer
    `TRUNC(STD)` range validation, because those are the two checks that convert
    otherwise-silent misconfiguration into a first-record failure.
@@ -1051,6 +1100,7 @@ Two collisions worth naming so they are not mistaken for errors:
 | [Zoned Decimal](#zoned-decimal-usage-display) | #73 `codec` |
 | [Packed Decimal](#packed-decimal-comp-3--packed-decimal) | #74 `codec` |
 | [`COMP-6`](#comp-6) | #99 `codec` |
+| [Fault precedence](#fault-precedence) | #110 `codec` |
 | [Binary](#binary-comp--comp-4--binary--comp-5) | #75 `codec` |
 | [Floating Point](#floating-point-comp-1--comp-2) | #76 `codec` |
 | Record tree, offsets, `OCCURS DEPENDING ON` | #78, #79, #80 `copybook` |
