@@ -844,13 +844,13 @@ func TestBuildErrors(t *testing.T) {
 			// the number the entry would have to carry, because the
 			// adopter reading it is holding a copybook something
 			// compiled (root SPEC.md, Semantics: "A REDEFINES entry
-			// numbered above its target").
+			// subordinate to its target").
 			name: "redefines numbered above an elementary target is subordinate to it instead",
 			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
 				return parseFragment(t, "01 REC.\n   05 A PIC X(6).\n   07 B REDEFINES A PIC X(6).\n")
 			},
 			target:  &LevelSequenceError{},
-			message: `level-07 item "B" at line 3, column 4 redefines "A", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so it must carry a level number at or below its target's 05`,
+			message: `level-07 item "B" at line 3, column 4 redefines "A", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so write it at its target's level number, 05`,
 		},
 		{
 			// The group target reaches the same rule by the same
@@ -863,7 +863,7 @@ func TestBuildErrors(t *testing.T) {
 				return parseFragment(t, "01 REC.\n   05 A.\n      10 A1 PIC X(4).\n   07 B REDEFINES A PIC X(4).\n")
 			},
 			target:  &LevelSequenceError{},
-			message: `level-07 item "B" at line 4, column 4 redefines "A", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so it must carry a level number at or below its target's 05`,
+			message: `level-07 item "B" at line 4, column 4 redefines "A", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so write it at its target's level number, 05`,
 		},
 		{
 			// The shape this rule was decided on: a production
@@ -878,7 +878,21 @@ func TestBuildErrors(t *testing.T) {
 				return parseFragment(t, "01 HEADER PIC X(20).\n05 HEADER-RECORD REDEFINES HEADER.\n   10 HDR-TYPE PIC X(7).\n   10 HDR-NAME PIC X(13).\n")
 			},
 			target:  &LevelSequenceError{},
-			message: `level-05 item "HEADER-RECORD" at line 2, column 1 redefines "HEADER", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so it must carry a level number at or below its target's 01`,
+			message: `level-05 item "HEADER-RECORD" at line 2, column 1 redefines "HEADER", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so write it at its target's level number, 01`,
+		},
+		{
+			// The second alternative is the case SPEC.md's argument for
+			// refusing the shape rests on: admitting the first one as a
+			// sibling would leave nothing sourceable to say about where
+			// this one goes. The first refusal is what is reported, so
+			// the reader is pointed at the first entry to fix rather
+			// than the last.
+			name: "a second alternative redefining the same target is refused at the first",
+			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
+				return parseFragment(t, "01 HEADER PIC X(20).\n05 HEADER-RECORD REDEFINES HEADER.\n   10 HDR-TYPE PIC X(7).\n05 TRAILER-RECORD REDEFINES HEADER.\n   10 TRL-COUNT PIC 9(20).\n")
+			},
+			target:  &LevelSequenceError{},
+			message: `level-05 item "HEADER-RECORD" at line 2, column 1 redefines "HEADER", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so write it at its target's level number, 01`,
 		},
 		{
 			// An ancestor further up the open chain than the immediate
@@ -890,7 +904,7 @@ func TestBuildErrors(t *testing.T) {
 				return parseFragment(t, "01 REC.\n   05 GRP.\n      10 X REDEFINES REC PIC X(4).\n")
 			},
 			target:  &LevelSequenceError{},
-			message: `level-10 item "X" at line 3, column 7 redefines "REC", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so it must carry a level number at or below its target's 01`,
+			message: `level-10 item "X" at line 3, column 7 redefines "REC", which its level number makes it subordinate to rather than a sibling of; a REDEFINES entry must be an item of the same group as its target, so write it at its target's level number, 01`,
 		},
 		{
 			name: "condition name with nothing to qualify",

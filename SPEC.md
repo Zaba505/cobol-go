@@ -1297,26 +1297,36 @@ parse).
   therefore resolved **structurally**, by name among the items of the group
   already placed, and no level number is compared. Given the rule above, a
   redefining entry's number is necessarily less than or equal to its target's;
-  an entry numbered above its target is subordinate to it and so cannot redefine
-  it at all.
+  an entry numbered above its target is never that target's sibling and so
+  cannot redefine it at all. Where the target is still open when the entry
+  arrives, the entry is *subordinate to* it and the bullet below applies;
+  where the target has already closed, the entry is simply somewhere else in
+  the record and the clause names nothing that precedes it.
 
   This is an IBM extension over the 85 Standard, which requires the identical
   level numbers, and it is deliberately **not gated by dialect**. Three reasons:
   the tree is built from level numbers alone, before any dialect is chosen —
   `Dialect` selects storage widths, `SYNCHRONIZED` slack and the `REDEFINES`
   *size* rule, all of them questions about bytes rather than about shape; none of
-  the dialects this package ships models a strictly 85-conformant compiler, and
-  no evidence was found that GnuCOBOL or Micro Focus reject unequal numbers, so
-  gating would have to be invented rather than sourced; and the package's job is
-  to read copybooks that a real compiler already compiled, where refusing source
-  that compiled is a worse failure than accepting source that a stricter compiler
-  would have refused. A caller that wants the strict reading enforced can compare
+  the dialects this package ships models a strictly 85-conformant compiler; and
+  the package's job is to read copybooks that a real compiler already compiled,
+  where refusing source that compiled is a worse failure than accepting source
+  that a stricter compiler would have refused. That last reason is the one
+  carrying the weight, because the other vendors have since been checked and do
+  **not** follow IBM here: GnuCOBOL's `cb_resolve_redefines` requires the two
+  level numbers to be identical under every one of its dialects, including
+  `-std=ibm`, and Micro Focus states the same syntax rule with no dialect
+  qualifier (see the bullet below for both citations). So gating *could* now be
+  sourced, and is still not done — a copybook is read here, not compiled, and a
+  reader of an IBM-compiled copybook should not have to select a dialect to be
+  given its fields. A caller that wants the strict reading enforced can compare
   the level numbers of a group's children itself — they are preserved verbatim on
   each field.
 
-- **A `REDEFINES` entry numbered above its target is refused, not re-read as a
-  sibling.** The bullet above settles the direction the extension runs in; this
-  is the other direction, and it is a shape production copybooks actually reach.
+- **A `REDEFINES` entry subordinate to its target is refused, not re-read
+  as a sibling.** The bullet above settles the direction the extension runs
+  in; this is the other direction, and it is a shape production copybooks
+  actually reach.
   A file whose every record type is written as a `REDEFINES` of one generic
   subfield-less record may number some of those alternatives *above* the record
   they redefine — a greater level number, and so a place further down the
@@ -1339,6 +1349,22 @@ parse).
   same refusal covers a `10 X REDEFINES REC` written inside `REC` and a
   `07 B REDEFINES A` written inside a group `A`.
 
+  The boundary is worth stating, because it is narrower than "numbered above
+  its target". An entry numbered above a target it is *not* inside — one naming
+  a group that has already closed, as `10 B REDEFINES A` does after `05 A` has
+  been closed by a following `05 GRP` — is not this error. It is refused all the
+  same, but a stage later and for the plain reason that no item of that name
+  precedes it in its group. Only an entry the level numbers place *inside* its
+  target is reported here, because only there is the level rule the thing worth
+  saying.
+
+  Which stage reports it is itself a change: the group-target case
+  (`07 B REDEFINES A` written inside a group `A`) used to reach the layout stage
+  and come back as a target-resolution failure — a group does not contain
+  itself — and is now refused when the tree is built. A caller matching on the
+  error type sees a level-sequence error where it saw a `REDEFINES` one, and
+  sees it from the earlier call.
+
   Two standard rules each rule it out on their own — an item may not be
   subordinate to an elementary item, since a group is a group precisely by
   having no `PICTURE`; and `REDEFINES` requires its subject and its object to
@@ -1347,14 +1373,86 @@ parse).
   unequal-level-numbers extension relaxes: that extension is about the *numbers*
   two siblings carry and says nothing about an entry that is not a sibling.
 
-  **Why not a `Build` option or a `Dialect` field.** The relaxation would have
-  to be sourced before it could be gated, and it cannot be: no compiler
-  documentation was found stating that any of the three dialects this package
-  models — IBM Enterprise COBOL, GnuCOBOL, Micro Focus — reads a redefining
-  entry numbered above its target as a sibling of that target. A knob whose
-  behaviour matches no compiler is a third dialect this package would be
-  inventing. The mechanical objection is real too and worth recording: the level
-  hierarchy is built by `copybook.Build`, whose only option today is
+  **How the two directions map onto the dialects.** The *sibling* direction —
+  two items of one group carrying different level numbers, one a `REDEFINES` of
+  the other — is an IBM extension, and the 85 Standard is flatly against it:
+  *"The level-numbers of data-name-2 and the subject of the entry must be
+  identical, but must not be 66 or 88"* (ANSI X3.23-1985, §5.10.3(2), p. VI-38),
+  wording the 2002/2014 drafts keep. IBM's *"must have the same level in the
+  hierarchy; however, the level numbers need not be the same"* is therefore a
+  genuine vendor relaxation and not a reading of the Standard. The bullet above
+  admits it for every dialect this package ships; **GnuCOBOL and Micro Focus do
+  not** — GnuCOBOL's `cb_resolve_redefines` rejects unequal numbers under all 21
+  of its dialects, and Micro Focus states the identical-level-numbers rule with
+  no dialect qualifier and diagnoses `COBCH0204`.
+
+  The *subordinate* direction is admitted by **none** of the three, and it fails
+  for two independent reasons — only one of which is about `REDEFINES` at all:
+
+  - the level-number rule above, which IBM's extension does not reach. IBM's
+    binding half is *"the same level in the hierarchy"*, and its own example of
+    the extension is a `05` beside a `04` under one `01` — siblings. An entry a
+    level *deeper* than its target would be redefining its own parent;
+  - the subordination contradiction. A `05` following an elementary `01` is by
+    definition subordinate to it, which makes that `01` a group — but it carries
+    a `PICTURE`, and a `PICTURE` may appear *"only at the elementary item
+    level"* (X3.23-1985, §5.9.3(1), p. VI-29; with §4.3.2.1, p. IV-14 and the
+    glossary's group/elementary definitions). **Deleting the `REDEFINES` clause
+    does not fix the source**, which is why this package reports the two cases
+    separately.
+
+  What the vendors actually do with it was checked rather than assumed:
+
+  - **GnuCOBOL** rejects it outright. Compiled at 3.2.0, the shape gives
+    `group item 'HEADER' cannot have PICTURE clause` and
+    `'HEADER' is not defined in 'HEADER'`, identically under all 21 `-std`
+    dialects and unchanged by `-frelax-level-hierarchy`,
+    `-frelax-syntax-checks`, `-findirect-redefines` and
+    `-flarger-redefines=ok`. `cobc/field.c` makes a greater level number mean
+    *child* unconditionally, and `cb_relax_level_hierarchy` is consulted only in
+    the lower-number branch — it relaxes a `04` after a `05`, never depth.
+  - **IBM Enterprise COBOL** rejects it, but **recovers** from the first half.
+    The group/`PICTURE` clash is `IGYDS1052-E` — *"Group item … contained the
+    PICTURE clause"*, described for structurally this shape in IBM technote
+    swg21161267 — and E-level means *"the compiler attempted to correct the
+    error, but the results of program execution might not be what you expect"*
+    (Programming Guide, SC27-8714-03, Table 38, p. 282), return code 8. The
+    `REDEFINES` half is severe and is discarded.
+  - **Micro Focus** rejects it by the syntax rule and `COBCH0204`. No compiler
+    was available to run, so the compound case is documented rather than
+    observed. Its own sibling relaxation is flagged `OSVS`/`VSC2` only, and is
+    again about siblings rather than depth.
+
+  **What most likely explains a copybook of this shape being "in production".**
+  In rough order: that the thing reading it is not a compiler at all — copybooks
+  are also consumed by File Manager templates, ETL readers and copybook parsers,
+  which are far laxer and often just renumber or flatten; that an `IGYDS1052-E`
+  at return code 8 is tolerated by the job's `COND`/`MAXCC` while nothing in the
+  PROCEDURE DIVISION references the redefining item, so the step "succeeds" with
+  the record laid out differently from what the copybook's author drew; or that
+  the severity is downgraded by a `MSGEXIT` deck, which IBM ships a sample of.
+
+  What is *not* a viable explanation is the documented IBM level-number
+  extension: no compiler examined, and no manual, treats a deeper level number
+  as a sibling of a shallower one. The one renumbering extension that does exist
+  only ever raises an out-of-order *lower* number up to match a sibling; it
+  never demotes a deeper number into a shallower slot.
+
+  The corrected form is not a guess either: `01 HEADER-RECORD REDEFINES HEADER.`
+  with the subfields untouched compiles clean and runs correctly on GnuCOBOL
+  3.2.0, and conforms to every standard and vendor rule above.
+
+  **Why not a `Build` option or a `Dialect` field.** A relaxation has to be
+  sourced before it can be gated, and the evidence above sources the opposite:
+  the shape is rejected by all three, and the only compiler that gets near
+  accepting it does so by *error recovery* whose own documentation says the
+  result may not be what you expect. A dialect axis with one value on all three
+  is not an axis, and a knob reproducing IBM's recovery would be reproducing a
+  layout IBM disclaims. That is worse than refusing, because the copybook would
+  then be read at offsets nobody vouches for.
+
+  The mechanical objection is real too and worth recording: the level hierarchy
+  is built by `copybook.Build`, whose only option today is
   `WithDecimalPointIsComma`, while `Dialect` is `NewLayout`'s and selects
   storage widths, `SYNCHRONIZED` slack and the `REDEFINES` *size* rule — all
   questions about bytes, decided a stage after the shape is fixed. But the
@@ -1384,7 +1482,7 @@ parse).
   level-05 item "HEADER-RECORD" at line 2, column 1 redefines "HEADER",
   which its level number makes it subordinate to rather than a sibling
   of; a REDEFINES entry must be an item of the same group as its target,
-  so it must carry a level number at or below its target's 01
+  so write it at its target's level number, 01
   ```
 
   Written that way — `01 HEADER-RECORD REDEFINES HEADER.`, the subfields left
@@ -1595,3 +1693,31 @@ round-trip fixtures are added in #23; this snippet is illustrative.)
   the earliest statement of the same extension, with the manual's own
   standard/nonstandard example. Scanned at
   <http://www.bitsavers.org/pdf/ibm/360/os/cobol/GC28-6396-6_IBM_OS_Full_American_National_Standard_COBOL_Apr76.pdf>
+- ANSI X3.23-1985 / ISO 1989-1985, §5.10.3(2) p. VI-38, §5.9.3(1) p. VI-29,
+  §4.3.2.1 p. IV-14 — the Standard's own rules: `REDEFINES` level-numbers "must
+  be identical", `PICTURE` "only at the elementary item level", and the extent
+  of a group. Reproduced verbatim as FIPS PUB 21-2.
+  <https://archive.org/details/fips21-2_COBOLproglang>
+- ISO/IEC 1989 WG4 CD 1.2 (2009-08-23), §13.18.43.2(2) p. 361 — the same
+  `REDEFINES` rule, unchanged, in the cycle that produced the 2014 edition.
+  The published 2002 and 2014 editions are paywalled; this is a committee
+  draft and is cited as one. Surviving only in a Wayback snapshot.
+  <https://web.archive.org/web/20110721193009if_/http://www.cobolstandard.info/j4/files/std.zip>
+- IBM technote swg21161267 — `IGYDS1052-E Group item "SQLSTATE" contained the
+  "PICTURE" clause`, describing structurally this shape in IBM's own words: "a
+  following 05 would be subordinate to the 03 SQLSTATE PIC X(5)".
+  <https://www.ibm.com/support/pages/igyds1052-e-group-item-sqlstate-contained-picture-clause>
+- IBM Enterprise COBOL for z/OS 6.4 Programming Guide, SC27-8714-03, Table 38
+  p. 282 — the message-severity model, for E meaning "the compiler attempted to
+  correct the error, but the results of program execution might not be what you
+  expect" at return code 8.
+  <https://publibfp.dhe.ibm.com/epubs/pdf/igy6pg40.pdf>
+- Micro Focus Visual COBOL COBOL Language Reference, *The REDEFINES Clause*,
+  syntax rule 2 — "The level-numbers of data-name-1 and data-name-2 must be
+  identical", with no dialect qualifier; message `COBCH0204`.
+  <https://web.archive.org/web/20250917025221/https://www.microfocus.com/documentation/visual-cobol/vc80/VS2022/HRLHLHPDF40K.html>
+- GnuCOBOL 3.2.0, `cobc/field.c` — a greater level number makes a child
+  unconditionally, `cb_relax_level_hierarchy` is consulted only in the
+  lower-number branch, and `cb_resolve_redefines` requires identical level
+  numbers with no relaxation. Verified by compiling the shape under all 21
+  `-std` dialects. <https://gnucobol.sourceforge.io/>
