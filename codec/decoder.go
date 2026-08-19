@@ -31,9 +31,12 @@ import (
 // through records, rather than one per record, whichever shape the caller's
 // source has.
 type Reader struct {
-	// r is the stream a Reader built by [NewReader] reads, and is unused by
-	// the byte-backed Readers — those built by [NewBytesReader] or rewound
-	// by [Reader.Reset] — whose source is data instead.
+	// r is the stream a Reader reads when it has one: set by [NewReader] and
+	// by [Reader.ResetStream], and unused by the byte-backed Readers — those
+	// built by [NewBytesReader] or rewound by [Reader.Reset] — whose source
+	// is data instead. Which arm a Reader is on is not a property of the
+	// constructor it came from, since either rewind can move it to the other
+	// one; it is fromBytes below, and nothing else.
 	r io.Reader
 	// fromBytes says which of the two it is, and it is a field rather than a
 	// nil check on either of them because the zero value of a Reader has to
@@ -281,10 +284,15 @@ func (r *Reader) Reset(data []byte) {
 //	r := pool.Get().(*codec.Reader)
 //	defer func() { r.ResetStream(nil); pool.Put(r) }()
 //	for {
+//		var rec Record
 //		r.ResetStream(br) // br is the same stream every time
-//		if err := v.UnmarshalCOBOL(r); err != nil {
+//		switch err := rec.UnmarshalCOBOL(r); {
+//		case errors.Is(err, io.EOF) && r.Offset() == 0:
+//			return nil // the file ended on a record boundary
+//		case err != nil:
 //			return err
 //		}
+//		use(rec)
 //	}
 //
 // Rewinding onto the **same** stream, as that loop does, is the ordinary use,
@@ -299,12 +307,22 @@ func (r *Reader) Reset(data []byte) {
 // after that field. That is the property that lets the framing and the record
 // share one stream.
 //
-// A nil rd means what Reset(nil) means: the hand-back, for a Reader going into
-// a pool. The Reader then holds neither a stream nor a record, so it keeps
-// nothing of the caller's alive, and the next field read reports [io.EOF]
-// rather than panicking on a nil [io.Reader]. It is not a way to obtain a
-// working Reader — a Reader nobody constructed is still unusable, because its
-// [Encoding] was never validated.
+// A nil rd means what Reset(nil) means, and is implemented as it: the
+// hand-back, for a Reader going into a pool. The Reader is left byte-backed
+// over no bytes, so it holds neither a stream nor a record and keeps nothing of
+// the caller's alive, and the next field read reports [io.EOF] rather than
+// panicking on a nil [io.Reader].
+//
+// That [io.EOF] is the same one a stream that has genuinely run out reports, so
+// a Reader taken from a pool and read *before* it is rewound reads as a file
+// that ended rather than as a mistake. The alternative is a sentinel of its
+// own, and it was rejected: Reset(nil) has answered [io.EOF] since it existed,
+// and a hand-back that means one thing on bytes and another on a stream is a
+// worse trap than the one it removes. Rewind before reading; the pooling
+// examples here and on Reset both do it at the top of the loop.
+//
+// None of that is a way to obtain a working Reader. A Reader nobody
+// constructed is still unusable, because its [Encoding] was never validated.
 //
 // ResetStream works on a Reader built by [NewBytesReader], or rewound by
 // [Reader.Reset], too: the bytes are dropped and the stream takes their place.

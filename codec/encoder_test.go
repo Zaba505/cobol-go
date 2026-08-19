@@ -3958,6 +3958,12 @@ func TestWriterResetStream(t *testing.T) {
 		require.NoError(t, w.WriteAlphanumeric("CD", 4))
 		require.Equal(t, []byte("AB  "), sink.Bytes(),
 			"a Writer handed back does not go on writing to the stream it had")
+
+		// Where those bytes did go, stated rather than left to be
+		// discovered: a handed-back Writer is a byte-backed Writer like
+		// any other, so the write succeeds and [Writer.Bytes] hands it
+		// back. Quiet, which is why the doc says to rewind first.
+		require.Equal(t, []byte("CD  "), w.Bytes())
 	})
 
 	t.Run("a Writer handed back can be rewound again", func(t *testing.T) {
@@ -3994,6 +4000,18 @@ func TestWriterResetStream(t *testing.T) {
 		require.EqualValues(t, 2, offErr.Offset,
 			"the offset names where this record stopped, not where the file did")
 		require.EqualValues(t, 2, w.Offset())
+
+		// And the failure does not stick to the Writer. This is the
+		// pooling case — a record fails to encode and the caller rewinds
+		// or hands the Writer back — and it is the assertion
+		// TestReaderResetStreamErrorsCountFromTheRewind makes on the
+		// decode arm, which the encode arm needs too.
+		var good bytes.Buffer
+		w.ResetStream(&good)
+		require.Zero(t, w.Offset())
+		require.NoError(t, w.WriteAlphanumeric("EF", 4))
+		require.EqualValues(t, 4, w.Offset())
+		require.Equal(t, []byte("EF  "), good.Bytes())
 	})
 }
 

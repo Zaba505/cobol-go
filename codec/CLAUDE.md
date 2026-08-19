@@ -292,27 +292,39 @@ are their first callers.
     library, which is the cost, and it is the smaller cost. Both `Reset` doc
     comments name it, because a caller holding an `io.Reader` finds `Reset`
     first and would otherwise conclude the package cannot serve them.
-  - **A nil argument means the hand-back, on all four methods.** `Reset(nil)` was
-    already the pooling shape — hold nothing, keep nothing of the caller's alive
-    — and `ResetStream(nil)` is spelled as exactly that: it delegates to
+  - **A nil argument means the hand-back, on all four methods.** `Reset(nil)`
+    was already the pooling shape — hold nothing, keep nothing of the caller's
+    alive — and `ResetStream(nil)` is spelled as exactly that: it delegates to
     `Reset(nil)`, so the codec falls into the byte-backed arm over an empty
-    source. A read then answers `io.EOF` and a write goes to a buffer nobody
-    reads, rather than either panicking on a nil interface. That is what keeps
-    the answer from being "panics on the next read" without inventing a third
-    state, and `TestZeroValueIsStillUnusable` is untouched by it: a codec
-    *nobody constructed* still takes the stream arm and still panics, because
-    its `Encoding` was never validated and nothing must make it look workable.
+    source rather than either panicking on a nil interface or inventing a third
+    state. `TestZeroValueIsStillUnusable` is untouched by it: a codec *nobody
+    constructed* still takes the stream arm and still panics, because its
+    `Encoding` was never validated and nothing must make it look workable.
+    - A read after the hand-back answers `io.EOF`, which is the same answer a
+      stream that genuinely ran out gives, and a write after it *succeeds*,
+      appending to a buffer `Bytes()` will hand back. Both are quiet, so both
+      doc comments say what the state actually is and tell the caller to rewind
+      at the top of the loop, and `TestWriterResetStream` asserts the written
+      bytes rather than only that the old sink did not grow.
+    - A **sentinel of its own** — `ErrHandedBack`, say, telling a codec read
+      before it was rewound apart from a stream that ran out — was considered
+      on review and rejected. `Reset(nil)` has answered `io.EOF` since it
+      existed, and a hand-back meaning one thing on bytes and another on a
+      stream is a worse trap than the one it removes.
   - **Rewinding onto the same stream is the point**, and it is what makes
     `Offset` and every `OffsetError` record-relative on a stream, as they
     already were on bytes. Nothing is read ahead — the `Reader` does not buffer,
     which `#108` measured and declined — so the caller's framing reads the byte
-    after the last field. `TestReaderResetStream` pins that with a `bufio.Reader`
-    shared between the codec and the test's own delimiter read, which is the
-    adopter's shape.
+    after the last field. `TestReaderResetStream` pins that with a
+    `bufio.Reader` shared between the codec and the test's own delimiter read,
+    which is the adopter's shape.
   - **Each `ResetStream` drops the other arm's source** — `data = nil`,
     `buf = nil` — rather than leaving it behind an unused discriminator. The
     retention promise is "until the next rewind and no longer", and a rewind
-    onto a stream is a rewind.
+    onto a stream is a rewind. For the `Writer` that is a hazard worth the
+    sentence the doc gives it: a byte-backed `Writer`'s output *is* `buf`, so
+    `Bytes()` has to be read **before** the rewind — a buffer that had to grow
+    is no longer the caller's array either, so there is no way back to it.
   - **What it is worth**, measured on the pull request that landed it (go1.26.2,
     AMD Ryzen 9 5950X, `-benchtime 2s -count 5`, `benchRecord` under
     `GnuCOBOLASCII`): `BenchmarkResetStreamDecodeRecord` 321 ns / 37 B / 6
@@ -691,9 +703,9 @@ exist because the figures it replaces could not be attributed to any data:
   Pinning **zero** does not, and `TestReadingDoesNotAllocate` does exactly that
   for five accessors, because zero is zero on every toolchain and is the one
   number that says a buffer did not escape. `TestResetDoesNotAllocate` pins the
-  same number for `Reset` and `ResetStream` on both sides. Those two are the package's only tests
-  without `t.Parallel()`, since `testing.AllocsPerRun` sets `GOMAXPROCS` to 1
-  and panics when called from a parallel test.
+  same number for `Reset` and `ResetStream` on both sides. Those two are the
+  package's only tests without `t.Parallel()`, since `testing.AllocsPerRun`
+  sets `GOMAXPROCS` to 1 and panics when called from a parallel test.
 - **Every benchmark fixes and documents its corpus**, and every parameter is a
   parameter because results at two of its values are *not* comparable. A zoned
   field of nines used to cost more than one of zeros, because

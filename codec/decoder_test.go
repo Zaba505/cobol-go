@@ -5314,3 +5314,49 @@ func TestReaderResetStreamReadsSeveralRecords(t *testing.T) {
 	// The stream is drained exactly, so a rewind consumed nothing of its own.
 	require.Zero(t, stream.Len())
 }
+
+// TestResetStreamKeepsWhatTheEncodingDerived is #131's first acceptance
+// criterion asserted directly rather than through an allocation count: a rewind
+// onto a stream re-derives nothing that came from the [Encoding], and the
+// Encoding itself cannot change.
+//
+// TestResetDoesNotAllocate says the same thing in the enforceable currency of
+// zero allocations, but it says it about the rewind *and* the read together, so
+// a rewind that rebuilt a table into a buffer it had already allocated would
+// slip through it. This one names the derived state — the zoned codec, the
+// alphanumeric table and the fact that it has been looked up — and requires it
+// to be the same state afterwards.
+func TestResetStreamKeepsWhatTheEncodingDerived(t *testing.T) {
+	t.Parallel()
+
+	enc := GnuCOBOLASCII()
+
+	r, err := NewReader(bytes.NewReader([]byte("AB1234")), enc)
+	require.NoError(t, err)
+
+	// An alphanumeric field first, so the lazy table lookup has happened and
+	// there is something to keep; then a zoned one, so the zoned codec is
+	// on the path too.
+	_, err = r.ReadAlphanumeric(2)
+	require.NoError(t, err)
+	require.True(t, r.alphaLookedUp, "this test asserts nothing until the table has been looked up")
+
+	alpha, zoned, zonedErr := r.alpha, r.zoned, r.zonedErr
+	require.NotNil(t, alpha)
+
+	r.ResetStream(bytes.NewReader([]byte("CD5678")))
+
+	require.Equal(t, enc, r.Encoding(), "the Encoding cannot change across a rewind")
+	require.True(t, r.alphaLookedUp, "the rewind un-looked-up the alphanumeric table")
+	require.Same(t, alpha, r.alpha, "the rewind derived a second alphanumeric table")
+	require.Equal(t, zoned, r.zoned, "the rewind derived the zoned tables again")
+	require.Equal(t, zonedErr, r.zonedErr)
+
+	// And the kept state still decodes: the point of keeping it.
+	got, err := r.ReadAlphanumeric(2)
+	require.NoError(t, err)
+	require.Equal(t, "CD", got)
+	n, err := r.ReadZonedInt32(4, SignUnsigned)
+	require.NoError(t, err)
+	require.EqualValues(t, 5678, n)
+}

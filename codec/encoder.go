@@ -36,9 +36,12 @@ import (
 // replacing it with a buffer, so a stream-shaped caller reuses one Writer the
 // same way.
 type Writer struct {
-	// w is the stream a Writer built by [NewWriter] writes to, and is unused
-	// by the byte-backed Writers — those built by [NewBytesWriter] or
-	// rewound by [Writer.Reset] — which append to buf instead.
+	// w is the stream a Writer writes to when it has one: set by [NewWriter]
+	// and by [Writer.ResetStream], and unused by the byte-backed Writers —
+	// those built by [NewBytesWriter] or rewound by [Writer.Reset] — which
+	// append to buf instead. Which arm a Writer is on is not a property of
+	// the constructor it came from, since either rewind can move it to the
+	// other one; it is toBytes below, and nothing else.
 	w io.Writer
 	// toBytes says which of the two it is, and it is a field rather than a
 	// nil check on w for the reason [Reader.fromBytes] is: the zero value of
@@ -206,15 +209,27 @@ func (w *Writer) Reset(buf []byte) {
 // over a stream does not buffer: every field written before it has already
 // reached wr, and the next record's bytes follow them.
 //
-// A nil wr means what Reset(nil) means: the hand-back, for a Writer going into
-// a pool. The Writer holds neither a stream nor the caller's buffer afterwards,
-// so it keeps nothing alive, and writing to a Writer that has been handed back
-// is a use of it after the fact — its bytes go to a buffer nobody reads rather
-// than to a nil [io.Writer] and a panic.
+// A nil wr means what Reset(nil) means, and is implemented as it: the
+// hand-back, for a Writer going into a pool. The Writer is left byte-backed
+// over an empty buffer, so it holds neither the stream nor the caller's buffer
+// and keeps nothing of theirs alive.
+//
+// A write after that does not reach the stream the Writer had and does not
+// panic on a nil [io.Writer]: it appends to that empty buffer, which
+// [Writer.Bytes] will hand back, because a handed-back Writer is a byte-backed
+// Writer like any other. So writing to a pooled Writer before rewinding it
+// produces bytes that go nowhere the caller asked for, quietly. Rewind first;
+// the loop above does it at the top.
 //
 // ResetStream works on a Writer built by [NewBytesWriter], or rewound by
 // [Writer.Reset], too: the buffer is dropped, the stream takes its place, and
 // [Writer.Bytes] then reports nil because this Writer's bytes go to wr.
+//
+// **Read [Writer.Bytes] before rewinding, not after.** A byte-backed Writer's
+// output *is* that buffer, and this rewind drops it: a record written but not
+// yet read out is unreachable afterwards, with no error to check. Nor is the
+// slice the caller passed to [NewBytesWriter] or [Writer.Reset] a way back to
+// it, since a buffer that had to grow is no longer the caller's array at all.
 func (w *Writer) ResetStream(wr io.Writer) {
 	if wr == nil {
 		w.Reset(nil)
