@@ -701,6 +701,31 @@ func TestNewLayout(t *testing.T) {
 			wantLength: 8,
 		},
 		{
+			// A data-name may repeat within a record when every
+			// reference to it is qualified, so a record and a field of
+			// it may share one name. The REDEFINES here names the
+			// sibling, not the record it is inside, and the check that
+			// refuses an entry redefining something it is subordinate
+			// to must not read it as the latter: the sibling is
+			// consulted first. The offsets are the assertion — A and B
+			// overlay at 0 and C follows at 4, which is what a
+			// misresolved target would move.
+			name: "a redefines resolves to a sibling that shares its name with the record",
+			src: `01 A.
+   05 A PIC X(4).
+   05 B REDEFINES A PIC X(4).
+   05 C PIC X(2).
+`,
+			dialect: IBMEnterprise(),
+			want: []span{
+				{name: "A", offset: 0, length: 6},
+				{name: "A", offset: 0, length: 4},
+				{name: "B", offset: 0, length: 4},
+				{name: "C", offset: 4, length: 2},
+			},
+			wantLength: 6,
+		},
+		{
 			name: "a level-77 item is a record of one field",
 			src: `77 STANDALONE PIC S9(4) COMP.
 `,
@@ -804,22 +829,22 @@ func TestNewLayoutErrors(t *testing.T) {
 			contains: `no preceding item named "NOWHERE"`,
 		},
 		{
-			// A number above the nearest open item's makes the entry
-			// subordinate to that item rather than its sibling, so B
-			// becomes a child of A — and the group B then looks for
-			// its target in is A itself, which cannot contain A.
-			// This is the boundary of the extension: unequal level
-			// numbers are admitted, but only in the direction that
-			// leaves the two entries siblings.
-			name: "redefines numbered above a group target is subordinate to it instead",
+			// The boundary of the Build-time rule: B is numbered above
+			// A, but A closed when GRP opened, so B is not subordinate
+			// to A and Build has no level rule to state. It is refused
+			// here instead, for the plain reason that GRP holds no item
+			// named A (root SPEC.md, Semantics: "A REDEFINES entry
+			// subordinate to its target"). Pinned because the stage a
+			// case is reported from is now part of the contract.
+			name: "redefines of a closed sibling outside the group is not the level rule",
 			src: `01 R.
-   05 A.
-      10 A1 PIC X(4).
-   07 B REDEFINES A PIC X(4).
+   05 A PIC X(4).
+   05 GRP.
+      10 B REDEFINES A PIC X(4).
 `,
 			dialect:  IBMEnterprise(),
 			target:   &RedefinesError{},
-			contains: `no preceding item named "A"`,
+			contains: `no preceding item named "A" in "GRP"`,
 		},
 		{
 			name: "redefines may not name an item that follows it",
@@ -1131,4 +1156,123 @@ func TestLayoutStringers(t *testing.T) {
 	require.Equal(t, "unset", RedefinesUnset.String())
 	require.Equal(t, "strict", RedefinesStrict.String())
 	require.Equal(t, "lenient", RedefinesLenient.String())
+}
+
+// TestNewLayoutRecordAlternativesShareOneOffset lays out the production copybook
+// that decided how a REDEFINES subordinate to its target is read: a file whose
+// every record type — header, data records, trailer — is written as a REDEFINES
+// of one generic subfield-less record.
+//
+// Written the way COBOL admits it, with every alternative at the level number of
+// the record it redefines, each resolves to a record of its own laid out from
+// offset zero and the subfields land where the generic record's bytes are. That
+// is the whole of the edit a copybook numbering the header and the trailer 05
+// needs — see the "redefines of an elementary record numbered above it" case in
+// TestBuildErrors for what the diagnostic tells its reader — and it is asserted
+// against the offsets rather than the tree shape, because offsets are what an
+// adopter reading the file with codec actually gets.
+func TestNewLayoutRecordAlternativesShareOneOffset(t *testing.T) {
+	t.Parallel()
+
+	src := `01 GENERIC-RECORD           PIC X(20).
+01 HEADER-RECORD REDEFINES GENERIC-RECORD.
+   05 HDR-TYPE              PIC X(7).
+   05 HDR-NAME              PIC X(13).
+01 DETAIL-RECORD REDEFINES GENERIC-RECORD.
+   05 DTL-TYPE              PIC X(7).
+   05 DTL-ID                PIC X(13).
+01 TRAILER-RECORD REDEFINES GENERIC-RECORD.
+   05 TRL-TYPE              PIC X(7).
+   05 TRL-COUNT             PIC 9(13).
+`
+
+	want := [][]span{
+		{{name: "GENERIC-RECORD", offset: 0, length: 20}},
+		{
+			{name: "HEADER-RECORD", offset: 0, length: 20},
+			{name: "HDR-TYPE", offset: 0, length: 7},
+			{name: "HDR-NAME", offset: 7, length: 13},
+		},
+		{
+			{name: "DETAIL-RECORD", offset: 0, length: 20},
+			{name: "DTL-TYPE", offset: 0, length: 7},
+			{name: "DTL-ID", offset: 7, length: 13},
+		},
+		{
+			{name: "TRAILER-RECORD", offset: 0, length: 20},
+			{name: "TRL-TYPE", offset: 0, length: 7},
+			{name: "TRL-COUNT", offset: 7, length: 13},
+		},
+	}
+
+	recs := records(t, src)
+	require.Len(t, recs, len(want))
+
+	for i, rec := range recs {
+		l, err := NewLayout(rec, IBMEnterprise())
+		require.NoError(t, err)
+		requireSpans(t, l, want[i])
+		// Every alternative covers the same 20 bytes from the same
+		// offset: a record's own REDEFINES clause names another record
+		// rather than a field of this one, so it constrains nothing here
+		// and the layouts agree because the source says they do.
+		require.Equal(t, 20, l.Length, "length of record %d", i)
+	}
+}
+
+// TestNewLayoutRedefinedRecordMatchesPlainGroup is acceptance criterion 4 of #104
+// asserted as an identity rather than as two transcriptions of the same numbers:
+// a record written as a REDEFINES of a preceding record lays out exactly as the
+// same items written as an ordinary group, offset for offset.
+//
+// That is what makes the edit the level-rule diagnostic recommends — renumber the
+// entry to its target's level, change nothing else — a rewrite that costs the
+// reader no layout. It also pins the claim in layoutRecord that a record's own
+// REDEFINES clause constrains nothing about this record, which comparing a
+// hand-written span list against itself cannot distinguish from the two records
+// happening to be the same size.
+func TestNewLayoutRedefinedRecordMatchesPlainGroup(t *testing.T) {
+	t.Parallel()
+
+	redefining := `01 GENERIC-RECORD           PIC X(20).
+01 HEADER-RECORD REDEFINES GENERIC-RECORD.
+   05 HDR-TYPE              PIC X(7).
+   05 HDR-NAME              PIC X(13).
+`
+	plain := `01 HEADER-RECORD.
+   05 HDR-TYPE              PIC X(7).
+   05 HDR-NAME              PIC X(13).
+`
+
+	withClause := records(t, redefining)
+	require.Len(t, withClause, 2)
+	got, err := NewLayout(withClause[1], IBMEnterprise())
+	require.NoError(t, err)
+
+	without := records(t, plain)
+	require.Len(t, without, 1)
+	want, err := NewLayout(without[0], IBMEnterprise())
+	require.NoError(t, err)
+
+	require.Equal(t, spansOf(want), spansOf(got))
+	require.Equal(t, want.Length, got.Length)
+	require.Equal(t, want.MinLength, got.MinLength)
+	require.Equal(t, want.MaxLength, got.MaxLength)
+}
+
+// spansOf reduces a layout to the name, offset and extent of each of its items,
+// in [Layout.Items] order — everything two layouts of the same items must agree
+// on, and nothing that identifies which source they were built from.
+func spansOf(l *Layout) []span {
+	spans := make([]span, 0, len(l.Items()))
+	for _, item := range l.Items() {
+		spans = append(spans, span{
+			name:   item.Field.Name,
+			offset: item.Offset,
+			length: item.Length,
+			stride: item.Stride,
+			slack:  item.Slack,
+		})
+	}
+	return spans
 }
