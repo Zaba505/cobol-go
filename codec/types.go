@@ -1074,7 +1074,140 @@ func (f FloatFormat) valid() bool {
 	return f >= FloatIEEE && f <= FloatHFP
 }
 
-// Encoding is the complete byte-level interpretation of a data file: the four
+// BinarySize is the width staircase a compiler applies to USAGE BINARY items —
+// BINARY, COMP, COMPUTATIONAL, COMP-4 and COMP-5.
+//
+// A binary item's width is a staircase in its digit count and never the digit
+// count itself: PIC 9(5) COMP is four bytes, not five (codec/SPEC.md, "Binary
+// widths by digit count"). Which staircase is a property of the compiler that
+// produced the file and is baked into the bytes, so it is declared here rather
+// than inferred — a wrong staircase shifts every field after the first item it
+// touches, and a shifted record is not something a [Reader] can detect.
+//
+// The zero value [BinarySizeUnset] is invalid, because the 1–2 digit row is a
+// real fork between compilers: PIC S9(2) COMP is two bytes under IBM and one
+// under GnuCOBOL's default.
+//
+// This enum mirrors [github.com/Zaba505/cobol-go/copybook.BinarySize] member
+// for member, name for name and width for width. The two cannot be one type
+// because this package imports nothing outside the standard library, so
+// copybook's TestBinarySizeAgreesWithCodec pins them against each other at
+// every digit count rather than leaving the agreement to be assumed.
+type BinarySize int
+
+const (
+	// BinarySizeUnset is the invalid zero value.
+	BinarySizeUnset BinarySize = iota
+	// BinarySize248 is 2/4/8/16 bytes by digit count: IBM Enterprise COBOL,
+	// Micro Focus, and GnuCOBOL's binary-size: 2-4-8.
+	BinarySize248
+	// BinarySize1248 is 1/2/4/8/16 bytes by digit count: GnuCOBOL's default
+	// binary-size: 1-2-4-8, which gives a 1–2 digit item one byte.
+	BinarySize1248
+	// BinarySizeSmallest is GnuCOBOL's binary-size: 1--8, the smallest byte
+	// count from 1 to 8 whose signed range holds the digits — and sixteen
+	// beyond eighteen digits, which no byte count from 1 to 8 can hold. It
+	// is the only staircase with 3, 5, 6 and 7-byte steps.
+	BinarySizeSmallest
+	// BinarySizeFull is GnuCOBOL's binary-size: full, always eight bytes
+	// (sixteen beyond eighteen digits).
+	BinarySizeFull
+)
+
+// binarySizeNames maps each [BinarySize] to the spelling GnuCOBOL's binary-size
+// runtime option uses for it, which is also what [BinarySize.String] returns
+// and what copybook's enum returns for the member of the same name.
+var binarySizeNames = map[BinarySize]string{
+	BinarySize248:      "2-4-8",
+	BinarySize1248:     "1-2-4-8",
+	BinarySizeSmallest: "1--8",
+	BinarySizeFull:     "full",
+}
+
+// String implements the [fmt.Stringer] interface.
+func (b BinarySize) String() string {
+	if name, ok := binarySizeNames[b]; ok {
+		return name
+	}
+	if b == BinarySizeUnset {
+		return "unset"
+	}
+	return "BinarySize(" + strconv.Itoa(int(b)) + ")"
+}
+
+// valid reports whether the value names a staircase rather than the zero value
+// or an out-of-range one.
+func (b BinarySize) valid() bool {
+	_, ok := binarySizeNames[b]
+	return ok
+}
+
+// smallestBinaryDigits[i] is the largest d such that *every* d-digit value fits
+// a signed integer of n = i+1 bytes: the largest d with 10^d - 1 <= 2^(8n-1) - 1.
+// It is the whole of [BinarySizeSmallest].
+//
+// It is not the number of digits 2^(8n-1)-1 is written with, which is one more
+// at five of the eight steps — 127 has three digits but holds only two in full,
+// and that "in full" is the distinction the staircase turns on: a step that
+// held three-digit values only up to 127 would reject a legal PIC S9(3) item.
+var smallestBinaryDigits = [8]int{2, 4, 6, 9, 11, 14, 16, 18}
+
+// width reports the byte width of a binary item of the given digit count under
+// this staircase. Like [packedWidth] it does not depend on scale.
+//
+// digits must already have been validated against [maxBinaryDigits]; b must
+// already have been validated by [Encoding.Validate], which every [Reader] and
+// [Writer] runs at construction, so every arm below is reached by a staircase
+// the caller declared.
+//
+// The default arm is therefore unreachable, and it answers [maxBinaryFieldWidth]
+// rather than a plausible width so that it stays unreachable *loudly*. Answering
+// [BinarySize248] would give an [Encoding] whose axis was never set a working
+// record for most digit counts — a default in everything but name, and the exact
+// outcome this axis exists to prevent. Sixteen bytes is the widest step any
+// staircase has, so a field read under it runs out of record or swallows its
+// neighbours rather than reading plausibly. This package raises no panics, which
+// is why the arm returns at all.
+func (b BinarySize) width(digits int) int {
+	switch b {
+	case BinarySize1248:
+		switch {
+		case digits <= 2:
+			return 1
+		case digits <= 4:
+			return 2
+		case digits <= 9:
+			return 4
+		case digits <= 18:
+			return 8
+		}
+	case BinarySizeSmallest:
+		for i, most := range smallestBinaryDigits {
+			if digits <= most {
+				return i + 1
+			}
+		}
+	case BinarySizeFull:
+		if digits <= 18 {
+			return 8
+		}
+	case BinarySize248:
+		switch {
+		case digits <= 4:
+			return 2
+		case digits <= 9:
+			return 4
+		case digits <= 18:
+			return 8
+		}
+	}
+	// Nineteen digits and beyond is a sixteen-byte item under every
+	// staircase; IBM reaches it only under ARITH(EXTEND). It is also what an
+	// unvalidated b falls to, for the reason above.
+	return maxBinaryFieldWidth
+}
+
+// Encoding is the complete byte-level interpretation of a data file: the five
 // independent axes that must be known before a single byte can be read.
 //
 // Every field is required and every field's zero value is invalid, so an
@@ -1085,7 +1218,7 @@ func (f FloatFormat) valid() bool {
 // files hit most often and that no compiler produces is a mainframe-written
 // file converted to ASCII — ASCII characters, translated-EBCDIC signs,
 // big-endian binary — which a boolean "is it EBCDIC" cannot express. The named
-// bundles ([IBMEnterprise] and friends) are constructors that fill in all four,
+// bundles ([IBMEnterprise] and friends) are constructors that fill in all five,
 // never defaults the package applies on its own.
 type Encoding struct {
 	// Charset is the character set of the file. Its translation table is
@@ -1102,6 +1235,12 @@ type Encoding struct {
 	ByteOrder binary.ByteOrder
 	// Float governs COMP-1 and COMP-2. Required; [FloatUnset] is invalid.
 	Float FloatFormat
+	// Binary is the width staircase COMP, COMP-4 and COMP-5 items were
+	// compiled under. Required; [BinarySizeUnset] is invalid. It is the one
+	// axis that changes how many bytes a field occupies rather than how
+	// they are read, so a wrong setting shifts every field after the first
+	// binary item — see [BinarySize].
+	Binary BinarySize
 }
 
 // Validate reports whether every axis has been declared, returning an
@@ -1126,12 +1265,18 @@ func (e Encoding) Validate() error {
 	if !e.Float.valid() {
 		return EncodingError{Field: "Float", Reason: "has unknown value " + strconv.Itoa(int(e.Float))}
 	}
+	if e.Binary == BinarySizeUnset {
+		return EncodingError{Field: "Binary", Reason: "is required and has no default"}
+	}
+	if !e.Binary.valid() {
+		return EncodingError{Field: "Binary", Reason: "has unknown value " + strconv.Itoa(int(e.Binary))}
+	}
 	return nil
 }
 
 // IBMEnterprise returns the encoding of a file written by IBM Enterprise COBOL
 // on z/OS with its defaults: cp037 EBCDIC characters, EBCDIC overpunched signs,
-// big-endian binary, and IBM hexadecimal floating point.
+// big-endian binary on the 2/4/8 staircase, and IBM hexadecimal floating point.
 //
 // A site compiling under FLOAT(NATIVE) writes IEEE floats instead; set
 // [Encoding.Float] to [FloatIEEE] on the returned value.
@@ -1141,12 +1286,13 @@ func IBMEnterprise() Encoding {
 		Sign:      SignEBCDIC,
 		ByteOrder: binary.BigEndian,
 		Float:     FloatHFP,
+		Binary:    BinarySize248,
 	}
 }
 
 // MicroFocusASCII returns the encoding of a file written by Micro Focus Visual
 // COBOL or COBOL Server on ASCII platforms: ASCII characters, zone 3/7 signs,
-// the host's native byte order, and IEEE floats.
+// the host's native byte order, IEEE floats, and the 2/4/8 binary staircase.
 //
 // Byte order is native because that is the Micro Focus default; a file written
 // under the IBM compatibility directives is big-endian, so set
@@ -1157,35 +1303,60 @@ func MicroFocusASCII() Encoding {
 		Sign:      SignASCIIZone37,
 		ByteOrder: binary.NativeEndian,
 		Float:     FloatIEEE,
+		Binary:    BinarySize248,
 	}
 }
 
 // GnuCOBOLASCII returns the encoding of a file written by GnuCOBOL with its
 // default configuration: ASCII characters, zone 3/7 signs (display-sign),
-// big-endian binary, and IEEE floats.
+// big-endian binary on the 1/2/4/8 staircase, and IEEE floats.
 //
 // Byte order follows GnuCOBOL's own binary-byteorder setting, whose default is
 // big-endian. A build configured with binary-byteorder: native writes the
 // host's order instead, so set [Encoding.ByteOrder] to [binary.NativeEndian]
 // for one of those — it is the one axis of this bundle that a GnuCOBOL
 // configuration routinely moves.
+//
+// [Encoding.Binary] is [BinarySize1248] because that is GnuCOBOL's default
+// binary-size, which gives a 1–2 digit COMP item **one** byte where every other
+// bundle here gives it two. A build configured with binary-size: 2-4-8, 1--8 or
+// full writes a different record, so set the axis to the matching [BinarySize]
+// for one of those — it is the second axis of this bundle a GnuCOBOL
+// configuration routinely moves, and the one that changes the record's length
+// rather than a field's value.
+//
+// # Migrating
+//
+// Before [Encoding.Binary] existed this package implemented [BinarySize248] and
+// nothing else, so this bundle produced and consumed 2-4-8 records whatever its
+// name said. A caller who wrote files under it and wants to go on reading them
+// must now say so explicitly:
+//
+//	enc := codec.GnuCOBOLASCII()
+//	enc.Binary = codec.BinarySize248 // what this bundle used to mean
+//
+// Nothing reports the difference if they do not. A record holding a 1–2 digit
+// COMP item shifts by one byte per such field, and a [Reader] never knows a
+// record's length, so the two readings part company silently — which is the
+// whole reason the axis is required rather than defaulted.
 func GnuCOBOLASCII() Encoding {
 	return Encoding{
 		Charset:   ASCII(),
 		Sign:      SignASCIIZone37,
 		ByteOrder: binary.BigEndian,
 		Float:     FloatIEEE,
+		Binary:    BinarySize1248,
 	}
 }
 
 // ConvertedFromEBCDIC returns the encoding of a mainframe-written file that has
 // since been converted to ASCII: ASCII characters, translated-EBCDIC signs,
-// big-endian binary, and IBM hexadecimal floats.
+// big-endian binary on the 2/4/8 staircase, and IBM hexadecimal floats.
 //
 // No compiler produces this combination — a conversion does, and it is common
 // in the field. The character fields were translated and the overpunched signs
 // went through the same translation, while the binary and floating-point fields
-// kept whatever the mainframe wrote. It is expressible only because the four
+// kept whatever the mainframe wrote. It is expressible only because the five
 // axes are independent.
 //
 // Packed decimal fields are the hazard in such a file rather than a setting:
@@ -1197,6 +1368,7 @@ func ConvertedFromEBCDIC() Encoding {
 		Sign:      SignTranslatedEBCDIC,
 		ByteOrder: binary.BigEndian,
 		Float:     FloatHFP,
+		Binary:    BinarySize248,
 	}
 }
 
@@ -1400,39 +1572,43 @@ const (
 	maxBinaryDigits      = 31
 )
 
-// maxBinaryFieldWidth is the top step of [binaryWidth]'s staircase, the width
-// of every field of more than 18 digits and so of the widest binary field the
-// package reads. It is named rather than written twice because
+// maxBinaryFieldWidth is the top step of every [BinarySize] staircase, the
+// width of every field of more than 18 digits and so of the widest binary field
+// the package reads. It is named rather than written twice because
 // [maxNumericWidth] is derived from it: the staircase is the only place a
 // binary width is a literal, and a scratch buffer sized from a second copy of
 // that literal would not follow the step if it moved.
 const maxBinaryFieldWidth = 16
 
-// binaryWidth reports the byte width of a binary field holding digits digits:
-// 2 bytes through 4 digits, 4 through 9, 8 through 18 and 16 beyond. It is the
-// whole of the binary size model, and like [packedWidth] it does not depend on
-// scale.
+// binaryWidth reports the widest byte width any declared [BinarySize] gives a
+// binary field of digits digits.
 //
-// The width is a staircase and not the digit count: PIC 9(5) COMP is *four*
-// bytes, not five. Getting the step wrong shifts every field after it in the
-// record, which is why the 4/5 and 9/10 boundaries carry their own tests.
+// It is a *bound* and not the width of a field: it answers 8 for a two-digit
+// item, which no staircase but [BinarySizeFull] does. Which width a file
+// actually uses is [Encoding.Binary]'s to say, and every reader and writer asks
+// [BinarySize.width] for it.
 //
-// This is the IBM Enterprise COBOL table, which is also Micro Focus's and
-// GnuCOBOL's binary-size: 2-4-8. A GnuCOBOL build left on its default
-// binary-size: 1-2-4-8 gives a 1-2 digit item **one** byte instead of two;
-// this package does not implement that variant, and a copybook compiled under
-// it desynchronizes at the first such field rather than reading wrongly. See
-// codec/SPEC.md, "Binary widths by digit count".
+// **Nothing outside a test may call this.** Every call site on the byte paths
+// did call it before the staircase became an axis, so the mistake it invites is
+// the one this package was just fixed for, and its symptom is a silently
+// shifted record. That rule is enforced rather than asserted:
+// TestBinaryWidthIsNotOnAnyBytePath fails the build if a non-test file names it.
+//
+// Its one caller is TestNumericScratchFitsEveryNumericUsage, which checks
+// [maxNumericWidth] against the width function of each numeric family at that
+// family's own digit maximum. The const itself is derived from
+// [maxBinaryFieldWidth] and not from here — a const cannot call a function —
+// so this is the binary family's entry in the set of width functions that
+// derivation is *checked against*, which is a different job from sizing the
+// scratch and the reason the function still exists.
+//
+// The bound is [BinarySizeFull]'s staircase at every digit count, because
+// "always eight bytes, sixteen beyond eighteen digits" is by construction the
+// widest of the four; TestBinaryWidthBoundsEveryStaircase pins that, so a
+// fifth staircase with a wider step fails there rather than at the first field
+// that overruns the scratch.
 func binaryWidth(digits int) int {
-	switch {
-	case digits <= 4:
-		return 2
-	case digits <= 9:
-		return 4
-	case digits <= 18:
-		return 8
-	}
-	return maxBinaryFieldWidth
+	return BinarySizeFull.width(digits)
 }
 
 // pow10 holds 10^i for every digit count the fixed-width binary accessors
@@ -1484,9 +1660,11 @@ func isBigEndian(bo binary.ByteOrder) bool {
 // declares, in place. It is its own inverse — the conversion is a reversal in
 // both directions — so the reader and the writer share it.
 //
-// It exists because [binary.ByteOrder] has no 16-byte accessor: the 19-to-31
-// digit fields the [math/big.Int] accessors read and write cannot go through
-// Uint64 or PutUint64 the way the narrower ones do.
+// It exists because [binary.ByteOrder] carries accessors for 2, 4 and 8 bytes
+// and nothing else. The 19-to-31 digit fields the [math/big.Int] accessors read
+// and write are sixteen bytes wide, and [BinarySizeSmallest] gives 3, 5, 6 and
+// 7-byte fields; neither can go through Uint64 or PutUint64 the way the others
+// do.
 func orderBinaryBytes(bo binary.ByteOrder, b []byte) {
 	if isBigEndian(bo) {
 		return
@@ -1494,17 +1672,49 @@ func orderBinaryBytes(bo binary.ByteOrder, b []byte) {
 	slices.Reverse(b)
 }
 
+// binaryUint reads field, whose bytes are in the order bo declares, as a raw
+// unsigned integer. field must be 1 to 8 bytes; the 16-byte case belongs to the
+// [math/big.Int] accessors and goes through [orderBinaryBytes].
+//
+// It does not modify field. The odd widths reach the standard library through a
+// stack array rather than by reversing the caller's bytes, because that caller
+// is [Reader.readBinaryField] and its bytes are the reused scratch — a reversal
+// there would leave the buffer holding a field nothing wrote.
+func binaryUint(bo binary.ByteOrder, field []byte) uint64 {
+	switch len(field) {
+	case 2:
+		return uint64(bo.Uint16(field))
+	case 4:
+		return uint64(bo.Uint32(field))
+	case 8:
+		return bo.Uint64(field)
+	}
+	var buf [8]byte
+	tail := buf[8-len(field):]
+	copy(tail, field)
+	orderBinaryBytes(bo, tail)
+	return binary.BigEndian.Uint64(buf[:])
+}
+
 // putBinaryUint writes the low 8*len(field) bits of raw into field in the
-// order bo declares. field must be 2, 4 or 8 bytes; the 16-byte case belongs
-// to the [math/big.Int] writers and goes through [orderBinaryBytes].
+// order bo declares. field must be 1 to 8 bytes; the 16-byte case belongs to
+// the [math/big.Int] writers and goes through [orderBinaryBytes].
+//
+// It is the inverse of [binaryUint] and takes the same route for the widths
+// [binary.ByteOrder] has no accessor for.
 func putBinaryUint(bo binary.ByteOrder, field []byte, raw uint64) {
 	switch len(field) {
 	case 2:
 		bo.PutUint16(field, uint16(raw))
 	case 4:
 		bo.PutUint32(field, uint32(raw))
-	default:
+	case 8:
 		bo.PutUint64(field, raw)
+	default:
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], raw)
+		copy(field, buf[8-len(field):])
+		orderBinaryBytes(bo, field)
 	}
 }
 
@@ -2067,6 +2277,43 @@ func (e BinaryRangeError) Error() string {
 	return fmt.Sprintf(
 		"value %s does not fit a %d-digit %s binary field of %d bytes under %s",
 		e.Value, e.Digits, e.Signedness, e.Width, e.Truncation,
+	)
+}
+
+// BinaryAccessorRangeError is returned when a stored binary value is legal for
+// the field it came from but too wide for the Go type the accessor returns. It
+// is a read-side error only; a writer is handed a Go value and can always widen
+// it into the field.
+//
+// It is reachable only where [Encoding.Binary] gives a field more bytes than
+// the accessor's own type — [BinarySizeFull] makes every field of 18 digits or
+// fewer eight bytes, so a [Reader.ReadComp5Int16] on such a file is reading an
+// eight-byte field into an int16, and TRUNC(BIN) puts no decimal bound on what
+// that field may hold. Under [TruncStd] it cannot arise: the digit count the
+// accessor accepts is chosen so its decimal range fits the type.
+//
+// The remedy is the wider accessor of the same family —
+// [Reader.ReadComp5Int64] or [Reader.ReadComp5Big] — never a narrower field.
+// This error exists so that the alternative, silently truncating the high bytes
+// away, is not what a caller gets.
+//
+// It is distinct from [BinaryRangeError] because the two say opposite things
+// about the file: a BinaryRangeError says the bytes are wrong for the field
+// (usually a wrong [Encoding.ByteOrder]), and this says the bytes are right and
+// the accessor is too narrow to hand them over.
+type BinaryAccessorRangeError struct {
+	// Value is the decimal spelling of the value that was read.
+	Value string
+	// Width is the storage width of the field, in bytes.
+	Width int
+	// Bits is the bit width of the Go type the accessor returns.
+	Bits int
+}
+
+func (e BinaryAccessorRangeError) Error() string {
+	return fmt.Sprintf(
+		"value %s read from a %d-byte binary field does not fit the %d-bit accessor",
+		e.Value, e.Width, e.Bits,
 	)
 }
 

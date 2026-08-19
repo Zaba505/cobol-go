@@ -83,6 +83,16 @@ const (
 // an item whose PICTURE carries S, overpunched into the last digit byte.
 const testRecordBalanceSign = SignTrailing
 
+// testRecordSeqWidth is SEQ's storage width. The staircase is stated rather
+// than taken from an encoding because testRecordWidth has to be one number: the
+// record is read and written under [GnuCOBOLASCII] and [IBMEnterprise] alike
+// throughout these tests, and its byte vectors are written out by hand.
+//
+// The two agree at four digits — which is exactly the property that keeps one
+// number honest, and is why TestTestRecordWidthHoldsUnderEveryEncodingItUses
+// asserts it rather than leaving it to be noticed when a vector stops matching.
+var testRecordSeqWidth = BinarySize248.width(testRecordSeqDigits)
+
 // testRecordWidth is the record's length in bytes, zoned, packed, binary and
 // floating point fields included. SEQ contributes two bytes and not four: a
 // binary field's width is a staircase in its digit count, not the digit count
@@ -94,7 +104,7 @@ const testRecordBalanceSign = SignTrailing
 var testRecordWidth = testRecordIDWidth + testRecordNameWidth + testRecordCodeWidth +
 	testRecordRawWidth + packedWidth(testRecordAmountDigits) + packedWidth(testRecordQtyDigits) +
 	comp6Width(testRecordUnitsDigits) +
-	binaryWidth(testRecordSeqDigits) + comp1Width + comp2Width +
+	testRecordSeqWidth + comp1Width + comp2Width +
 	zonedWidth(testRecordBalanceDigits, testRecordBalanceSign) +
 	zonedWidth(testRecordCountDigits, SignUnsigned)
 
@@ -176,15 +186,39 @@ func (r *testRecord) UnmarshalCOBOL(rd *Reader) error {
 	return err
 }
 
-// binaryEncoding returns an encoding whose byte order is bo. Byte order is the
-// only [Encoding] axis a binary field reads, and the named bundles cannot be
-// used for the little-endian case: [MicroFocusASCII] declares
-// [binary.NativeEndian], which is whatever the machine running the test
-// happens to be.
+// binaryEncoding returns an encoding whose byte order is bo and whose binary
+// size staircase is [BinarySize248]. Those are the two [Encoding] axes a binary
+// field reads, and the named bundles cannot be used for either: the
+// little-endian case has no bundle, since [MicroFocusASCII] declares
+// [binary.NativeEndian] and that is whatever the machine running the test
+// happens to be, and [GnuCOBOLASCII] declares [BinarySize1248] where the byte
+// vectors below are written for 2-4-8.
+//
+// The staircase is stated rather than inherited so that the vectors say what
+// they mean: a test that asserts a four-digit field is two bytes is asserting
+// something about 2-4-8, and must not silently start asserting it about
+// whatever a bundle happens to carry. Use [staircaseEncoding] to vary it.
 func binaryEncoding(bo binary.ByteOrder) Encoding {
+	return staircaseEncoding(bo, BinarySize248)
+}
+
+// staircaseEncoding is [binaryEncoding] with the width staircase stated too. It
+// is what the tests that walk all four staircases use.
+func staircaseEncoding(bo binary.ByteOrder, b BinarySize) Encoding {
 	enc := GnuCOBOLASCII()
 	enc.ByteOrder = bo
+	enc.Binary = b
 	return enc
+}
+
+// binarySizes is every staircase [BinarySize] declares, in declaration order.
+// A test that walks it covers the axis exhaustively, so a fifth staircase is
+// covered by every such walk the day it is added.
+var binarySizes = []BinarySize{
+	BinarySize248,
+	BinarySize1248,
+	BinarySizeSmallest,
+	BinarySizeFull,
 }
 
 // binaryOrders is the pair every binary test runs both of: the same field in
@@ -2740,7 +2774,7 @@ func TestReaderReadBinary(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, tc.want, got)
 				require.Equal(t, int64(len(src)), r.Offset())
-				require.Equal(t, len(src), binaryWidth(tc.digits))
+				require.Equal(t, len(src), enc.Binary.width(tc.digits))
 
 				if tc.digits <= maxBinaryInt32Digits {
 					r32, err := NewReader(bytes.NewReader(src), enc)
@@ -2900,42 +2934,270 @@ func TestReaderReadBinaryBig(t *testing.T) {
 	}
 }
 
-// TestReaderReadBinaryWidth pins the width staircase itself: PIC 9(5) COMP is
-// four bytes and not five, and a wrong step here shifts every later field in
-// the record.
+// binaryWidthTable is every staircase's width at every digit count 1-31,
+// transcribed from codec/SPEC.md, "Binary widths by digit count" rather than
+// computed, so that it checks the implementation instead of restating it.
+//
+// It is indexed [digits] and holds one row per member of binarySizes, in the
+// same order. Index 0 is unused: a binary item of no digits does not exist.
+var binaryWidthTable = func() [maxBinaryDigits + 1][4]int {
+	// rows are the SPEC table's own rows: the inclusive digit range, then
+	// the width under 2-4-8, 1-2-4-8, 1--8 and full.
+	rows := []struct {
+		lo, hi int
+		widths [4]int
+	}{
+		{lo: 1, hi: 2, widths: [4]int{2, 1, 1, 8}},
+		{lo: 3, hi: 4, widths: [4]int{2, 2, 2, 8}},
+		{lo: 5, hi: 6, widths: [4]int{4, 4, 3, 8}},
+		{lo: 7, hi: 9, widths: [4]int{4, 4, 4, 8}},
+		{lo: 10, hi: 11, widths: [4]int{8, 8, 5, 8}},
+		{lo: 12, hi: 14, widths: [4]int{8, 8, 6, 8}},
+		{lo: 15, hi: 16, widths: [4]int{8, 8, 7, 8}},
+		{lo: 17, hi: 18, widths: [4]int{8, 8, 8, 8}},
+		{lo: 19, hi: 31, widths: [4]int{16, 16, 16, 16}},
+	}
+	var t [maxBinaryDigits + 1][4]int
+	for _, row := range rows {
+		for d := row.lo; d <= row.hi; d++ {
+			t[d] = row.widths
+		}
+	}
+	return t
+}()
+
+// TestReaderReadBinaryWidth pins the width staircases themselves against the
+// SPEC's table, at every digit count and through the reader rather than through
+// the width function alone: PIC 9(5) COMP is four bytes and not five, and a
+// wrong step here shifts every later field in the record.
 func TestReaderReadBinaryWidth(t *testing.T) {
 	t.Parallel()
 
-	testCases := []struct {
-		digits int
-		want   int
-	}{
-		{digits: 1, want: 2},
-		{digits: 2, want: 2},
-		{digits: 4, want: 2},
-		{digits: 5, want: 4},
-		{digits: 9, want: 4},
-		{digits: 10, want: 8},
-		{digits: 18, want: 8},
-		{digits: 19, want: 16},
-		{digits: 31, want: 16},
+	for digits := 1; digits <= maxBinaryDigits; digits++ {
+		for i, size := range binarySizes {
+			want := binaryWidthTable[digits][i]
+
+			t.Run(strconv.Itoa(digits)+" digits, "+size.String(), func(t *testing.T) {
+				t.Parallel()
+
+				require.Equal(t, want, size.width(digits))
+
+				src := make([]byte, want)
+				enc := staircaseEncoding(binary.BigEndian, size)
+				r, err := NewReader(bytes.NewReader(src), enc)
+				require.NoError(t, err)
+
+				_, err = r.ReadBinaryBig(digits)
+				require.NoError(t, err)
+				require.Equal(t, int64(want), r.Offset())
+			})
+		}
 	}
+}
 
-	for _, tc := range testCases {
-		t.Run(strconv.Itoa(tc.digits)+" digits", func(t *testing.T) {
-			t.Parallel()
+// TestBinaryOneToTwoDigitFork is the row the whole axis exists for, stated on
+// its own because it is the one a caller loses a record to: PIC S9(2) COMP is
+// two bytes under IBM's staircase and one under GnuCOBOL's default, and neither
+// reading of the other's bytes is an error — the field after it simply starts a
+// byte out.
+func TestBinaryOneToTwoDigitFork(t *testing.T) {
+	t.Parallel()
 
-			require.Equal(t, tc.want, binaryWidth(tc.digits))
+	const digits = 2
 
-			src := make([]byte, tc.want)
-			r, err := NewReader(bytes.NewReader(src), binaryEncoding(binary.BigEndian))
-			require.NoError(t, err)
+	t.Run("two bytes under 2-4-8", func(t *testing.T) {
+		t.Parallel()
 
-			_, err = r.ReadBinaryBig(tc.digits)
-			require.NoError(t, err)
-			require.Equal(t, int64(tc.want), r.Offset())
-		})
+		enc := staircaseEncoding(binary.BigEndian, BinarySize248)
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteBinaryInt16(-42, digits, Signed))
+		require.Equal(t, []byte{0xFF, 0xD6}, buf.Bytes())
+
+		r, err := NewReader(bytes.NewReader(buf.Bytes()), enc)
+		require.NoError(t, err)
+		got, err := r.ReadBinaryInt16(digits)
+		require.NoError(t, err)
+		require.Equal(t, int16(-42), got)
+		require.EqualValues(t, 2, r.Offset())
+	})
+
+	t.Run("one byte under 1-2-4-8", func(t *testing.T) {
+		t.Parallel()
+
+		enc := staircaseEncoding(binary.BigEndian, BinarySize1248)
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteBinaryInt16(-42, digits, Signed))
+		require.Equal(t, []byte{0xD6}, buf.Bytes())
+
+		r, err := NewReader(bytes.NewReader(buf.Bytes()), enc)
+		require.NoError(t, err)
+		got, err := r.ReadBinaryInt16(digits)
+		require.NoError(t, err)
+		require.Equal(t, int16(-42), got)
+		require.EqualValues(t, 1, r.Offset())
+	})
+
+	t.Run("the two disagree by a byte and neither complains", func(t *testing.T) {
+		t.Parallel()
+
+		// Written under IBM, read under GnuCOBOL's default: the reader takes
+		// one byte, gets a plausible number, and leaves a byte behind. That
+		// leftover byte is the shift every following field inherits, and it is
+		// exactly what nothing here can detect — which is why the staircase is
+		// a declared axis rather than an assumption.
+		wide, err := NewBytesWriter(nil, staircaseEncoding(binary.BigEndian, BinarySize248))
+		require.NoError(t, err)
+		require.NoError(t, wide.WriteBinaryInt16(1, digits, Signed))
+		require.Equal(t, []byte{0x00, 0x01}, wide.Bytes())
+
+		r, err := NewBytesReader(wide.Bytes(), staircaseEncoding(binary.BigEndian, BinarySize1248))
+		require.NoError(t, err)
+		got, err := r.ReadBinaryInt16(digits)
+		require.NoError(t, err)
+		require.Equal(t, int16(0), got, "the high byte read as the whole field")
+		require.EqualValues(t, 1, r.Offset(), "one byte of the field is left for the next one")
+	})
+}
+
+// TestBinaryWidthBoundsEveryStaircase pins the claim [binaryWidth] is built on
+// and that [maxNumericWidth] inherits: BinarySizeFull is the widest staircase at
+// every digit count, so the bound the scratch buffer is derived from covers a
+// field under any of them.
+func TestBinaryWidthBoundsEveryStaircase(t *testing.T) {
+	t.Parallel()
+
+	for digits := 1; digits <= maxBinaryDigits; digits++ {
+		widest := 0
+		for _, size := range binarySizes {
+			widest = max(widest, size.width(digits))
+		}
+		require.Equalf(t, widest, binaryWidth(digits),
+			"binaryWidth(%d) is not the widest width any staircase gives it", digits)
 	}
+}
+
+// TestTestRecordWidthHoldsUnderEveryEncodingItUses guards the one number
+// testRecordWidth is: the fixture is read and written under [GnuCOBOLASCII] and
+// [IBMEnterprise] alike, whose staircases differ, and its hand-written byte
+// vectors are only valid while the two agree at SEQ's digit count.
+func TestTestRecordWidthHoldsUnderEveryEncodingItUses(t *testing.T) {
+	t.Parallel()
+
+	for _, enc := range []Encoding{GnuCOBOLASCII(), IBMEnterprise()} {
+		require.Equalf(t, testRecordSeqWidth, enc.Binary.width(testRecordSeqDigits),
+			"testRecord is used under %s, which gives SEQ a different width", enc.Binary)
+	}
+}
+
+// TestReaderRejectsAFieldWiderThanTheAccessor covers the one hazard
+// [BinarySizeFull] adds: the field is eight bytes whatever its digit count, so a
+// COMP-5 value legal for the field may be too wide for the int16 or int32 the
+// accessor returns. Truncating it silently would be exactly the class of bug
+// this package exists to prevent, so it is a [BinaryAccessorRangeError].
+func TestReaderRejectsAFieldWiderThanTheAccessor(t *testing.T) {
+	t.Parallel()
+
+	// 0x0001E240 is 123456: beyond an int16, well inside the eight-byte
+	// field BinarySizeFull gives a four-digit item.
+	src := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xE2, 0x40}
+
+	t.Run("int16 accessor", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewBytesReader(src, staircaseEncoding(binary.BigEndian, BinarySizeFull))
+		require.NoError(t, err)
+
+		_, err = r.ReadComp5Int16(4)
+
+		var rangeErr BinaryAccessorRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, "123456", rangeErr.Value)
+		require.Equal(t, 8, rangeErr.Width)
+		require.Equal(t, 16, rangeErr.Bits)
+
+		// Stamped at the offset the field starts at, as every binary range
+		// error is.
+		var offErr *OffsetError
+		require.ErrorAs(t, err, &offErr)
+		require.Zero(t, offErr.Offset)
+	})
+
+	t.Run("the wider accessor of the same family reads it", func(t *testing.T) {
+		t.Parallel()
+
+		r, err := NewBytesReader(src, staircaseEncoding(binary.BigEndian, BinarySizeFull))
+		require.NoError(t, err)
+
+		got, err := r.ReadComp5Int64(4)
+		require.NoError(t, err)
+		require.Equal(t, int64(123456), got)
+	})
+
+	t.Run("a value that does fit is not rejected", func(t *testing.T) {
+		t.Parallel()
+
+		fits := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0xD2} // 1234
+		r, err := NewBytesReader(fits, staircaseEncoding(binary.BigEndian, BinarySizeFull))
+		require.NoError(t, err)
+
+		got, err := r.ReadComp5Int16(4)
+		require.NoError(t, err)
+		require.Equal(t, int16(1234), got)
+	})
+
+	t.Run("negative values are checked at the low end too", func(t *testing.T) {
+		t.Parallel()
+
+		// -123456 in two's complement over eight bytes.
+		neg := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0x1D, 0xC0}
+		r, err := NewBytesReader(neg, staircaseEncoding(binary.BigEndian, BinarySizeFull))
+		require.NoError(t, err)
+
+		_, err = r.ReadComp5Int16(4)
+
+		var rangeErr BinaryAccessorRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, "-123456", rangeErr.Value)
+	})
+
+	t.Run("int32 accessor", func(t *testing.T) {
+		t.Parallel()
+
+		// 0x0000000100000000 is 4294967296, beyond an int32.
+		wide := []byte{0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00}
+		r, err := NewBytesReader(wide, staircaseEncoding(binary.BigEndian, BinarySizeFull))
+		require.NoError(t, err)
+
+		_, err = r.ReadComp5Int32(9)
+
+		var rangeErr BinaryAccessorRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, 32, rangeErr.Bits)
+		require.Contains(t, err.Error(), "does not fit the 32-bit accessor")
+	})
+
+	t.Run("TRUNC(STD) reaches its own range check first", func(t *testing.T) {
+		t.Parallel()
+
+		// The same bytes under TRUNC(STD) are outside PIC S9(4)'s decimal
+		// range, which is a statement about the field rather than about the
+		// accessor — so that error wins, and says so.
+		r, err := NewBytesReader(src, staircaseEncoding(binary.BigEndian, BinarySizeFull))
+		require.NoError(t, err)
+
+		_, err = r.ReadBinaryInt16(4)
+
+		var rangeErr BinaryRangeError
+		require.ErrorAs(t, err, &rangeErr)
+		require.Equal(t, TruncStd, rangeErr.Truncation)
+
+		var accessorErr BinaryAccessorRangeError
+		require.NotErrorAs(t, err, &accessorErr)
+	})
 }
 
 func TestReaderReadBinaryErrors(t *testing.T) {
@@ -3630,7 +3892,7 @@ func TestUnmarshal(t *testing.T) {
 		t.Parallel()
 
 		var got testRecord
-		err := Unmarshal(Encoding{Charset: ASCII(), ByteOrder: binary.BigEndian, Float: FloatIEEE}, nil, &got)
+		err := Unmarshal(Encoding{Charset: ASCII(), ByteOrder: binary.BigEndian, Float: FloatIEEE, Binary: BinarySize248}, nil, &got)
 
 		var encErr EncodingError
 		require.ErrorAs(t, err, &encErr)
@@ -4399,6 +4661,15 @@ func TestNewBytesReaderValidatesExactlyAsNewReader(t *testing.T) {
 			name: "no float format",
 			enc:  Encoding{Charset: ASCII(), Sign: SignASCIIZone37, ByteOrder: binary.BigEndian},
 		},
+		{
+			name: "no binary size",
+			enc: Encoding{
+				Charset:   ASCII(),
+				Sign:      SignASCIIZone37,
+				ByteOrder: binary.BigEndian,
+				Float:     FloatIEEE,
+			},
+		},
 		{name: "complete encoding", enc: GnuCOBOLASCII()},
 	}
 
@@ -4726,7 +4997,7 @@ func TestResetDoesNotAllocate(t *testing.T) {
 // [Reader.fromBytes] would make the zero Reader read as an *empty record* and
 // answer [io.EOF] — a plausible answer from a Reader whose [Encoding] was never
 // validated — and the zero Writer would go further and *succeed*, appending
-// bytes under an encoding with none of its four axes set. Both panic instead,
+// bytes under an encoding with none of its five axes set. Both panic instead,
 // exactly as they did before there was a byte-backed path, and the panic is the
 // nil interface being used rather than anything this package raises.
 func TestZeroValueIsStillUnusable(t *testing.T) {

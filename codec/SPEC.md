@@ -88,12 +88,19 @@ may weigh against ergonomics.
 
 ---
 
-## The Four Axes of an Encoding
+## The Five Axes of an Encoding
 
-Four settings must be known before a single byte of a data file can be
+Five settings must be known before a single byte of a data file can be
 interpreted. None of them is recoverable from the file itself with certainty,
 and **every one of them fails silently when wrong** — a wrong value yields a
 plausible but incorrect result rather than an error.
+
+The fifth, binary size, is the one that is baked into the file rather than
+merely applied to it: it decides how many bytes a binary field occupies, so a
+wrong value yields a plausible but incorrect *record* rather than a plausible
+but incorrect *number*. It is no more recoverable than the other four — the
+bytes of a two-byte field and of the one-byte field beside it are the same
+bytes — and it fails the same way for the same reason.
 
 | Axis | Values | What it governs |
 |---|---|---|
@@ -101,6 +108,7 @@ plausible but incorrect result rather than an error.
 | **Sign convention** | `SignEBCDIC`, `SignASCIIZone37`, `SignTranslatedEBCDIC`, `SignRealia` | How an overpunched sign is spelled in a zoned decimal byte |
 | **Byte order** | Big-endian, little-endian (native) | `COMP`/`COMP-4`/`COMP-5` binary integers |
 | **Float format** | IEEE-754, IBM HFP | `COMP-1`/`COMP-2` |
+| **Binary size** | `2-4-8`, `1-2-4-8`, `1--8`, `full` | The byte width a `COMP`/`COMP-4`/`COMP-5` item of a given digit count occupies |
 
 These are **independent axes, not one "dialect" flag.** The combination that real
 files hit most often and that no compiler produces is a mainframe-written file
@@ -109,20 +117,28 @@ binary. A boolean "is it EBCDIC" cannot express it.
 
 ### Normative: caller-declared, no default
 
-> `codec` **MUST** require all four axes from the caller and **MUST NOT** supply
+> `codec` **MUST** require all five axes from the caller and **MUST NOT** supply
 > a default for any of them. Each **MUST** have an invalid zero value, and
 > construction **MUST** fail with a typed error naming the missing axis. Named
 > bundles (`IBMEnterprise()`, `MicroFocusASCII()`, `GnuCOBOLASCII()`,
 > `ConvertedFromEBCDIC()`) **MAY** be provided as constructors that expand to a
-> complete setting of all four — so that a caller *states* an assumption in one
+> complete setting of all five — so that a caller *states* an assumption in one
 > call — but a bundle **MUST NOT** be applied implicitly.
 
-This is a requirement on #72 and #77, not a style preference. The justification
-is in [Failure Modes](#failure-modes-silent-vs-loud): a library that guesses any
-of these four can return wrong data with no indication at any layer, and the
-caller has no way to discover it. Requiring the declaration converts an
-undetectable data-corruption bug into a compile-time or construction-time
-question.
+This is a requirement on #72, #77 and #128, not a style preference. The
+justification is in [Failure Modes](#failure-modes-silent-vs-loud): a library
+that guesses any of these five can return wrong data with no indication at any
+layer, and the caller has no way to discover it. Requiring the declaration
+converts an undetectable data-corruption bug into a compile-time or
+construction-time question.
+
+Binary size is the one axis of the five that changes how many bytes a field
+*occupies* rather than what its bytes mean, so a wrong setting shifts every
+field after the first binary item rather than corrupting one value. That makes
+it loud-indirectly (a record length mismatch) for a caller who knows the record
+length and silent for one who does not — a `Reader` never knows it, since a
+record type reads its own — which is why it is declared here beside the four
+that are silent outright.
 
 ---
 
@@ -228,7 +244,7 @@ size model for elementary items.
 | `DISPLAY`, numeric-edited | — | number of character positions of the edited picture | **yes** |
 | `PACKED-DECIMAL` | `COMP-3`, `COMPUTATIONAL-3` | `ceil((digits + 1) / 2)` | no |
 | `COMP-6` (GnuCOBOL, Micro Focus) | — | `ceil(digits / 2)` — packed, **no sign nibble** | no |
-| `BINARY` | `COMP`, `COMP-4`, `COMPUTATIONAL` | 2 / 4 / 8 by digit count (below) | no |
+| `BINARY` | `COMP`, `COMP-4`, `COMPUTATIONAL` | a staircase in the digit count, per the declared binary size (below) | no |
 | `COMP-5` | native binary | same widths, different range semantics | no |
 | `COMP-1` | `FLOAT-SHORT` | 4 | no |
 | `COMP-2` | `FLOAT-LONG` | 8 | no |
@@ -237,20 +253,46 @@ size model for elementary items.
 
 ### Binary widths by digit count
 
-| `digits` | IBM Enterprise COBOL | GnuCOBOL `binary-size: 1-2-4-8` | GnuCOBOL `binary-size: 2-4-8` |
-|---|---|---|---|
-| 1–2 | 2 | **1** | 2 |
-| 3–4 | 2 | 2 | 2 |
-| 5–9 | 4 | 4 | 4 |
-| 10–18 | 8 | 8 | 8 |
-| 19–31 | 16 (`ARITH(EXTEND)`) | 16 | 16 |
+There are **four** staircases, not one, and which of them applies is a property
+of the compiler that produced the file. All four are tabulated here because all
+four are declarable: `Encoding.Binary` is the axis, and its values are named
+after GnuCOBOL's `binary-size` spellings.
+
+| `digits` | `2-4-8` | `1-2-4-8` | `1--8` | `full` |
+|---|---|---|---|---|
+| 1–2 | 2 | **1** | **1** | **8** |
+| 3–4 | 2 | 2 | **2** | **8** |
+| 5–6 | 4 | 4 | **3** | **8** |
+| 7–9 | 4 | 4 | **4** | **8** |
+| 10–11 | 8 | 8 | **5** | 8 |
+| 12–14 | 8 | 8 | **6** | 8 |
+| 15–16 | 8 | 8 | **7** | 8 |
+| 17–18 | 8 | 8 | **8** | 8 |
+| 19–31 | 16 (`ARITH(EXTEND)`) | 16 | 16 | 16 |
+
+- **`2-4-8`** is IBM Enterprise COBOL's table, which is also Micro Focus's and
+  GnuCOBOL's `binary-size: 2-4-8`.
+- **`1-2-4-8`** is GnuCOBOL's **default**, and gives a 1–2 digit item one byte.
+- **`1--8`** is GnuCOBOL's `binary-size: 1--8`: the smallest byte count from 1 to
+  8 whose *signed* range holds `digits` decimal digits, and sixteen beyond
+  eighteen digits, which no byte count from 1 to 8 can hold. It is the only
+  staircase with 3, 5, 6 and 7-byte steps, so it is the only one whose fields do
+  not all land on a power-of-two width.
+- **`full`** is GnuCOBOL's `binary-size: full`: always 8 bytes below 19 digits.
 
 The 1–2 digit row is a real, silent fork: `PIC S9(2) COMP` is **two** bytes under
 IBM and **one** byte under GnuCOBOL's default `binary-size`. Because it changes
 the width, it desynchronizes every field after it in the record — which makes it
 one of the few silent settings that fails *loudly* in practice, via a record
-length mismatch. GnuCOBOL also offers `binary-size: 1--8` (smallest width that
-holds `digits`) and `binary-size: full` (always 8).
+length mismatch, but only for a consumer that knows the record's length
+independently. A `Reader` does not: each record type reads its own fields, so a
+one-byte shift surfaces, if at all, as a validation failure several fields later.
+That is why the staircase is a required axis rather than an assumption.
+
+> **Normative.** A reader and a writer **MUST** take the staircase from the
+> caller-declared axis and **MUST NOT** assume one. Under `full` a field may be
+> wider than the Go type a fixed-width accessor returns; such an accessor
+> **MUST** report a typed error rather than truncate the high bytes away.
 
 ### Group items, OCCURS, and SYNCHRONIZED
 
@@ -772,7 +814,7 @@ Worked example, the value 1.0 as `COMP-1`:
 
 An HFP 1.0 read as IEEE is 9.0. Not an error, not a NaN, not out of range — a
 plausible number that will pass every sanity check downstream. This is the
-cleanest illustration in this document of why the four axes are caller-declared.
+cleanest illustration in this document of why the five axes are caller-declared.
 
 The only weak signals available: HFP produces no NaN or infinity, so IEEE
 exponent bits of all-ones are evidence of a misread; and HFP's exponent range
@@ -823,7 +865,7 @@ while alphanumeric data cannot.
 | Zoned sign convention | `SignEBCDIC` | `SignASCIIZone37` (`display-sign`) | `SignASCIIZone37` |
 | `SIGN SEPARATE` bytes | `4E`/`60` | `2B`/`2D` | `2B`/`2D` |
 | Binary byte order | big-endian | `binary-byteorder: big-endian \| native` | native; big-endian under IBM directives |
-| Binary widths | 2/4/8 | `binary-size` (`1-2-4-8` default) | 2/4/8, directive-dependent |
+| Binary widths | `2-4-8` | `binary-size`: `1-2-4-8` (default), `2-4-8`, `1--8`, `full` | `2-4-8`, directive-dependent |
 | Binary range | `TRUNC(STD\|BIN\|OPT)` | `binary-truncate: yes \| no` | directive-dependent |
 | `COMP-1`/`COMP-2` | HFP (`FLOAT(HEX)`); IEEE under `FLOAT(NATIVE)` | IEEE | IEEE |
 | `COMP-3` layout | identical | identical | identical |
@@ -842,11 +884,11 @@ which compiler is involved at all:
 | **Zoned sign convention** | **the file** | `SignTranslatedEBCDIC` is produced by no compiler — it is produced by a *conversion* |
 | **Binary byte order** | **the file** | Written by whatever wrote it, read by something else |
 | **Float format** | **the file** | Same |
+| **Binary widths** | **the file** | Fixed at compile time, and therefore baked into the record layout of every file that compiler wrote — so for anyone *reading* one it is a property of the file, exactly as byte order is |
 | `TRUNC` semantics | the compiler | Affects what values can be present, not how bytes are read |
-| Binary widths | the compiler | Fixed at compile time, baked into the record layout |
 | `COMP-6` support | the compiler | The copybook either uses it or does not |
 
-The top four are why a "dialect" is a *bundle of defaults a caller may choose*
+The top five are why a "dialect" is a *bundle of defaults a caller may choose*
 and never a property the library can infer. `ConvertedFromEBCDIC()` — ASCII
 characters, translated-EBCDIC signs, big-endian binary — is a real and common
 combination that **no compiler produces**, and it is only expressible because
@@ -1095,13 +1137,14 @@ Two collisions worth naming so they are not mistaken for errors:
 |---|---|
 | [From PICTURE to Attributes](#from-picture-to-attributes) | #71 `picture` |
 | [Storage Widths](#storage-widths) | #71, #79 `copybook` |
-| [The Four Axes](#the-four-axes-of-an-encoding), alphanumeric | #72 `codec` |
+| [The Five Axes](#the-five-axes-of-an-encoding), alphanumeric | #72 `codec` |
 | [Charset as a First-Class Axis](#charset-as-a-first-class-axis), [Zoned Sign Conventions](#zoned-sign-conventions) | #77 `codec` |
 | [Zoned Decimal](#zoned-decimal-usage-display) | #73 `codec` |
 | [Packed Decimal](#packed-decimal-comp-3--packed-decimal) | #74 `codec` |
 | [`COMP-6`](#comp-6) | #99 `codec` |
 | [Fault precedence](#fault-precedence) | #110 `codec` |
 | [Binary](#binary-comp--comp-4--binary--comp-5) | #75 `codec` |
+| [Binary widths by digit count](#binary-widths-by-digit-count) | #94 `copybook`, #128 `codec` |
 | [Floating Point](#floating-point-comp-1--comp-2) | #76 `codec` |
 | Record tree, offsets, `OCCURS DEPENDING ON` | #78, #79, #80 `copybook` |
 

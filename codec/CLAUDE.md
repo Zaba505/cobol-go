@@ -18,21 +18,25 @@ Appendix C maps each of its sections to the story that implements it.
 
 ## The rule that matters: no default encoding, ever
 
-[Encoding] carries the four axes — `Charset`, `Sign`, `ByteOrder`, `Float` —
-and **every one is required with an invalid zero value**. `Charset` and
-`binary.ByteOrder` are interfaces so nil is detectable; `SignConvention` and
-`FloatFormat` have `…Unset` zero values.
+[Encoding] carries the five axes — `Charset`, `Sign`, `ByteOrder`, `Float`,
+`Binary` — and **every one is required with an invalid zero value**. `Charset`
+and `binary.ByteOrder` are interfaces so nil is detectable; `SignConvention`,
+`FloatFormat` and `BinarySize` have `…Unset` zero values.
 
-All four fail *silently* when wrong: the wrong value yields a plausible but
+All five fail *silently* when wrong: the wrong value yields a plausible but
 incorrect number rather than an error, at any layer, with no way for the caller
-to discover it. So:
+to discover it. `Binary` fails one step worse — it changes how many *bytes* a
+binary field occupies, so the record shifts rather than one value going wrong,
+and a `Reader` cannot detect that because it never knows a record's length. So:
 
 - Never add a default, a fallback, or an inference from the bytes to any axis.
 - Never let a new constructor take fewer than a complete `Encoding`.
 - The named bundles (`IBMEnterprise`, `MicroFocusASCII`, `GnuCOBOLASCII`,
   `ConvertedFromEBCDIC`) are values a caller passes, never something the package
-  applies on its own. A new bundle must fill in all four fields and must pass
-  `Encoding.Validate` — `TestDialects` asserts that.
+  applies on its own. A new bundle must fill in all five fields and must pass
+  `Encoding.Validate` — `TestDialects` asserts that. `GnuCOBOLASCII` is
+  `BinarySize1248`, because that is GnuCOBOL's default `binary-size`; every
+  other bundle is `BinarySize248`.
 
 ## Standard library only
 
@@ -107,7 +111,8 @@ Leaves are typed values (`EncodingError`, `FieldWidthError`,
 `ZonedSeparateSignError`, `ZonedDigitCountError`, `ZonedRangeError`,
 `PackedDigitCountError`, `PackedPadError`,
 `PackedDigitError`, `PackedSignError`, `PackedRangeError`,
-`BinaryDigitCountError`, `BinaryRangeError`, `FloatRangeError`) or stdlib
+`BinaryDigitCountError`, `BinaryRangeError`, `BinaryAccessorRangeError`,
+`FloatRangeError`) or stdlib
 sentinels
 (`io.EOF`, `io.ErrUnexpectedEOF`, `io.ErrShortWrite`, `ErrNilValue`). Callers
 use `errors.Is` for the cause and `errors.As` for the offset; tests assert both.
@@ -223,7 +228,7 @@ are their first callers.
   obvious and cost a review round. "Nil stream means read the bytes" makes the
   **zero value usable**: a `Reader{}` nobody constructed reads as an empty
   record and answers `io.EOF`, and a `Writer{}` goes further and *succeeds*,
-  appending bytes under an `Encoding` with none of its four axes set. Both are
+  appending bytes under an `Encoding` with none of its five axes set. Both are
   exactly the silent failure the no-default rule at the top of this file exists
   to prevent. With the field they take the stream arm and fail on the nil
   interface, as they did before there were two kinds of source, and
@@ -342,10 +347,41 @@ same kind of thing, so they are declared in two different places:
   has for a wrong byte order — and it must not be dropped to make a value
   "just read".
 
-Width is `binaryWidth`, a staircase (2/4/8/16) in the digit count and never the
-digit count itself. GnuCOBOL's `binary-size: 1-2-4-8` one-byte variant is not
-implemented; a copybook compiled under it desynchronizes rather than reading
-wrongly, which the SPEC classifies as loud-indirectly.
+Width has a **third** fork, and unlike the other two it is an `Encoding` axis:
+
+- **The width staircase** is `Encoding.Binary`, a `BinarySize`. There are four —
+  `2-4-8`, `1-2-4-8`, `1--8` and `full` — and they disagree from the first digit
+  count: `PIC S9(2) COMP` is two bytes under the first and one under the second.
+  `BinarySize.width(digits)` is the whole of the size model, and **nothing
+  outside a test may call `binaryWidth`**, which is now only the *bound*
+  `maxNumericWidth`'s derivation is checked against (`BinarySizeFull`'s
+  staircase, the widest of the four) and reads 8 for a two-digit item. Every
+  byte path called it before the axis existed, so that is the mistake to expect;
+  `TestBinaryWidthIsNotOnAnyBytePath` walks the AST of every non-test file and
+  fails on a call, rather than leaving the rule to a doc comment.
+  `Reader.readBinaryField`, `Reader.readBinaryBig` and `Writer.binaryField` are
+  the three places the axis is consulted, and encode and decode move together or
+  a round trip silently changes a record's length.
+
+`BinarySize.width`'s `default:` arm returns `maxBinaryFieldWidth` and not the
+2-4-8 staircase. It is unreachable — `Encoding.Validate` rejects an unset or
+unknown axis — and answering with a plausible width would make it a default in
+everything but name, which is what the axis exists to prevent. Sixteen bytes
+fails loudly instead. Do not "simplify" it back to a fallthrough.
+
+`codec.BinarySize` mirrors `copybook.BinarySize` member for member and width for
+width, and cannot be the same type because this package imports only `std`.
+`copybook`'s `TestBinarySizeAgreesWithCodec` pins the two against each other at
+every digit count 1–31, measuring codec's side through `Writer.Offset` so the
+agreement is asserted over public behaviour rather than over a copied table. A
+change to either staircase that is not made to both fails there.
+
+`BinarySizeSmallest` is the one that gives 3, 5, 6 and 7-byte fields, which is
+why `binaryUint`/`putBinaryUint` have a path for widths `binary.ByteOrder` has
+no accessor for, and `BinarySizeFull` is the one that can make a field wider than
+the Go type an accessor returns — that is `BinaryAccessorRangeError`, a read-side
+error saying the bytes are fine and the accessor is too narrow, as against
+`BinaryRangeError` saying the bytes are wrong for the field.
 
 Signedness on the read side is the *method name* (`ReadBinaryUint64` is the
 unsigned reading of the same bytes); on the write side it is the `Signedness`

@@ -6,8 +6,10 @@
 package copybook
 
 import (
+	"math/big"
 	"testing"
 
+	"github.com/Zaba505/cobol-go/codec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1036,6 +1038,76 @@ func TestBinarySizeWidth(t *testing.T) {
 			require.Equal(t, tc.name, tc.size.String())
 			for digits, want := range tc.widths {
 				require.Equal(t, want, tc.size.width(digits), "%d digits", digits)
+			}
+		})
+	}
+}
+
+// TestBinarySizeAgreesWithCodec pins this package's width staircases against
+// [codec]'s, which are a second copy of the same table: `codec` imports nothing
+// outside the standard library, so the enum cannot be shared and the two have to
+// be held together by a test instead.
+//
+// The two halves are measured differently on purpose. This side calls
+// [BinarySize.width] directly, because the test is in the package that owns it.
+// codec's side is measured through the **public** [codec.Writer] — the number of
+// bytes a binary field actually occupies — rather than through its unexported
+// width function, so what is compared is the behaviour a caller gets and not a
+// table that might agree while the byte paths do not.
+//
+// Without this, the two drift silently: a caller taking offsets from a [Layout]
+// and bytes from a [codec.Reader] would get two different records out of one
+// file, and neither package could tell.
+func TestBinarySizeAgreesWithCodec(t *testing.T) {
+	t.Parallel()
+
+	// codecWidthOf reports the width codec gives a binary item of the given
+	// digit count under b, by writing one and asking how far the Writer moved.
+	// WriteBinaryBig is the accessor that spans all 31 digit counts.
+	codecWidthOf := func(t *testing.T, b codec.BinarySize, digits int) int {
+		t.Helper()
+
+		enc := codec.GnuCOBOLASCII()
+		enc.Binary = b
+		w, err := codec.NewBytesWriter(nil, enc)
+		require.NoError(t, err)
+		require.NoError(t, w.WriteBinaryBig(big.NewInt(0), digits, codec.Signed))
+		return int(w.Offset())
+	}
+
+	t.Run("the members line up", func(t *testing.T) {
+		t.Parallel()
+
+		// Same numeric values and same spellings, member for member. A member
+		// added to one enum and not the other fails at the boundary check
+		// below rather than being silently mapped onto a neighbour.
+		for b := BinarySizeUnset; b <= BinarySizeFull; b++ {
+			require.Equalf(t, b.String(), codec.BinarySize(b).String(),
+				"copybook.BinarySize(%d) and codec.BinarySize(%d) are not the same member", int(b), int(b))
+		}
+
+		require.False(t, (BinarySizeFull + 1).valid(),
+			"copybook has gained a staircase this test does not cover")
+
+		// codec has not gained one either: an Encoding carrying the value one
+		// past the last member is refused, which is the public statement that
+		// it names no staircase.
+		enc := codec.GnuCOBOLASCII()
+		enc.Binary = codec.BinarySize(BinarySizeFull + 1)
+		require.Error(t, enc.Validate(),
+			"codec has gained a staircase this test does not cover")
+	})
+
+	for _, size := range []BinarySize{BinarySize248, BinarySize1248, BinarySizeSmallest, BinarySizeFull} {
+		t.Run(size.String(), func(t *testing.T) {
+			t.Parallel()
+
+			// Every digit count a binary item may declare, not a sample of
+			// them: the staircases differ at boundaries, and a sample is how a
+			// boundary moves without anything noticing.
+			for digits := 1; digits <= 31; digits++ {
+				require.Equalf(t, size.width(digits), codecWidthOf(t, codec.BinarySize(size), digits),
+					"copybook and codec disagree about a %d-digit item under %s", digits, size)
 			}
 		})
 	}

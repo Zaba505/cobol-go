@@ -7,6 +7,7 @@ package codec
 
 import (
 	"encoding/binary"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -65,6 +66,27 @@ func TestEncodingValidate(t *testing.T) {
 			enc:       Encoding{Charset: CP037(), Sign: SignEBCDIC, ByteOrder: binary.BigEndian, Float: FloatFormat(42)},
 			wantField: "Float",
 		},
+		{
+			name: "missing binary size",
+			enc: Encoding{
+				Charset:   CP037(),
+				Sign:      SignEBCDIC,
+				ByteOrder: binary.BigEndian,
+				Float:     FloatHFP,
+			},
+			wantField: "Binary",
+		},
+		{
+			name: "unknown binary size",
+			enc: Encoding{
+				Charset:   CP037(),
+				Sign:      SignEBCDIC,
+				ByteOrder: binary.BigEndian,
+				Float:     FloatHFP,
+				Binary:    BinarySize(42),
+			},
+			wantField: "Binary",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -87,6 +109,7 @@ func TestEncodingValidate(t *testing.T) {
 			Sign:      SignASCIIZone37,
 			ByteOrder: binary.LittleEndian,
 			Float:     FloatIEEE,
+			Binary:    BinarySizeSmallest,
 		}
 		require.NoError(t, enc.Validate())
 	})
@@ -108,6 +131,7 @@ func TestDialects(t *testing.T) {
 				Sign:      SignEBCDIC,
 				ByteOrder: binary.BigEndian,
 				Float:     FloatHFP,
+				Binary:    BinarySize248,
 			},
 		},
 		{
@@ -118,6 +142,7 @@ func TestDialects(t *testing.T) {
 				Sign:      SignASCIIZone37,
 				ByteOrder: binary.NativeEndian,
 				Float:     FloatIEEE,
+				Binary:    BinarySize248,
 			},
 		},
 		{
@@ -128,6 +153,7 @@ func TestDialects(t *testing.T) {
 				Sign:      SignASCIIZone37,
 				ByteOrder: binary.BigEndian,
 				Float:     FloatIEEE,
+				Binary:    BinarySize1248,
 			},
 		},
 		{
@@ -138,6 +164,7 @@ func TestDialects(t *testing.T) {
 				Sign:      SignTranslatedEBCDIC,
 				ByteOrder: binary.BigEndian,
 				Float:     FloatHFP,
+				Binary:    BinarySize248,
 			},
 		},
 	}
@@ -273,6 +300,35 @@ func TestPackedAndComp6Widths(t *testing.T) {
 			} else {
 				require.Equal(t, packedWidth(tc.digits), comp6Width(tc.digits))
 			}
+		})
+	}
+}
+
+func TestBinarySizeString(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		b    BinarySize
+		want string
+	}{
+		{name: "unset", b: BinarySizeUnset, want: "unset"},
+		{name: "2-4-8", b: BinarySize248, want: "2-4-8"},
+		{name: "1-2-4-8", b: BinarySize1248, want: "1-2-4-8"},
+		{name: "smallest", b: BinarySizeSmallest, want: "1--8"},
+		{name: "full", b: BinarySizeFull, want: "full"},
+		{name: "out of range", b: BinarySize(42), want: "BinarySize(42)"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// The four named spellings are GnuCOBOL's own binary-size values,
+			// and copybook.BinarySize returns the same strings for the same
+			// members; copybook's TestBinarySizeAgreesWithCodec is what holds
+			// the two together.
+			require.Equal(t, tc.want, tc.b.String())
 		})
 	}
 }
@@ -1045,7 +1101,7 @@ func TestNewZonedCodecRequiresCompleteEncoding(t *testing.T) {
 	require.ErrorAs(t, err, &encErr)
 	require.Equal(t, "Charset", encErr.Field)
 
-	_, err = newZonedCodec(Encoding{Charset: ASCII(), ByteOrder: binary.BigEndian, Float: FloatIEEE})
+	_, err = newZonedCodec(Encoding{Charset: ASCII(), ByteOrder: binary.BigEndian, Float: FloatIEEE, Binary: BinarySize248})
 	require.ErrorAs(t, err, &encErr)
 	require.Equal(t, "Sign", encErr.Field)
 
@@ -1058,7 +1114,7 @@ func TestNewZonedCodecRequiresCompleteEncoding(t *testing.T) {
 func TestZonedFieldRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	realia := Encoding{Charset: ASCII(), Sign: SignRealia, ByteOrder: binary.LittleEndian, Float: FloatIEEE}
+	realia := Encoding{Charset: ASCII(), Sign: SignRealia, ByteOrder: binary.LittleEndian, Float: FloatIEEE, Binary: BinarySize248}
 
 	// signAt is the index the sign is overpunched into: the last byte under
 	// SIGN IS TRAILING, the first under SIGN IS LEADING, -1 for an unsigned
@@ -1203,6 +1259,7 @@ func TestZonedFieldRoundTripsEverySignConvention(t *testing.T) {
 				Sign:      sign,
 				ByteOrder: binary.BigEndian,
 				Float:     FloatIEEE,
+				Binary:    BinarySize248,
 			})
 			require.NoError(t, err)
 
@@ -1257,6 +1314,7 @@ func TestZonedFieldRejectsBytesOfAnotherConvention(t *testing.T) {
 						Sign:      s,
 						ByteOrder: binary.BigEndian,
 						Float:     FloatIEEE,
+						Binary:    BinarySize248,
 					}
 				}
 
@@ -1334,6 +1392,7 @@ func TestZonedDecodingNeverTranslatesThroughTheCharset(t *testing.T) {
 		Sign:      SignEBCDIC,
 		ByteOrder: binary.BigEndian,
 		Float:     FloatHFP,
+		Binary:    BinarySize248,
 	})
 	require.NoError(t, err)
 
@@ -1463,6 +1522,58 @@ func TestOffsetErrorUnwraps(t *testing.T) {
 	require.ErrorAs(t, error(err), &offErr)
 	require.Equal(t, int64(17), offErr.Offset)
 	require.Contains(t, err.Error(), "offset 17")
+}
+
+// TestBinaryWidthIsNotOnAnyBytePath enforces the rule [binaryWidth]'s doc
+// states, rather than leaving it to be read.
+//
+// binaryWidth is a *bound* — the widest width any staircase gives a digit count
+// — and reads 8 for a two-digit item. Every byte path called it before
+// [Encoding.Binary] existed, so "call binaryWidth here" is the mistake this
+// package was just fixed for, and its symptom is a record silently shifted by a
+// byte rather than an error anybody sees. A doc comment is a weak guard against
+// a fault that loud; this is the guard.
+//
+// It walks the AST of every non-test file for a *call*, so the declaration and
+// the doc comments that name the function are not matches. The rule cannot be
+// left to review because a byte path that called it would still compile, still
+// pass every fixture written under [BinarySizeFull], and fail only on a file
+// this repository does not have.
+func TestBinaryWidthIsNotOnAnyBytePath(t *testing.T) {
+	t.Parallel()
+
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+
+	fset := token.NewFileSet()
+	checked := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		checked++
+
+		file, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
+		require.NoError(t, err)
+
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := call.Fun.(*ast.Ident)
+			if !ok || ident.Name != "binaryWidth" {
+				return true
+			}
+			require.Failf(t, "binaryWidth is called on a byte path",
+				"%s calls binaryWidth, which is a bound and not a field's width; "+
+					"ask Encoding.Binary through BinarySize.width instead",
+				fset.Position(call.Pos()))
+			return false
+		})
+	}
+	require.NotZero(t, checked, "no non-test Go files were checked")
 }
 
 // TestPackageImportsOnlyStandardLibrary pins the promise this package makes:

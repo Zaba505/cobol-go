@@ -43,7 +43,7 @@ type Writer struct {
 	// nil check on w for the reason [Reader.fromBytes] is: the zero value of
 	// a Writer has to stay unusable. "nil w means append to the buffer"
 	// would make a Writer nobody constructed *succeed* — producing bytes
-	// under an [Encoding] with none of its four axes set, and reporting no
+	// under an [Encoding] with none of its five axes set, and reporting no
 	// error at all, which is the one failure this package is built to
 	// prevent. With this field it takes the stream arm and fails on the nil
 	// [io.Writer] exactly as it did before there was a second destination.
@@ -66,7 +66,7 @@ type Writer struct {
 
 // NewWriter returns a [Writer] that writes to w under the given encoding.
 //
-// enc must declare all four axes; construction fails with an [EncodingError]
+// enc must declare all five axes; construction fails with an [EncodingError]
 // naming the first field that does not. The requirement is the same as
 // [NewReader]'s and for the same reason: a file written under a guessed
 // encoding is wrong in a way nothing downstream can detect.
@@ -620,10 +620,14 @@ func (w *Writer) writeComp6(text string, negative bool, digits, max int) error {
 }
 
 // WriteBinaryInt16 writes v as a binary (COMP, COMP-4, BINARY) field of digits
-// digits, exactly 2 bytes wide.
+// digits, as many bytes wide as [Encoding.Binary] gives that digit count — 2
+// under the usual staircase, 1 under [BinarySize1248] or [BinarySizeSmallest]
+// below three digits, 8 under [BinarySizeFull].
 //
 // digits must be between 1 and 4. The bytes are two's complement in the order
-// [Encoding.ByteOrder] declares, which is required and never inferred.
+// [Encoding.ByteOrder] declares, which is required and never inferred; how many
+// of them there are is [Encoding.Binary]'s to say and is required for the same
+// reason, since it is the mirror of the width [Reader.ReadBinaryInt16] reads.
 //
 // s is required and says whether the item's PICTURE carries S, for the reason
 // it is required on [Writer.WritePackedInt32]: a negative value written into an
@@ -640,23 +644,24 @@ func (w *Writer) WriteBinaryInt16(v int16, digits int, s Signedness) error {
 	return w.writeBinaryInt(int64(v), digits, maxBinaryInt16Digits, s, TruncStd)
 }
 
-// WriteBinaryInt32 writes v as a binary field of digits digits, 2 bytes wide
-// for 1 to 4 digits and 4 bytes wide for 5 to 9. digits must be between 1 and
-// 9, and s is required; see [Writer.WriteBinaryInt16].
+// WriteBinaryInt32 writes v as a binary field of digits digits, as many bytes
+// wide as [Encoding.Binary] gives that digit count. digits must be between 1
+// and 9, and s is required; see [Writer.WriteBinaryInt16].
 func (w *Writer) WriteBinaryInt32(v int32, digits int, s Signedness) error {
 	return w.writeBinaryInt(int64(v), digits, maxBinaryInt32Digits, s, TruncStd)
 }
 
-// WriteBinaryInt64 writes v as a binary field of digits digits, 2, 4 or 8 bytes
-// wide by the digit count. digits must be between 1 and 18; the 19-to-31 digit
-// range is written with [Writer.WriteBinaryBig]. s is required; see
-// [Writer.WriteBinaryInt16].
+// WriteBinaryInt64 writes v as a binary field of digits digits, 1 to 8 bytes
+// wide as [Encoding.Binary] gives that digit count. digits must be between 1
+// and 18; the 19-to-31 digit range is written with [Writer.WriteBinaryBig]. s is
+// required; see [Writer.WriteBinaryInt16].
 func (w *Writer) WriteBinaryInt64(v int64, digits int, s Signedness) error {
 	return w.writeBinaryInt(v, digits, maxBinaryInt64Digits, s, TruncStd)
 }
 
-// WriteBinaryUint64 writes v as a binary field of digits digits, 2, 4 or 8
-// bytes wide by the digit count. digits must be between 1 and 18.
+// WriteBinaryUint64 writes v as a binary field of digits digits, 1 to 8 bytes
+// wide as [Encoding.Binary] gives that digit count. digits must be between 1
+// and 18.
 //
 // s is required here too, and it is not implied by the argument type: a uint64
 // cannot be negative, but [Signed] still selects the narrower range, since a
@@ -667,10 +672,10 @@ func (w *Writer) WriteBinaryUint64(v uint64, digits int, s Signedness) error {
 	return w.writeBinaryUint(v, digits, maxBinaryInt64Digits, s, TruncStd)
 }
 
-// WriteBinaryBig writes v as a binary field of digits digits, 2, 4, 8 or 16
-// bytes wide by the digit count. digits must be between 1 and 31, the IBM
-// Enterprise COBOL maximum under ARITH(EXTEND). s is required; see
-// [Writer.WriteBinaryInt16].
+// WriteBinaryBig writes v as a binary field of digits digits, 1 to 8 bytes wide
+// as [Encoding.Binary] gives that digit count and 16 beyond eighteen digits.
+// digits must be between 1 and 31, the IBM Enterprise COBOL maximum under
+// ARITH(EXTEND). s is required; see [Writer.WriteBinaryInt16].
 //
 // A nil v is [ErrNilValue] rather than a zero, as it is on
 // [Writer.WritePackedBig]: an absent number and the number zero are different
@@ -679,8 +684,8 @@ func (w *Writer) WriteBinaryBig(v *big.Int, digits int, s Signedness) error {
 	return w.writeBinaryBig(v, digits, s, TruncStd)
 }
 
-// WriteComp5Int16 writes v as a COMP-5 field of digits digits, exactly 2 bytes
-// wide.
+// WriteComp5Int16 writes v as a COMP-5 field of digits digits, as many bytes
+// wide as [Encoding.Binary] gives that digit count.
 //
 // It is [Writer.WriteBinaryInt16] with TRUNC(BIN) range semantics: the value
 // may use the full range of the storage rather than the decimal range of the
@@ -690,22 +695,25 @@ func (w *Writer) WriteComp5Int16(v int16, digits int, s Signedness) error {
 	return w.writeBinaryInt(int64(v), digits, maxBinaryInt16Digits, s, TruncBin)
 }
 
-// WriteComp5Int32 writes v as a COMP-5 field of digits digits, 2 or 4 bytes
-// wide. It is [Writer.WriteBinaryInt32] with TRUNC(BIN) range semantics; see
+// WriteComp5Int32 writes v as a COMP-5 field of digits digits, as many bytes
+// wide as [Encoding.Binary] gives that digit count. It is
+// [Writer.WriteBinaryInt32] with TRUNC(BIN) range semantics; see
 // [Writer.WriteComp5Int16].
 func (w *Writer) WriteComp5Int32(v int32, digits int, s Signedness) error {
 	return w.writeBinaryInt(int64(v), digits, maxBinaryInt32Digits, s, TruncBin)
 }
 
-// WriteComp5Int64 writes v as a COMP-5 field of digits digits, 2, 4 or 8 bytes
-// wide. It is [Writer.WriteBinaryInt64] with TRUNC(BIN) range semantics; see
+// WriteComp5Int64 writes v as a COMP-5 field of digits digits, 1 to 8 bytes
+// wide as [Encoding.Binary] gives that digit count. It is
+// [Writer.WriteBinaryInt64] with TRUNC(BIN) range semantics; see
 // [Writer.WriteComp5Int16].
 func (w *Writer) WriteComp5Int64(v int64, digits int, s Signedness) error {
 	return w.writeBinaryInt(v, digits, maxBinaryInt64Digits, s, TruncBin)
 }
 
-// WriteComp5Uint64 writes v as a COMP-5 field of digits digits, 2, 4 or 8 bytes
-// wide. It is [Writer.WriteBinaryUint64] with TRUNC(BIN) range semantics; see
+// WriteComp5Uint64 writes v as a COMP-5 field of digits digits, 1 to 8 bytes
+// wide as [Encoding.Binary] gives that digit count. It is
+// [Writer.WriteBinaryUint64] with TRUNC(BIN) range semantics; see
 // [Writer.WriteComp5Int16].
 //
 // This is what a PIC 9(4) COMP-5 item holding 65535 needs: FF FF is legal there
@@ -714,9 +722,10 @@ func (w *Writer) WriteComp5Uint64(v uint64, digits int, s Signedness) error {
 	return w.writeBinaryUint(v, digits, maxBinaryInt64Digits, s, TruncBin)
 }
 
-// WriteComp5Big writes v as a COMP-5 field of digits digits, 2, 4, 8 or 16
-// bytes wide. It is [Writer.WriteBinaryBig] with TRUNC(BIN) range semantics;
-// see [Writer.WriteComp5Int16].
+// WriteComp5Big writes v as a COMP-5 field of digits digits, 1 to 8 bytes wide
+// as [Encoding.Binary] gives that digit count and 16 beyond eighteen digits. It
+// is [Writer.WriteBinaryBig] with TRUNC(BIN) range semantics; see
+// [Writer.WriteComp5Int16].
 //
 // An [Unsigned] field is written as a magnitude over the full storage width, so
 // a 16-byte one may carry a value with its top bit set. [Reader.ReadComp5Big]
@@ -728,6 +737,10 @@ func (w *Writer) WriteComp5Big(v *big.Int, digits int, s Signedness) error {
 
 // binaryField validates the arguments every binary writer shares and reports
 // the field's storage width.
+//
+// The width comes from [Encoding.Binary] and is the mirror of the one
+// [Reader.readBinaryField] reads under: the two move together or a round trip
+// silently changes a record's length.
 func (w *Writer) binaryField(digits, max int, s Signedness) (int, error) {
 	if !s.valid() {
 		return 0, &OffsetError{Offset: w.off, Err: SignednessError{Signedness: s}}
@@ -738,7 +751,7 @@ func (w *Writer) binaryField(digits, max int, s Signedness) (int, error) {
 			Err:    BinaryDigitCountError{Digits: digits, Max: max},
 		}
 	}
-	return binaryWidth(digits), nil
+	return w.enc.Binary.width(digits), nil
 }
 
 // writeBinaryInt is the shared body of the signed fixed-width writers, whose
@@ -947,7 +960,7 @@ func binaryBigFits(v *big.Int, digits, width int, s Signedness, t Truncation) bo
 // Marshal writes v under the given encoding and returns the bytes it produced.
 //
 // enc is the first argument and is required, for the reason [Encoding] exists:
-// none of its four axes has a default, and every one of them fails silently
+// none of its five axes has a default, and every one of them fails silently
 // when wrong.
 //
 // The returned slice is the caller's own: the [Writer] that produced it is
