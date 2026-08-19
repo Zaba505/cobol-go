@@ -20,7 +20,9 @@ import (
 //
 // There is deliberately no usable zero value: a Reader is only obtainable from
 // [NewReader], which requires a complete [Encoding]. A Reader is not safe for
-// concurrent use — the read position is state.
+// concurrent use — the read position is state, and so are the scratch buffers
+// every field is read into, which makes concurrent use silent corruption of a
+// field rather than a racy counter.
 type Reader struct {
 	r   io.Reader
 	enc Encoding
@@ -32,7 +34,48 @@ type Reader struct {
 	// perfectly well, so it is not a reason to refuse a Reader.
 	zoned    zonedCodec
 	zonedErr error
+	// num is the scratch every field narrow enough to fit it is read into,
+	// and wide is the growable one everything else is read into. Both are
+	// reused across fields and neither is ever returned to a caller; see
+	// [Reader.read] for why one buffer is an array on the struct and the
+	// other a slice, and [Reader.ReadBytes] for the one accessor that opts
+	// out of both.
+	//
+	// wide grows to the widest field asked of it and never shrinks, so a
+	// Reader that has read one PIC X(32760) field holds 32KB until it is
+	// dropped. That is the trade a reused buffer is: shrinking it would
+	// reintroduce the allocation on the next wide field, and a Reader is a
+	// short-lived object — [Unmarshal] builds one per record.
+	num  [maxNumericWidth]byte
+	wide []byte
 }
+
+// maxNumericWidth is the width of [Reader.num], the fixed scratch every
+// numeric field is read into. It is the widest field any numeric accessor will
+// read, derived from the package's own digit-count maxima rather than written
+// down: a 32-byte zoned field of 31 digits with a SEPARATE sign, against 16
+// bytes for packed, COMP-6 and binary and 4 and 8 for the two floating point
+// widths.
+//
+// Deriving it is what keeps a raised maximum from turning a legal field into a
+// smashed buffer. It is *not* what keeps it from panicking — [Reader.read]
+// falls back to [Reader.wide] for anything longer, so an accessor admitting a
+// wider field than this const anticipated costs an allocation and nothing
+// else. 31 digits is a dialect ceiling (codec/SPEC.md, "18, or 31 with
+// ARITH(EXTEND)"), not a fact about COBOL, so the day it moves is a day this
+// const has to be free to move with it.
+//
+// TestNumericScratchFitsEveryNumericUsage pins the derivation against the
+// width functions themselves, which is the check that catches a family whose
+// width stops being one of the terms below.
+const maxNumericWidth = max(
+	maxZonedDigits+1,      // zonedWidth(maxZonedDigits, a SEPARATE sign position)
+	(maxPackedDigits+2)/2, // packedWidth(maxPackedDigits)
+	(maxPackedDigits+1)/2, // comp6Width(maxPackedDigits)
+	maxBinaryFieldWidth,   // binaryWidth(maxBinaryDigits)
+	comp1Width,
+	comp2Width,
+)
 
 // NewReader returns a [Reader] that reads from r under the given encoding.
 //
@@ -60,22 +103,88 @@ func (r *Reader) Encoding() Encoding { return r.enc }
 // the offset after an error is where reading stopped.
 func (r *Reader) Offset() int64 { return r.off }
 
-// read consumes exactly n bytes. It is the single place the offset advances and
-// the single place read errors are stamped with it.
+// read consumes exactly n bytes into a buffer the Reader owns and reuses, and
+// returns it. The bytes are valid until the next read and no further: every
+// caller of this method must consume them before it returns, and one that
+// hands them to its own caller must use [Reader.readOwned] instead.
+//
+// Reuse is the whole point of it. A fresh make per field is not expensive
+// because it is a make — an identical one whose result does not escape costs
+// nothing — it is expensive because returning the slice forces it onto the
+// heap, one allocation per field before any value exists.
+//
+// Two buffers, because the two families are bounded differently. A numeric
+// field is bounded by [maxNumericWidth], so [Reader.num] is an array inline in
+// the struct: no allocation ever and no pointer to chase. A PIC X field is
+// bounded only by the record, so anything wider goes through [Reader.wide],
+// which grows on demand and is then reused at that size. The wide path is also
+// the fallback that keeps a numeric field wider than the array an allocation
+// rather than a panic.
+//
+// Both buffers are sliced with a **full slice expression**, so the returned
+// slice's capacity is the field width and not the buffer's. A slice into a
+// reused buffer with spare capacity is an append away from writing over the
+// bytes of the next field, silently and with no bounds panic; capping it makes
+// "these n bytes and no more" a fact the runtime enforces rather than a
+// promise this comment makes.
 func (r *Reader) read(n int) ([]byte, error) {
-	if n < 0 {
-		return nil, &OffsetError{Offset: r.off, Err: FieldWidthError{Width: n}}
+	if err := r.checkWidth(n); err != nil {
+		return nil, err
 	}
-	if n == 0 {
-		return []byte{}, nil
+	var buf []byte
+	if n <= maxNumericWidth {
+		buf = r.num[:n:n]
+	} else {
+		if cap(r.wide) < n {
+			r.wide = make([]byte, n)
+		}
+		buf = r.wide[:n:n]
+	}
+	if err := r.readInto(buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// readOwned consumes exactly n bytes into a freshly allocated buffer that
+// becomes the caller's. It is [Reader.read] for the one accessor whose bytes
+// escape, and it allocates on purpose; see [Reader.ReadBytes].
+func (r *Reader) readOwned(n int) ([]byte, error) {
+	if err := r.checkWidth(n); err != nil {
+		return nil, err
 	}
 	buf := make([]byte, n)
+	if err := r.readInto(buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// checkWidth rejects a negative field width. It is the one precondition both
+// buffer policies share, held here rather than written out in each of them for
+// the reason the offset is stamped in one place: two copies of a precondition
+// are two copies to keep in step, and the reusing path and the owning one are
+// exactly the pair that must not drift.
+func (r *Reader) checkWidth(n int) error {
+	if n < 0 {
+		return &OffsetError{Offset: r.off, Err: FieldWidthError{Width: n}}
+	}
+	return nil
+}
+
+// readInto fills buf exactly. It is the single place the offset advances and
+// the single place read errors are stamped with it, which is what keeps the
+// offset from drifting between the owning and the reusing path above.
+func (r *Reader) readInto(buf []byte) error {
+	if len(buf) == 0 {
+		return nil
+	}
 	got, err := io.ReadFull(r.r, buf)
 	r.off += int64(got)
 	if err != nil {
-		return nil, &OffsetError{Offset: r.off, Err: err}
+		return &OffsetError{Offset: r.off, Err: err}
 	}
-	return buf, nil
+	return nil
 }
 
 // ReadBytes reads the next n bytes as they stand, applying no character
@@ -96,7 +205,7 @@ func (r *Reader) read(n int) ([]byte, error) {
 // [OffsetError]. Reading at the end of a file therefore reports io.EOF, which
 // is how a caller stepping through records detects the end of one.
 func (r *Reader) ReadBytes(n int) ([]byte, error) {
-	return r.read(n)
+	return r.readOwned(n)
 }
 
 // ReadAlphanumeric reads the next n bytes as an alphanumeric (PIC X) or

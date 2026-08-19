@@ -1136,6 +1136,14 @@ const (
 	maxBinaryDigits      = 31
 )
 
+// maxBinaryFieldWidth is the top step of [binaryWidth]'s staircase, the width
+// of every field of more than 18 digits and so of the widest binary field the
+// package reads. It is named rather than written twice because
+// [maxNumericWidth] is derived from it: the staircase is the only place a
+// binary width is a literal, and a scratch buffer sized from a second copy of
+// that literal would not follow the step if it moved.
+const maxBinaryFieldWidth = 16
+
 // binaryWidth reports the byte width of a binary field holding digits digits:
 // 2 bytes through 4 digits, 4 through 9, 8 through 18 and 16 beyond. It is the
 // whole of the binary size model, and like [packedWidth] it does not depend on
@@ -1160,7 +1168,7 @@ func binaryWidth(digits int) int {
 	case digits <= 18:
 		return 8
 	}
-	return 16
+	return maxBinaryFieldWidth
 }
 
 // pow10 holds 10^i for every digit count the fixed-width binary accessors
