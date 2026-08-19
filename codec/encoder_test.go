@@ -2320,6 +2320,63 @@ func TestRoundTripDecodeEncode(t *testing.T) {
 	}
 }
 
+// TestRoundTripAlphanumericEveryByteValue walks a PIC X field carrying all 256
+// byte values through decode → encode → byte-equal, in every charset of
+// alphanumericCharsets and under both justifications. It is the round-trip
+// shape codec/CLAUDE.md requires of every accessor pair, run over the byte
+// range the package's other alphanumeric fixtures never reach.
+//
+// The two halves of the pair disagree about what a field is made of: the
+// reader translates bytes to characters, while the writer ranges over the
+// runes of the string it is given. A field decoded to anything other than the
+// characters the charset names therefore cannot be written back at all — a
+// verbatim decode yields U+FFFD for every byte above U+007F, and no charset
+// has a byte for that.
+func TestRoundTripAlphanumericEveryByteValue(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range alphanumericCharsets {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, j := range []Justification{JustifyLeft, JustifyRight} {
+				t.Run(j.String(), func(t *testing.T) {
+					t.Parallel()
+
+					src := allByteValues()
+					enc := charsetEncoding(tc.charset)
+
+					r, err := NewReader(bytes.NewReader(src), enc)
+					require.NoError(t, err)
+
+					got, err := r.ReadAlphanumericJustified(len(src), j)
+					require.NoError(t, err)
+
+					var buf bytes.Buffer
+					w, err := NewWriter(&buf, enc)
+					require.NoError(t, err)
+
+					err = w.WriteAlphanumericJustified(got, len(src), j)
+					if !tc.roundTrip {
+						// The case is documented rather than asserted away:
+						// the charset cannot spell the field back, and the
+						// writer names the character it stopped on instead of
+						// substituting one for it.
+						var runeErr UnrepresentableRuneError
+						require.ErrorAs(t, err, &runeErr)
+						require.Equal(t, tc.unrepresentable, runeErr.Rune, tc.why)
+						require.Equal(t, tc.charset.Name(), runeErr.Charset)
+						require.Zero(t, buf.Len(), "a rejected field wrote part of itself")
+						return
+					}
+					require.NoError(t, err)
+					require.Equal(t, src, buf.Bytes())
+				})
+			}
+		})
+	}
+}
+
 // TestRoundTripPacked walks a packed decimal field both ways at every digit
 // count COBOL allows, which is the cheapest check that the width formula, the
 // pad nibble and the digit placement agree between the reader and the writer.

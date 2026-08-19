@@ -85,6 +85,12 @@ func (r *Reader) read(n int) ([]byte, error) {
 // field that carries a binary payload rather than characters, and for any
 // caller that needs the bytes a trimmed string cannot reproduce.
 //
+// The returned slice is the caller's own. It is allocated by the read that
+// returns it, and the Reader keeps no reference to it and never writes into it
+// again, so it may be retained, modified and handed on without being copied
+// first. No accessor of a Reader reuses a buffer, which is what makes that
+// safe to depend on rather than an accident of the current implementation.
+//
 // A short stream is an error: io.EOF when nothing at all was left, and
 // [io.ErrUnexpectedEOF] when the field was cut short, both wrapped in an
 // [OffsetError]. Reading at the end of a file therefore reports io.EOF, which

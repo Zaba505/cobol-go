@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -346,6 +347,182 @@ func TestReaderReadAlphanumeric(t *testing.T) {
 	})
 }
 
+// charsetEncoding returns an encoding whose charset is cs. The charset is the
+// only axis an alphanumeric field reads — neither the sign convention, the
+// float format nor the byte order touches one — so the walks below vary that
+// axis alone and leave the rest at a bundle's values.
+func charsetEncoding(cs Charset) Encoding {
+	enc := GnuCOBOLASCII()
+	enc.Charset = cs
+	return enc
+}
+
+// alphanumericCharsets is every charset the alphanumeric accessors are walked
+// over byte for byte: the two the package ships, and the caller-supplied
+// oddballCharset, which is in the table so that an implementation hard-coded
+// to a shipped code page fails the walk rather than passes it.
+//
+// wantUTF8Len is the length in bytes of the whole 256-byte corpus once
+// decoded. It is stated rather than derived from the charset, because it is
+// the property these walks exist to pin: a translation emitting one byte per
+// input byte — string(b), or a [256]byte table — reads 256 for every charset
+// here, and every one of them maps some byte above U+007F, where a character
+// costs two bytes once written as UTF-8.
+var alphanumericCharsets = []struct {
+	name        string
+	charset     Charset
+	wantUTF8Len int
+	// roundTrip says a PIC X field carrying all 256 byte values survives
+	// decode → encode → byte-equal, which needs the charset to be bijective
+	// over the whole byte space. Where it is not, unrepresentable is the
+	// first character the writer has no byte for and why says why.
+	roundTrip       bool
+	unrepresentable rune
+	why             string
+}{
+	{name: "ascii", charset: ASCII(), wantUTF8Len: 384, roundTrip: true},
+	{name: "cp037", charset: CP037(), wantUTF8Len: 384, roundTrip: true},
+	{
+		name:        "oddball",
+		charset:     oddballCharset{},
+		wantUTF8Len: 374,
+		// A caller's charset owes this package a total ToUnicode and nothing
+		// more, and oddball's FromUnicode spells only the digits and the two
+		// signs — so U+0000, the first character of the decoded corpus, has no
+		// byte to be written back as. Nor is its decoding injective: 0x01 and
+		// 0x2B both decode to '+', so even a total FromUnicode could not
+		// reproduce the field. A PIC X field of arbitrary bytes is therefore
+		// unrepresentable under such a charset, which is a property of the
+		// charset and not a defect of the writer; [Reader.ReadBytes] is what
+		// carries a binary payload under one.
+		unrepresentable: 0x00,
+		why:             "oddball spells only the digits, '+' and '-'",
+	},
+}
+
+// allByteValues is a PIC X field carrying every byte value in order, which is
+// the corpus the alphanumeric walks below run over. Under every charset in
+// alphanumericCharsets it begins and ends with a byte that does not decode to
+// a space, so the padding strip is a no-op on it and cannot mask a difference
+// — the walks assert that rather than assume it.
+func allByteValues() []byte {
+	src := make([]byte, 256)
+	for i := range src {
+		src[i] = byte(i)
+	}
+	return src
+}
+
+// TestReaderReadAlphanumericTranslatesEveryByte reads a PIC X field carrying
+// all 256 byte values and requires the result to be byte-identical to the
+// charset's own translation of those bytes. Every other alphanumeric fixture
+// in the package spells printable characters, so the 128 byte values where a
+// translating implementation and a verbatim one disagree are otherwise
+// untested end to end — and a PIC X field routinely carries a binary payload
+// (codec/SPEC.md, "Alphanumeric and Alphabetic Items"), which makes the high
+// half of the byte space data rather than a theoretical case.
+func TestReaderReadAlphanumericTranslatesEveryByte(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range alphanumericCharsets {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := allByteValues()
+
+			// The reference is the accessor's specification and reads nothing
+			// of its implementation: translate each byte through the charset,
+			// then encode the character it names as UTF-8.
+			var sb strings.Builder
+			for _, b := range src {
+				sb.WriteRune(tc.charset.ToUnicode(b))
+			}
+			want := sb.String()
+
+			require.Equal(t, tc.wantUTF8Len, len(want))
+			require.Greaterf(t, len(want), len(src),
+				"%s decodes this corpus one byte per byte, so it cannot catch a verbatim read",
+				tc.charset.Name())
+			require.Equal(t, want, strings.Trim(want, " "),
+				"corpus begins or ends with the charset's space, so the padding strip would hide a difference")
+
+			for _, j := range []Justification{JustifyLeft, JustifyRight} {
+				t.Run(j.String(), func(t *testing.T) {
+					t.Parallel()
+
+					r, err := NewReader(bytes.NewReader(src), charsetEncoding(tc.charset))
+					require.NoError(t, err)
+
+					got, err := r.ReadAlphanumericJustified(len(src), j)
+					require.NoError(t, err)
+					require.Equal(t, want, got)
+					require.Equal(t, int64(len(src)), r.Offset())
+
+					// Stated apart from the equality above because it is the
+					// mutation this walk was written for: string(b) and a
+					// [256]byte table both produce exactly this.
+					require.NotEqual(t, string(src), got, "field was read verbatim rather than translated")
+				})
+			}
+
+			t.Run("default justification", func(t *testing.T) {
+				t.Parallel()
+
+				r, err := NewReader(bytes.NewReader(src), charsetEncoding(tc.charset))
+				require.NoError(t, err)
+
+				got, err := r.ReadAlphanumeric(len(src))
+				require.NoError(t, err)
+				require.Equal(t, want, got)
+			})
+		})
+	}
+}
+
+// TestReaderReadAlphanumericTrimsAroundMultiByteContent pins the padding strip
+// against a value whose characters are not one byte each. The trim runs on the
+// translated string rather than on the bytes read, so a strip written over the
+// source bytes would take the wrong number of characters off the end that
+// carries the padding.
+func TestReaderReadAlphanumericTrimsAroundMultiByteContent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range alphanumericCharsets {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cs := tc.charset
+			content := string([]rune{cs.ToUnicode(0x80), cs.ToUnicode(0xFF)})
+			for _, r := range content {
+				require.NotEqual(t, ' ', r, "a content byte decodes to a space, so the field is all padding")
+				require.Greater(t, r, rune(0x7F), "a content byte decodes to a one-byte character, so the case is not multi-byte")
+			}
+
+			src := []byte{cs.Space(), cs.Space(), 0x80, 0xFF, cs.Space(), cs.Space()}
+
+			testCases := []struct {
+				justify Justification
+				want    string
+			}{
+				{justify: JustifyLeft, want: "  " + content},
+				{justify: JustifyRight, want: content + "  "},
+			}
+			for _, jc := range testCases {
+				t.Run(jc.justify.String(), func(t *testing.T) {
+					t.Parallel()
+
+					r, err := NewReader(bytes.NewReader(src), charsetEncoding(cs))
+					require.NoError(t, err)
+
+					got, err := r.ReadAlphanumericJustified(len(src), jc.justify)
+					require.NoError(t, err)
+					require.Equal(t, jc.want, got)
+				})
+			}
+		})
+	}
+}
+
 func TestReaderReadBytes(t *testing.T) {
 	t.Parallel()
 
@@ -376,6 +553,25 @@ func TestReaderReadBytes(t *testing.T) {
 		got, err := r.ReadBytes(len(src))
 		require.NoError(t, err)
 		require.Equal(t, src, got)
+	})
+
+	t.Run("returns a slice the caller owns", func(t *testing.T) {
+		t.Parallel()
+
+		// The doc comment promises the returned slice is the caller's own and
+		// is not reused. Nothing else pins that, and it becomes load-bearing
+		// the moment a buffer is reused anywhere under read.
+		r, err := NewReader(bytes.NewReader([]byte("ABCD")), GnuCOBOLASCII())
+		require.NoError(t, err)
+
+		first, err := r.ReadBytes(2)
+		require.NoError(t, err)
+		first[0] = 'Z'
+
+		second, err := r.ReadBytes(2)
+		require.NoError(t, err)
+		require.Equal(t, []byte("CD"), second, "a later read was served from a buffer an earlier one returned")
+		require.Equal(t, []byte("ZB"), first, "a later read overwrote a slice an earlier one returned")
 	})
 
 	t.Run("zero width consumes nothing", func(t *testing.T) {
