@@ -1105,8 +1105,9 @@ const (
 	// binary-size: 1-2-4-8, which gives a 1–2 digit item one byte.
 	BinarySize1248
 	// BinarySizeSmallest is GnuCOBOL's binary-size: 1--8, the smallest byte
-	// count from 1 to 8 whose signed range holds the digits. It is the only
-	// staircase with 3, 5, 6 and 7-byte steps.
+	// count from 1 to 8 whose signed range holds the digits — and sixteen
+	// beyond eighteen digits, which no byte count from 1 to 8 can hold. It
+	// is the only staircase with 3, 5, 6 and 7-byte steps.
 	BinarySizeSmallest
 	// BinarySizeFull is GnuCOBOL's binary-size: full, always eight bytes
 	// (sixteen beyond eighteen digits).
@@ -1141,9 +1142,14 @@ func (b BinarySize) valid() bool {
 	return ok
 }
 
-// smallestBinaryDigits[i] is the largest digit count a signed integer of i+1
-// bytes holds: 2^(8n-1)-1 written as a number of decimal digits. It is the
-// whole of [BinarySizeSmallest].
+// smallestBinaryDigits[i] is the largest d such that *every* d-digit value fits
+// a signed integer of n = i+1 bytes: the largest d with 10^d - 1 <= 2^(8n-1) - 1.
+// It is the whole of [BinarySizeSmallest].
+//
+// It is not the number of digits 2^(8n-1)-1 is written with, which is one more
+// at five of the eight steps — 127 has three digits but holds only two in full,
+// and that "in full" is the distinction the staircase turns on: a step that
+// held three-digit values only up to 127 would reject a legal PIC S9(3) item.
 var smallestBinaryDigits = [8]int{2, 4, 6, 9, 11, 14, 16, 18}
 
 // width reports the byte width of a binary item of the given digit count under
@@ -1151,9 +1157,17 @@ var smallestBinaryDigits = [8]int{2, 4, 6, 9, 11, 14, 16, 18}
 //
 // digits must already have been validated against [maxBinaryDigits]; b must
 // already have been validated by [Encoding.Validate], which every [Reader] and
-// [Writer] runs at construction. An unknown staircase falls through to
-// [BinarySize248], which is the one reading that cannot silently narrow a
-// field — but it is unreachable, not a default.
+// [Writer] runs at construction, so every arm below is reached by a staircase
+// the caller declared.
+//
+// The default arm is therefore unreachable, and it answers [maxBinaryFieldWidth]
+// rather than a plausible width so that it stays unreachable *loudly*. Answering
+// [BinarySize248] would give an [Encoding] whose axis was never set a working
+// record for most digit counts — a default in everything but name, and the exact
+// outcome this axis exists to prevent. Sixteen bytes is the widest step any
+// staircase has, so a field read under it runs out of record or swallows its
+// neighbours rather than reading plausibly. This package raises no panics, which
+// is why the arm returns at all.
 func (b BinarySize) width(digits int) int {
 	switch b {
 	case BinarySize1248:
@@ -1177,7 +1191,7 @@ func (b BinarySize) width(digits int) int {
 		if digits <= 18 {
 			return 8
 		}
-	default:
+	case BinarySize248:
 		switch {
 		case digits <= 4:
 			return 2
@@ -1188,7 +1202,8 @@ func (b BinarySize) width(digits int) int {
 		}
 	}
 	// Nineteen digits and beyond is a sixteen-byte item under every
-	// staircase; IBM reaches it only under ARITH(EXTEND).
+	// staircase; IBM reaches it only under ARITH(EXTEND). It is also what an
+	// unvalidated b falls to, for the reason above.
 	return maxBinaryFieldWidth
 }
 
@@ -1309,6 +1324,21 @@ func MicroFocusASCII() Encoding {
 // for one of those — it is the second axis of this bundle a GnuCOBOL
 // configuration routinely moves, and the one that changes the record's length
 // rather than a field's value.
+//
+// # Migrating
+//
+// Before [Encoding.Binary] existed this package implemented [BinarySize248] and
+// nothing else, so this bundle produced and consumed 2-4-8 records whatever its
+// name said. A caller who wrote files under it and wants to go on reading them
+// must now say so explicitly:
+//
+//	enc := codec.GnuCOBOLASCII()
+//	enc.Binary = codec.BinarySize248 // what this bundle used to mean
+//
+// Nothing reports the difference if they do not. A record holding a 1–2 digit
+// COMP item shifts by one byte per such field, and a [Reader] never knows a
+// record's length, so the two readings part company silently — which is the
+// whole reason the axis is required rather than defaulted.
 func GnuCOBOLASCII() Encoding {
 	return Encoding{
 		Charset:   ASCII(),
@@ -1553,12 +1583,24 @@ const maxBinaryFieldWidth = 16
 // binaryWidth reports the widest byte width any declared [BinarySize] gives a
 // binary field of digits digits.
 //
-// It is a *bound* and not the width of a field. Which width a file actually
-// uses is [Encoding.Binary]'s to say, and every reader and writer asks
-// [BinarySize.width] for it; nothing on the byte paths may call this. What it
-// is for is [maxNumericWidth], which has to be a constant expression and so
-// cannot ask an axis anything — the scratch has to hold the widest legal field
-// under *any* staircase a caller may declare.
+// It is a *bound* and not the width of a field: it answers 8 for a two-digit
+// item, which no staircase but [BinarySizeFull] does. Which width a file
+// actually uses is [Encoding.Binary]'s to say, and every reader and writer asks
+// [BinarySize.width] for it.
+//
+// **Nothing outside a test may call this.** Every call site on the byte paths
+// did call it before the staircase became an axis, so the mistake it invites is
+// the one this package was just fixed for, and its symptom is a silently
+// shifted record. That rule is enforced rather than asserted:
+// TestBinaryWidthIsNotOnAnyBytePath fails the build if a non-test file names it.
+//
+// Its one caller is TestNumericScratchFitsEveryNumericUsage, which checks
+// [maxNumericWidth] against the width function of each numeric family at that
+// family's own digit maximum. The const itself is derived from
+// [maxBinaryFieldWidth] and not from here — a const cannot call a function —
+// so this is the binary family's entry in the set of width functions that
+// derivation is *checked against*, which is a different job from sizing the
+// scratch and the reason the function still exists.
 //
 // The bound is [BinarySizeFull]'s staircase at every digit count, because
 // "always eight bytes, sixteen beyond eighteen digits" is by construction the

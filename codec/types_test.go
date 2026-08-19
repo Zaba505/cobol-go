@@ -7,6 +7,7 @@ package codec
 
 import (
 	"encoding/binary"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -1521,6 +1522,58 @@ func TestOffsetErrorUnwraps(t *testing.T) {
 	require.ErrorAs(t, error(err), &offErr)
 	require.Equal(t, int64(17), offErr.Offset)
 	require.Contains(t, err.Error(), "offset 17")
+}
+
+// TestBinaryWidthIsNotOnAnyBytePath enforces the rule [binaryWidth]'s doc
+// states, rather than leaving it to be read.
+//
+// binaryWidth is a *bound* — the widest width any staircase gives a digit count
+// — and reads 8 for a two-digit item. Every byte path called it before
+// [Encoding.Binary] existed, so "call binaryWidth here" is the mistake this
+// package was just fixed for, and its symptom is a record silently shifted by a
+// byte rather than an error anybody sees. A doc comment is a weak guard against
+// a fault that loud; this is the guard.
+//
+// It walks the AST of every non-test file for a *call*, so the declaration and
+// the doc comments that name the function are not matches. The rule cannot be
+// left to review because a byte path that called it would still compile, still
+// pass every fixture written under [BinarySizeFull], and fail only on a file
+// this repository does not have.
+func TestBinaryWidthIsNotOnAnyBytePath(t *testing.T) {
+	t.Parallel()
+
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+
+	fset := token.NewFileSet()
+	checked := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		checked++
+
+		file, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
+		require.NoError(t, err)
+
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := call.Fun.(*ast.Ident)
+			if !ok || ident.Name != "binaryWidth" {
+				return true
+			}
+			require.Failf(t, "binaryWidth is called on a byte path",
+				"%s calls binaryWidth, which is a bound and not a field's width; "+
+					"ask Encoding.Binary through BinarySize.width instead",
+				fset.Position(call.Pos()))
+			return false
+		})
+	}
+	require.NotZero(t, checked, "no non-test Go files were checked")
 }
 
 // TestPackageImportsOnlyStandardLibrary pins the promise this package makes:

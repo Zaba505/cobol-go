@@ -352,12 +352,22 @@ Width has a **third** fork, and unlike the other two it is an `Encoding` axis:
 - **The width staircase** is `Encoding.Binary`, a `BinarySize`. There are four —
   `2-4-8`, `1-2-4-8`, `1--8` and `full` — and they disagree from the first digit
   count: `PIC S9(2) COMP` is two bytes under the first and one under the second.
-  `BinarySize.width(digits)` is the whole of the size model, and **nothing on the
-  byte paths may call `binaryWidth`**, which is now only the *bound* the scratch
-  buffer is derived from (`BinarySizeFull`'s staircase, the widest of the four).
+  `BinarySize.width(digits)` is the whole of the size model, and **nothing
+  outside a test may call `binaryWidth`**, which is now only the *bound*
+  `maxNumericWidth`'s derivation is checked against (`BinarySizeFull`'s
+  staircase, the widest of the four) and reads 8 for a two-digit item. Every
+  byte path called it before the axis existed, so that is the mistake to expect;
+  `TestBinaryWidthIsNotOnAnyBytePath` walks the AST of every non-test file and
+  fails on a call, rather than leaving the rule to a doc comment.
   `Reader.readBinaryField`, `Reader.readBinaryBig` and `Writer.binaryField` are
   the three places the axis is consulted, and encode and decode move together or
   a round trip silently changes a record's length.
+
+`BinarySize.width`'s `default:` arm returns `maxBinaryFieldWidth` and not the
+2-4-8 staircase. It is unreachable — `Encoding.Validate` rejects an unset or
+unknown axis — and answering with a plausible width would make it a default in
+everything but name, which is what the axis exists to prevent. Sixteen bytes
+fails loudly instead. Do not "simplify" it back to a fallthrough.
 
 `codec.BinarySize` mirrors `copybook.BinarySize` member for member and width for
 width, and cannot be the same type because this package imports only `std`.

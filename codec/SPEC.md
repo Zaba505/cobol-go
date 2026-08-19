@@ -90,10 +90,17 @@ may weigh against ergonomics.
 
 ## The Five Axes of an Encoding
 
-Four settings must be known before a single byte of a data file can be
+Five settings must be known before a single byte of a data file can be
 interpreted. None of them is recoverable from the file itself with certainty,
 and **every one of them fails silently when wrong** — a wrong value yields a
 plausible but incorrect result rather than an error.
+
+The fifth, binary size, is the one that is baked into the file rather than
+merely applied to it: it decides how many bytes a binary field occupies, so a
+wrong value yields a plausible but incorrect *record* rather than a plausible
+but incorrect *number*. It is no more recoverable than the other four — the
+bytes of a two-byte field and of the one-byte field beside it are the same
+bytes — and it fails the same way for the same reason.
 
 | Axis | Values | What it governs |
 |---|---|---|
@@ -267,9 +274,10 @@ after GnuCOBOL's `binary-size` spellings.
   GnuCOBOL's `binary-size: 2-4-8`.
 - **`1-2-4-8`** is GnuCOBOL's **default**, and gives a 1–2 digit item one byte.
 - **`1--8`** is GnuCOBOL's `binary-size: 1--8`: the smallest byte count from 1 to
-  8 whose *signed* range holds `digits` decimal digits. It is the only staircase
-  with 3, 5, 6 and 7-byte steps, so it is the only one whose fields do not all
-  land on a power-of-two width.
+  8 whose *signed* range holds `digits` decimal digits, and sixteen beyond
+  eighteen digits, which no byte count from 1 to 8 can hold. It is the only
+  staircase with 3, 5, 6 and 7-byte steps, so it is the only one whose fields do
+  not all land on a power-of-two width.
 - **`full`** is GnuCOBOL's `binary-size: full`: always 8 bytes below 19 digits.
 
 The 1–2 digit row is a real, silent fork: `PIC S9(2) COMP` is **two** bytes under
@@ -876,11 +884,11 @@ which compiler is involved at all:
 | **Zoned sign convention** | **the file** | `SignTranslatedEBCDIC` is produced by no compiler — it is produced by a *conversion* |
 | **Binary byte order** | **the file** | Written by whatever wrote it, read by something else |
 | **Float format** | **the file** | Same |
+| **Binary widths** | **the file** | Fixed at compile time, and therefore baked into the record layout of every file that compiler wrote — so for anyone *reading* one it is a property of the file, exactly as byte order is |
 | `TRUNC` semantics | the compiler | Affects what values can be present, not how bytes are read |
-| Binary widths | the compiler | Fixed at compile time — but baked into the record layout, so it is a property of the **file** for anyone reading one, and is a declared axis for that reason |
 | `COMP-6` support | the compiler | The copybook either uses it or does not |
 
-The top four are why a "dialect" is a *bundle of defaults a caller may choose*
+The top five are why a "dialect" is a *bundle of defaults a caller may choose*
 and never a property the library can infer. `ConvertedFromEBCDIC()` — ASCII
 characters, translated-EBCDIC signs, big-endian binary — is a real and common
 combination that **no compiler produces**, and it is only expressible because
