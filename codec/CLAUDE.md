@@ -252,6 +252,33 @@ detectable:
   independent.** `zonedSignTables` holds absolute byte values, one row per
   convention, transcribed from `SPEC.md`'s digit-by-digit table.
 
+**Both inverses are precomputed tables, and their fill order is the semantics**
+(#112). `zonedBytes.digitOf` inverts `digits`, and `zonedSignReadings` inverts
+every row of `zonedSignTables`; both replaced a `slices.Index` scan whose cost
+grew with the digit, which made reading all-nines data 1.65x the cost of reading
+all-zeros. Three things about them are load bearing rather than incidental:
+
+- **Each fill runs backwards.** `slices.Index` returned the *first* match, so
+  the last write into the table has to be the earliest candidate. For digits
+  that is digit 9 down to 0, because `Charset.FromUnicode` is nowhere required
+  to be injective and a caller's charset may spell two digits with one byte. For
+  signs it is the reverse of the scan's four passes — lenient, unsigned,
+  positive, negative — so the documented precedence survives. `separateSignValue`
+  stays a two-armed switch for the same reason in miniature: the first arm wins,
+  so a charset spelling `'+'` and `'-'` alike reads that byte as positive.
+- **The lenient EBCDIC zones are filled only where the low nibble is 0-9.**
+  Filling a whole zone would newly accept eighteen bytes that are rejected
+  today, and those are exactly the bytes that make a wrong convention loud.
+- **`TestZonedSignByteValueMatchesTheScan` and `TestZonedDigitValueMatchesTheScan`
+  keep a transcription of the scan and check the tables against it**, over all
+  256 byte values and, for signs, all four conventions. A precomputed table is
+  only as auditable as the thing it is checked against; the scan is gone from
+  the package and stays in the tests for that.
+
+The receivers of `zonedBytes` and `zonedCodec` are pointers because of this: a
+value receiver would copy the 256-byte table on every call and hand the win
+straight back.
+
 `signByte` / `signByteValue` are the byte-level pair, `zonedCodec.encodeField` /
 `decodeField` the field-level one; `signAt` is the index the sign is
 overpunched into, and `-1` means unsigned or `SEPARATE` (plain zone throughout).
@@ -322,8 +349,10 @@ exist because the figures it replaces could not be attributed to any data:
   with the toolchain and wants an owner.
 - **Every benchmark fixes and documents its corpus**, and every parameter is a
   parameter because results at two of its values are *not* comparable. A zoned
-  field of nines costs more than one of zeros, because `zonedBytes.digitValue`
-  scans; an alphanumeric field whose bytes decode to non-ASCII runes costs two
+  field of nines used to cost more than one of zeros, because
+  `zonedBytes.digitValue` scanned — #112 made it a table and the three corpora
+  now read alike, which is a result the axis still has to be there to show; an
+  alphanumeric field whose bytes decode to non-ASCII runes costs two
   UTF-8 bytes a character where an ASCII one costs one; a packed field's width
   is a function of its digit count. Those three are exactly the conflations that
   put wrong numbers in #108.

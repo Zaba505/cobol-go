@@ -11,6 +11,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -520,6 +521,152 @@ func TestZonedBytesOfRejectsUnusableCharset(t *testing.T) {
 			require.Equal(t, "partial", runeErr.Charset)
 		})
 	}
+}
+
+// digitValueByScan is the linear scan [zonedBytes.digitValue] used before it
+// became a table lookup, transcribed unchanged. It is the reference the test
+// below checks the table against, byte for byte and error for error, so the
+// claim that the table *is* the scan stays legible now that the scan is gone.
+func digitValueByScan(z *zonedBytes, b byte) (byte, error) {
+	if d := slices.Index(z.digits[:], b); d >= 0 {
+		return byte(d), nil
+	}
+	return 0, ZonedDigitError{Byte: b, Charset: z.charset, Zero: z.digits[0], Nine: z.digits[9]}
+}
+
+func TestZonedDigitValueMatchesTheScan(t *testing.T) {
+	t.Parallel()
+
+	// The two collapsing charsets are the ones that matter. Charset.FromUnicode
+	// is nowhere required to be injective, so a caller may hand over a charset
+	// spelling several digits with one byte; the scan read such a byte as the
+	// *lowest* of them, and the inverse table has to agree or files that
+	// decoded one way yesterday decode another way today.
+	testCases := []struct {
+		name    string
+		charset Charset
+	}{
+		{name: "ascii", charset: ASCII()},
+		{name: "cp037", charset: CP037()},
+		{name: "a caller's own charset", charset: oddballCharset{}},
+		{name: "a charset folding digits in pairs", charset: collapsingCharset{fold: 2}},
+		{name: "a charset spelling every digit alike", charset: collapsingCharset{fold: 10}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			z, err := zonedBytesOf(tc.charset)
+			require.NoError(t, err)
+
+			for b := range 256 {
+				gotDigit, gotErr := z.digitValue(byte(b))
+				wantDigit, wantErr := digitValueByScan(&z, byte(b))
+
+				require.Equalf(t, wantErr, gotErr, "byte %#02X", b)
+				require.Equalf(t, wantDigit, gotDigit, "byte %#02X", b)
+			}
+		})
+	}
+}
+
+func TestZonedSeparateSignValueWhenPlusAndMinusCollide(t *testing.T) {
+	t.Parallel()
+
+	// Nothing requires a charset to spell '+' and '-' differently either, and
+	// the same rule applies: the first candidate wins, so a shared byte is
+	// positive. Reading it as negative would flip the sign of every value in a
+	// separate-sign field.
+	z, err := zonedBytesOf(collapsingCharset{fold: 1, signsCollide: true})
+	require.NoError(t, err)
+	require.Equal(t, z.plus, z.minus)
+
+	negative, err := z.separateSignValue(z.plus)
+	require.NoError(t, err)
+	require.False(t, negative)
+
+	// The write direction is unaffected: it answers from the sign, not from
+	// the byte, so it still spells both signs — alike, as the charset asked.
+	require.Equal(t, z.plus, z.separateSignByte(false))
+	require.Equal(t, z.minus, z.separateSignByte(true))
+
+	// And no other byte has become a sign.
+	for b := range 256 {
+		if byte(b) == z.plus {
+			continue
+		}
+		_, err := z.separateSignValue(byte(b))
+		require.Equalf(t, ZonedSeparateSignError{
+			Byte: byte(b), Charset: z.charset, Plus: z.plus, Minus: z.minus,
+		}, err, "byte %#02X", b)
+	}
+}
+
+// signByteValueByScan is the four-pass linear scan [signByteValue] used before
+// it became a table lookup, transcribed unchanged. It is what
+// TestZonedSignByteValueMatchesTheScan checks the built table against.
+func signByteValueByScan(s SignConvention, b byte) (digit byte, negative bool, err error) {
+	if !s.valid() {
+		return 0, false, EncodingError{Field: "Sign", Reason: "is required and has no default"}
+	}
+	t := zonedSignTables[s]
+	if d := slices.Index(t.negative[:], b); d >= 0 {
+		return byte(d), true, nil
+	}
+	if d := slices.Index(t.positive[:], b); d >= 0 {
+		return byte(d), false, nil
+	}
+	if d := slices.Index(t.unsigned[:], b); d >= 0 {
+		return byte(d), false, nil
+	}
+	if b&0x0F <= 9 {
+		if slices.Contains(t.lenientNegativeZones, b&0xF0) {
+			return b & 0x0F, true, nil
+		}
+		if slices.Contains(t.lenientPositiveZones, b&0xF0) {
+			return b & 0x0F, false, nil
+		}
+	}
+	return 0, false, ZonedSignError{Byte: b, Sign: s}
+}
+
+func TestZonedSignByteValueMatchesTheScan(t *testing.T) {
+	t.Parallel()
+
+	// Exhaustive on purpose: four conventions by 256 byte values is 1024
+	// cases, and moving signByteValue to a precomputed table moves the
+	// documented precedence — negative, positive, unsigned, then the lenient
+	// EBCDIC zones — and the low-nibble guard on those zones into a build
+	// loop. Precedence and guard are cheap to get subtly wrong and expensive
+	// to notice: the failure mode is a byte no convention should accept being
+	// read as a digit, which is the mutual detectability the whole sign model
+	// rests on.
+	for _, sign := range allSignConventions {
+		t.Run(sign.String(), func(t *testing.T) {
+			t.Parallel()
+
+			for b := range 256 {
+				gotDigit, gotNegative, gotErr := signByteValue(sign, byte(b))
+				wantDigit, wantNegative, wantErr := signByteValueByScan(sign, byte(b))
+
+				require.Equalf(t, wantErr, gotErr, "byte %#02X", b)
+				require.Equalf(t, wantDigit, gotDigit, "byte %#02X", b)
+				require.Equalf(t, wantNegative, gotNegative, "byte %#02X", b)
+			}
+		})
+	}
+
+	t.Run("unset", func(t *testing.T) {
+		t.Parallel()
+
+		// The zero row of the table is built like any other and is unreachable
+		// for the reason it always was: the convention is checked first.
+		for b := range 256 {
+			_, _, err := signByteValue(SignUnset, byte(b))
+			require.Equalf(t, EncodingError{Field: "Sign", Reason: "is required and has no default"}, err, "byte %#02X", b)
+		}
+	})
 }
 
 func TestZonedDigitByteRejectsWrongCharset(t *testing.T) {
@@ -1216,6 +1363,37 @@ func (oddballCharset) FromUnicode(r rune) (byte, bool) {
 }
 
 func (oddballCharset) Space() byte { return 0x20 }
+
+// collapsingCharset is a charset whose FromUnicode is deliberately not
+// injective. fold digits share each byte, and when signsCollide is set '+' and
+// '-' share one too. Nothing in the [Charset] contract forbids either, so the
+// zoned inverse mappings have to say which of the colliding characters a shared
+// byte reads back as — and have to keep saying the same thing.
+type collapsingCharset struct {
+	fold         int
+	signsCollide bool
+}
+
+func (collapsingCharset) Name() string { return "collapsing" }
+
+func (collapsingCharset) ToUnicode(b byte) rune { return rune(b) }
+
+func (c collapsingCharset) FromUnicode(r rune) (byte, bool) {
+	switch {
+	case r >= '0' && r <= '9':
+		return byte(0x30 + int(r-'0')/c.fold), true
+	case r == '+':
+		return 0x2B, true
+	case r == '-':
+		if c.signsCollide {
+			return 0x2B, true
+		}
+		return 0x2D, true
+	}
+	return 0, false
+}
+
+func (collapsingCharset) Space() byte { return 0x20 }
 
 // partialCharset spells only as much as its fields admit, standing in for a
 // caller's charset that cannot describe a numeric field at all.

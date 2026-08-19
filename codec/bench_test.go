@@ -261,20 +261,27 @@ var benchZonedSigns = []SignPosition{
 }
 
 // benchZonedEncoding is the encoding every zoned benchmark runs under. It is
-// fixed rather than parameterised: the cost these benchmarks are about is
-// [zonedBytes.digitValue]'s scan, which is a function of the digit values and
-// not of the charset, and the charset axis is already pinned by the
-// alphanumeric benchmarks.
+// fixed rather than parameterised: the cost these benchmarks are about is the
+// per-byte digit and sign classification, which is a function of the digit
+// values and not of the charset — [zonedBytes.digitOf] is one table lookup
+// whatever bytes the charset put in it — and the charset axis is already
+// pinned by the alphanumeric benchmarks.
 func benchZonedEncoding() Encoding { return GnuCOBOLASCII() }
 
 // benchZonedCorpus is one digit corpus of a zoned benchmark: a value all of
 // whose digits are 0, a mixed one, and one all of whose digits are 9.
 //
 // This is the axis that made #108's "ReadZonedInt32: 47.73 ns/op" meaningless.
-// digitValue scans its digit table, costing digit+1 comparisons, so the nines
-// case runs roughly 1.65x the zeros case on the same field width. A single
-// scalar figure for this accessor is a figure for whichever of these three the
+// digitValue used to scan its digit table, costing digit+1 comparisons, so the
+// nines case ran roughly 1.65x the zeros case on the same field width. A single
+// scalar figure for that accessor was a figure for whichever of these three the
 // author happened to have in hand.
+//
+// #112 replaced both scans with tables and the read side is now flat across the
+// three: 59ns at nine digits and 78ns at eighteen, whatever the digits are. The
+// axis stays all the same. It is what *showed* the data dependence, it is what
+// would show one coming back, and the write side is corpus sensitive still, for
+// its own reason — see BenchmarkWriteZonedInt64.
 //
 // Every value is non-negative, so a case differs from its neighbours in the
 // digits and not in the sign byte; the sign position axis is what varies that.
@@ -295,7 +302,7 @@ var benchZonedCorpora = []benchZonedCorpus{
 const (
 	// benchZonedInt32Digits is the widest digit count ReadZonedInt32 and
 	// WriteZonedInt32 accept, and benchZonedInt64Digits the widest the int64
-	// pair accepts. Both are pinned at the maximum so that the per-digit scan
+	// pair accepts. Both are pinned at the maximum so that the per-digit cost
 	// these benchmarks exist to expose is at its most visible.
 	benchZonedInt32Digits = 9
 	benchZonedInt64Digits = 18
@@ -404,8 +411,9 @@ func BenchmarkReadAlphanumeric(b *testing.B) {
 // digit count.
 //
 // Corpus: benchZonedCorpora at benchZonedInt32Digits digits, encoded under
-// benchZonedEncoding by the package's own writer. The zeros-to-nines spread is
-// the 1.65x that a single quoted ns/op for this accessor hides.
+// benchZonedEncoding by the package's own writer. The zeros-to-nines spread was
+// the 1.65x that a single quoted ns/op for this accessor hid; since #112 the
+// three read alike, and that they do is the thing worth re-measuring.
 func BenchmarkReadZonedInt32(b *testing.B) {
 	enc := benchZonedEncoding()
 
@@ -436,8 +444,8 @@ func BenchmarkReadZonedInt32(b *testing.B) {
 
 // BenchmarkReadZonedInt64 is BenchmarkReadZonedInt32 at benchZonedInt64Digits
 // digits, the widest the int64 accessor takes. Twice the digits is twice the
-// scans, so its figures are not comparable with the int32 ones and are not
-// meant to be.
+// per-byte lookups, so its figures are not comparable with the int32 ones and
+// are not meant to be.
 //
 // Corpus: benchZonedCorpora at benchZonedInt64Digits digits, encoded under
 // benchZonedEncoding by the package's own writer.
@@ -603,7 +611,7 @@ func BenchmarkWritePackedInt64(b *testing.B) {
 // writer has no code of its own for a benchmark to cover, and the int64 case
 // exercises that shared body at the wider field. The read side is not symmetric
 // with this because readZonedDigits' per-byte classification is where the
-// corpus sensitivity lives, and its cost is a function of the digit count.
+// corpus sensitivity lived, and its cost is a function of the digit count.
 // [zonedCodec.encodeField] has the reader's allocate-then-fill shape, and the
 // writer turns out to be corpus sensitive in its own way rather than in the
 // reader's: it is handed the value and not the digit bytes, so what varies with

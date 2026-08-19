@@ -241,10 +241,22 @@ type zonedBytes struct {
 	charset string
 	// digits[d] is the byte spelling the plain (unsigned zone) digit d.
 	digits [10]byte
+	// digitOf inverts digits: digitOf[b] is the digit byte b spells, or
+	// noZonedDigit where it spells none. It is the read direction of a
+	// mapping whose write direction is one array index, and it is a table
+	// rather than a scan of digits because a scan costs d+1 comparisons per
+	// byte — which made reading all-nines data measurably slower than
+	// reading all-zeros.
+	digitOf [256]byte
 	// plus and minus are the SIGN SEPARATE bytes, which are
 	// charset-sensitive and sign-convention-independent.
 	plus, minus byte
 }
+
+// noZonedDigit marks a byte spelling no digit in [zonedBytes.digitOf]. Digit
+// values are 0-9, so any value above 9 would do; 0xFF is chosen because a
+// half-built table then rejects rather than accepts.
+const noZonedDigit byte = 0xFF
 
 // zonedBytesOf derives the zoned decimal byte values of cs, reporting an
 // [UnrepresentableRuneError] naming the first character it has no byte for.
@@ -261,6 +273,19 @@ func zonedBytesOf(cs Charset) (zonedBytes, error) {
 		}
 		z.digits[d] = b
 	}
+
+	// Invert digits. The fill runs from 9 down to 0 so that the *lowest*
+	// digit wins a byte two digits share, which is what slices.Index gave
+	// before this table existed. Charset.FromUnicode is nowhere required to
+	// be injective, so a caller's charset may well spell two digits with one
+	// byte; a forward fill would then read that byte as the highest of them
+	// and silently change what such a file decodes to.
+	for i := range z.digitOf {
+		z.digitOf[i] = noZonedDigit
+	}
+	for d := len(z.digits) - 1; d >= 0; d-- {
+		z.digitOf[z.digits[d]] = byte(d)
+	}
 	for _, sep := range []struct {
 		r   rune
 		dst *byte
@@ -276,7 +301,7 @@ func zonedBytesOf(cs Charset) (zonedBytes, error) {
 
 // digitByte returns the byte spelling plain digit d, which is every byte of an
 // unsigned field and every non-sign byte of a signed one.
-func (z zonedBytes) digitByte(d byte) (byte, error) {
+func (z *zonedBytes) digitByte(d byte) (byte, error) {
 	if d > 9 {
 		return 0, errZonedDigitValue
 	}
@@ -287,9 +312,9 @@ func (z zonedBytes) digitByte(d byte) (byte, error) {
 // that is not one rather than coercing it: an EBCDIC F5 read under an ASCII
 // charset is a wrong charset, and it is the first zoned field of the first
 // record that says so.
-func (z zonedBytes) digitValue(b byte) (byte, error) {
-	if d := slices.Index(z.digits[:], b); d >= 0 {
-		return byte(d), nil
+func (z *zonedBytes) digitValue(b byte) (byte, error) {
+	if d := z.digitOf[b]; d != noZonedDigit {
+		return d, nil
 	}
 	return 0, ZonedDigitError{Byte: b, Charset: z.charset, Zero: z.digits[0], Nine: z.digits[9]}
 }
@@ -297,7 +322,7 @@ func (z zonedBytes) digitValue(b byte) (byte, error) {
 // separateSignByte returns the SIGN SEPARATE byte for a value of the given
 // sign. A separate sign is charset-sensitive and convention-independent: 2B/2D
 // in ASCII, 4E/60 in EBCDIC.
-func (z zonedBytes) separateSignByte(negative bool) byte {
+func (z *zonedBytes) separateSignByte(negative bool) byte {
 	if negative {
 		return z.minus
 	}
@@ -311,7 +336,14 @@ func (z zonedBytes) separateSignByte(negative bool) byte {
 // information at all, which makes it the safest form to write and the form that
 // gives a reader nothing to check a convention guess against — so this byte is
 // the only thing there is to validate, and it is validated.
-func (z zonedBytes) separateSignValue(b byte) (bool, error) {
+// There are two byte values to compare against, so this stays a comparison
+// where digitValue became a table: a 256-byte lookup would be slower to build
+// and no faster to consult. The order of the arms is load bearing all the same,
+// for digitValue's reason — nothing requires Charset.FromUnicode to give '+'
+// and '-' different bytes, and a switch takes the first matching arm, so a
+// charset spelling both alike reads that byte as positive. That is the same
+// answer the digit table's reverse fill preserves: the earlier candidate wins.
+func (z *zonedBytes) separateSignValue(b byte) (bool, error) {
 	switch b {
 	case z.plus:
 		return false, nil
@@ -379,6 +411,87 @@ var zonedSignTables = [...]zonedSignTable{
 	},
 }
 
+// zonedSignReading is one entry of [zonedSignReadings]: the digit a
+// sign-carrying byte spells under one convention, with zonedSignNegative set
+// when that byte makes the field negative, or noZonedSignReading when the byte
+// names no digit at all.
+type zonedSignReading byte
+
+const (
+	// noZonedSignReading marks a byte that is a [ZonedSignError] under the
+	// convention indexing its row.
+	noZonedSignReading zonedSignReading = 0xFF
+	// zonedSignNegative is the sign bit of a reading; the digit is what is
+	// left once it is cleared.
+	zonedSignNegative zonedSignReading = 0x10
+)
+
+// digit reports the digit r spells, which is meaningful only when r is not
+// noZonedSignReading.
+func (r zonedSignReading) digit() byte { return byte(r &^ zonedSignNegative) }
+
+// negative reports whether r makes the field negative.
+func (r zonedSignReading) negative() bool { return r&zonedSignNegative != 0 }
+
+// zonedSignReadings inverts [zonedSignTables]: zonedSignReadings[s][b] is the
+// reading of sign-carrying byte b under convention s. The [SignUnset] row is
+// the inverse of the zero table and is unreachable for the reason that row is,
+// [signByteValue] checking the convention first.
+//
+// This is a table rather than the four scans it replaces because a rejected
+// byte cost all four of them and a negative digit cost up to twenty
+// comparisons. It is safe to precompute only because the rows are pairwise
+// disjoint except where positive and unsigned coincide — [SignASCIIZone37] and
+// [SignRealia], where the two rows agree on the answer as well as on the byte —
+// so no byte's reading depends on which arm of the scan reached it first. That
+// claim is not left to this comment: TestZonedSignByteValueMatchesTheScan
+// checks all four conventions against a transcription of the scan, over every
+// one of the 256 byte values.
+var zonedSignReadings = buildZonedSignReadings()
+
+// buildZonedSignReadings inverts every row of [zonedSignTables].
+//
+// The fills run in the *reverse* of the order [signByteValue]'s scan tried
+// them — lenient, then unsigned, then positive, then negative — so a later fill
+// overwrites an earlier one and the documented precedence survives: a byte in
+// two rows reads as it did when the scan stopped at the first. Within a row the
+// digits are filled from 9 down to 0 for the same reason slices.Index gave the
+// lowest index, though no shipped row holds a duplicate.
+//
+// The lenient zones are filled only where the low nibble is 0-9, which is the
+// scan's own guard. Filling a whole zone would newly accept the eighteen bytes
+// whose low nibble is A-F, and those are exactly the bytes that make a wrong
+// convention loud.
+func buildZonedSignReadings() [len(zonedSignTables)][256]zonedSignReading {
+	var rs [len(zonedSignTables)][256]zonedSignReading
+	for s := range rs {
+		t := &zonedSignTables[s]
+		for b := range rs[s] {
+			rs[s][b] = noZonedSignReading
+		}
+		for _, zone := range t.lenientPositiveZones {
+			for d := range zonedSignReading(10) {
+				rs[s][zone&0xF0|byte(d)] = d
+			}
+		}
+		for _, zone := range t.lenientNegativeZones {
+			for d := range zonedSignReading(10) {
+				rs[s][zone&0xF0|byte(d)] = d | zonedSignNegative
+			}
+		}
+		for d := len(t.unsigned) - 1; d >= 0; d-- {
+			rs[s][t.unsigned[d]] = zonedSignReading(d)
+		}
+		for d := len(t.positive) - 1; d >= 0; d-- {
+			rs[s][t.positive[d]] = zonedSignReading(d)
+		}
+		for d := len(t.negative) - 1; d >= 0; d-- {
+			rs[s][t.negative[d]] = zonedSignReading(d) | zonedSignNegative
+		}
+	}
+	return rs
+}
+
 // signByte returns the byte spelling digit d in the sign-carrying position of a
 // signed zoned field whose value has the given sign, under convention s.
 //
@@ -413,28 +526,16 @@ func signByteValue(s SignConvention, b byte) (digit byte, negative bool, err err
 	if !s.valid() {
 		return 0, false, EncodingError{Field: "Sign", Reason: "is required and has no default"}
 	}
-	t := zonedSignTables[s]
-	if d := slices.Index(t.negative[:], b); d >= 0 {
-		return byte(d), true, nil
+	// The precedence this used to scan for — negative, then positive, then
+	// the unsigned zone, since an unsigned-zone byte in a signed field is a
+	// non-negative value rather than a corruption, and only then the lenient
+	// EBCDIC zones — is baked into the fill order of the table. See
+	// buildZonedSignReadings.
+	r := zonedSignReadings[s][b]
+	if r == noZonedSignReading {
+		return 0, false, ZonedSignError{Byte: b, Sign: s}
 	}
-	if d := slices.Index(t.positive[:], b); d >= 0 {
-		return byte(d), false, nil
-	}
-	// An unsigned-zone byte in a signed field is a non-negative value: IBM
-	// reads an F zone as positive, and the three ASCII conventions all read
-	// 30-39 as one.
-	if d := slices.Index(t.unsigned[:], b); d >= 0 {
-		return byte(d), false, nil
-	}
-	if b&0x0F <= 9 {
-		if slices.Contains(t.lenientNegativeZones, b&0xF0) {
-			return b & 0x0F, true, nil
-		}
-		if slices.Contains(t.lenientPositiveZones, b&0xF0) {
-			return b & 0x0F, false, nil
-		}
-	}
-	return 0, false, ZonedSignError{Byte: b, Sign: s}
+	return r.digit(), r.negative(), nil
 }
 
 // zonedCodec is the byte-level half of zoned decimal: the charset facts and the
@@ -472,7 +573,7 @@ func newZonedCodec(enc Encoding) (zonedCodec, error) {
 //
 // dst is left untouched unless the whole field encodes, so a rejected field
 // writes nothing.
-func (c zonedCodec) encodeField(dst, ds []byte, signAt int, negative bool) error {
+func (c *zonedCodec) encodeField(dst, ds []byte, signAt int, negative bool) error {
 	if len(dst) != len(ds) {
 		return errZonedFieldWidth
 	}
@@ -511,7 +612,7 @@ func (c zonedCodec) encodeField(dst, ds []byte, signAt int, negative bool) error
 // alongside a non-nil error. A zoned field is several bytes wide, so the caller
 // stamps start+at rather than the offset the field ended at — the same reason
 // [Reader.readPackedDigits] stamps the byte holding a bad nibble.
-func (c zonedCodec) decodeField(src []byte, signAt int) (ds []byte, negative bool, at int, err error) {
+func (c *zonedCodec) decodeField(src []byte, signAt int) (ds []byte, negative bool, at int, err error) {
 	if signAt >= len(src) {
 		return nil, false, 0, errZonedSignPosition
 	}
