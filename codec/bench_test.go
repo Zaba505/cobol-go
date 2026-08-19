@@ -17,10 +17,21 @@ import (
 // This file is the package's performance baseline. Two rules hold throughout,
 // and both exist because the numbers this file replaces were unattributable.
 //
-// **allocs/op is the assertion; ns/op is orientation.** The allocation count is
-// machine independent and reproducible, so it is the figure a change may be
-// held to. Wall time is not: it moves with the machine, the toolchain and the
-// other tenants of the runner, and nothing should be built on it.
+// **allocs/op is the figure worth comparing; ns/op is orientation.** The
+// allocation count is machine independent and reproducible, so it is the figure
+// a change may be held to. Wall time is not: it moves with the machine, the
+// toolchain and the other tenants of the runner, and nothing should be built on
+// it.
+//
+// Neither figure is *enforced*, and the wording above is deliberate about that.
+// Nothing here asserts an allocation count, there is no recorded baseline, and
+// by the decision below CI never executes these functions. "Worth comparing" is
+// a claim about which number means something when a human compares two runs,
+// not a mechanism. The mechanism, if one is ever wanted, is a
+// [testing.AllocsPerRun] guard over a handful of accessors: that would be an
+// ordinary test, would run in CI, and would catch an allocation regression. It
+// is out of scope here because a count pinned in a test moves with the
+// toolchain and needs an owner.
 //
 // **Every benchmark fixes and documents its corpus.** A number that cannot be
 // attributed to data is not a measurement of anything. The accessors here are
@@ -107,17 +118,30 @@ func benchWriter(b *testing.B, enc Encoding) *Writer {
 }
 
 // benchField encodes one field with the package's own [Writer] and returns its
-// bytes. Read benchmarks build their corpora this way rather than from hex
-// literals: the corpus is then by construction a field the package would have
-// produced, at whatever width and sign position the case declares, and a
-// benchmark cannot drift from the encoding it claims to measure.
-func benchField(b *testing.B, enc Encoding, write func(*Writer) error) []byte {
+// bytes, checking that it got exactly wantWidth of them. Read benchmarks build
+// their corpora this way rather than from hex literals: the corpus is then by
+// construction a field the package would have produced, at whatever width and
+// sign position the case declares, and a benchmark cannot drift from the
+// encoding it claims to measure.
+//
+// wantWidth is not a formality. It is this helper that stands between a corpus
+// and a field-width misalignment — a corpus a byte narrower than the field
+// being read makes every read after the first straddle a boundary, and the
+// benchmark would still run and still report a number. Stating the width at the
+// call site pins the width arithmetic (zonedWidth's SEPARATE +1, packedWidth's
+// ceil((digits+1)/2)) rather than assuming it, and it pins the [Writer]'s
+// unbuffered contract: Writer.write goes straight to the underlying
+// [io.Writer], with no Flush or Close to call, so the buffer holds the whole
+// field the moment write returns. Were that ever to change, this length check
+// is what would fail.
+func benchField(b *testing.B, enc Encoding, wantWidth int, write func(*Writer) error) []byte {
 	b.Helper()
 
 	var buf bytes.Buffer
 	w, err := NewWriter(&buf, enc)
 	require.NoError(b, err)
 	require.NoError(b, write(w))
+	require.Len(b, buf.Bytes(), wantWidth)
 	return buf.Bytes()
 }
 
@@ -162,6 +186,26 @@ func benchDigits(b *testing.B, n int) int64 {
 	return v
 }
 
+// requireReadsBack consumes one field from the corpus under test and requires
+// it to decode to want, before the timed loop starts.
+//
+// Without it a read benchmark asserts only that its corpus parses, not that it
+// holds what its name claims: a "nines" corpus that benchField had somehow
+// built as zeros would run happily and its number would be attributed to the
+// wrong data, which is the single failure this whole file exists to prevent.
+//
+// Consuming a field is safe and costs nothing measurable. Every corpus is a
+// whole number of copies of the field, and repeatReader wraps only at the
+// corpus end, so reads stay aligned to field boundaries however many are taken
+// before b.ResetTimer.
+func requireReadsBack[T comparable](b *testing.B, want T, read func() (T, error)) {
+	b.Helper()
+
+	got, err := read()
+	require.NoError(b, err)
+	require.Equal(b, want, got)
+}
+
 // benchAlphaWidth is the width of every alphanumeric benchmark's field, in
 // bytes and therefore in characters. It matches testRecord's NAME field.
 const benchAlphaWidth = 12
@@ -178,14 +222,25 @@ var benchAlphaCharsets = []struct {
 	{name: "cp037", cs: CP037()},
 }
 
-// benchAlphaCorpora is the corpus axis of the alphanumeric benchmarks, and it
-// is the pair that #108 conflated: two headline figures, 88 allocs/record and
-// 100 allocs/record, that were really one shape measured over each of these.
+// benchAlphaCorpora is the corpus axis of the alphanumeric benchmarks. It is
+// the field-level mechanism behind a record-level conflation in #108, where 88
+// allocs/record and 100 allocs/record were quoted for what was described as one
+// shape: the two runs differed in whether the record's alphanumeric fields
+// decoded to ASCII runes. These corpora are one field each and so cannot
+// themselves produce an allocs/record figure — they isolate the cause, and
+// BenchmarkDecodeRecord is where a record-level number comes from.
 //
 // Both are exactly benchAlphaWidth characters, and neither has padding to trim,
 // so a case differs from its partner only in how wide the decoded runes are —
-// one UTF-8 byte each against two. Both are spellable in both charsets, so the
-// 2x2 is a genuine 2x2 rather than four unrelated cases.
+// one UTF-8 byte each against two.
+//
+// Both are spellable in both charsets, which is what makes this a genuine 2x2
+// rather than four unrelated cases, and that rests on a documented property of
+// each table rather than on luck. [ASCII] is the identity over all 256 bytes
+// and not a 7-bit table, so every rune below U+0100 has a byte; cp037 is
+// bijective over all 256 bytes and carries these particular accented letters at
+// 0x42-0x53. benchTextBytes fails the benchmark rather than substituting a
+// byte, so a table that stopped covering them would be loud.
 var benchAlphaCorpora = []struct {
 	name string
 	text string
@@ -295,8 +350,9 @@ func benchRecord() testRecord {
 // the two is what that accessor's decoding costs.
 //
 // Corpus: n bytes cycling 0x00-0xFF, which ReadBytes neither translates nor
-// trims. The widths are a 6-byte-ish field, a double word, a short text field
-// and a large one.
+// trims. The widths are a word, a double word, a short text field and a large
+// one: 4 and 8 are what a binary field occupies, 40 is a name, and 256 is a
+// comment or a binary payload.
 func BenchmarkReadBytes(b *testing.B) {
 	for _, n := range []int{4, 8, 40, 256} {
 		b.Run("n="+strconv.Itoa(n), func(b *testing.B) {
@@ -357,10 +413,13 @@ func BenchmarkReadZonedInt32(b *testing.B) {
 		b.Run(sign.String(), func(b *testing.B) {
 			for _, corpus := range benchZonedCorpora {
 				b.Run(corpus.name, func(b *testing.B) {
-					field := benchField(b, enc, func(w *Writer) error {
+					field := benchField(b, enc, zonedWidth(benchZonedInt32Digits, sign), func(w *Writer) error {
 						return w.WriteZonedInt32(corpus.i32, benchZonedInt32Digits, sign)
 					})
 					r := benchReader(b, enc, field)
+					requireReadsBack(b, corpus.i32, func() (int32, error) {
+						return r.ReadZonedInt32(benchZonedInt32Digits, sign)
+					})
 
 					b.ReportAllocs()
 					b.ResetTimer()
@@ -389,10 +448,13 @@ func BenchmarkReadZonedInt64(b *testing.B) {
 		b.Run(sign.String(), func(b *testing.B) {
 			for _, corpus := range benchZonedCorpora {
 				b.Run(corpus.name, func(b *testing.B) {
-					field := benchField(b, enc, func(w *Writer) error {
+					field := benchField(b, enc, zonedWidth(benchZonedInt64Digits, sign), func(w *Writer) error {
 						return w.WriteZonedInt64(corpus.i64, benchZonedInt64Digits, sign)
 					})
 					r := benchReader(b, enc, field)
+					requireReadsBack(b, corpus.i64, func() (int64, error) {
+						return r.ReadZonedInt64(benchZonedInt64Digits, sign)
+					})
 
 					b.ReportAllocs()
 					b.ResetTimer()
@@ -422,10 +484,11 @@ func BenchmarkReadPackedInt64(b *testing.B) {
 	for _, digits := range benchPackedDigits {
 		b.Run("digits="+strconv.Itoa(digits), func(b *testing.B) {
 			v := benchDigits(b, digits)
-			field := benchField(b, enc, func(w *Writer) error {
+			field := benchField(b, enc, packedWidth(digits), func(w *Writer) error {
 				return w.WritePackedInt64(v, digits, Signed)
 			})
 			r := benchReader(b, enc, field)
+			requireReadsBack(b, v, func() (int64, error) { return r.ReadPackedInt64(digits) })
 
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -444,6 +507,15 @@ func BenchmarkReadPackedInt64(b *testing.B) {
 // allocs/op is allocs per record — the two figures come from the same run and
 // cannot be quoted from different corpora, which is the failure this benchmark
 // exists to make impossible.
+//
+// The destination is one testRecord reused across iterations, which is how a
+// caller stepping through a file writes the loop. It does not flatter the
+// allocs/record figure: every accessor assigns a freshly allocated value —
+// [Reader.ReadBytes] documents that the slice it returns is the caller's own
+// and is not a view into anything the Reader reuses — so there is no capacity
+// on the struct for a later record to decode into. Moving the declaration
+// inside the loop would change the figure by the one struct, not by the
+// nineteen field allocations.
 //
 // Corpus: benchRecord under benchRecordEncoding.
 func BenchmarkDecodeRecord(b *testing.B) {
@@ -470,8 +542,9 @@ func BenchmarkDecodeRecord(b *testing.B) {
 
 // BenchmarkWriteAlphanumeric is the mirror image of BenchmarkReadAlphanumeric,
 // over the same 2x2 of charset and corpus. The [Writer] side has never been
-// measured at all, and [Writer.WriteAlphanumericJustified] has the same
-// allocate-then-fill shape the reader has.
+// measured at all, and [Writer.WriteAlphanumeric] — which is
+// [Writer.WriteAlphanumericJustified] at [JustifyLeft], so the shared body is
+// what is measured — has the same allocate-then-fill shape the reader has.
 //
 // Corpus: benchAlphaCorpora, twelve characters written into a
 // benchAlphaWidth-byte field, so no padding is added and the case differs from
@@ -523,6 +596,14 @@ func BenchmarkWritePackedInt64(b *testing.B) {
 
 // BenchmarkWriteZonedInt64 is the mirror image of BenchmarkReadZonedInt64, over
 // the same sign positions and the same three digit corpora.
+//
+// There is deliberately no WriteZonedInt32 counterpart, where the read side has
+// both widths. [Writer.WriteZonedInt32] and [Writer.WriteZonedInt64] are one
+// body — both are writeZonedInt with a different digit ceiling — so the int32
+// writer has no code of its own for a benchmark to cover, and the int64 case
+// exercises that shared body at the wider field. The read side is not symmetric
+// with this because readZonedDigits' per-byte classification is where the
+// corpus sensitivity lives, and its cost is a function of the digit count.
 // [zonedCodec.encodeField] has the reader's allocate-then-fill shape, and the
 // writer turns out to be corpus sensitive in its own way rather than in the
 // reader's: it is handed the value and not the digit bytes, so what varies with
