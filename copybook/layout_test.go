@@ -402,6 +402,107 @@ func TestNewLayout(t *testing.T) {
 			wantLength: 7,
 		},
 		{
+			// IBM has admitted unequal level numbers at the same
+			// hierarchy level since OS Full ANS COBOL (GC28-6396-6,
+			// Apr 1976, p. 94): a 04 written where a 05 was meant is
+			// "treated as though it had been written as an 05".
+			// REDEFINES asks for the same level *in the hierarchy*
+			// and not the same level number, so B overlays A at
+			// offset 0 exactly as an equally numbered entry would.
+			// The offsets are the assertion: redefinedBy resolves its
+			// target by name among the group's placed items and
+			// compares no level numbers, and a later check that did
+			// would turn this row into a RedefinesError rather than
+			// into a quietly different tree.
+			name: "a redefines numbered below its target overlays it all the same",
+			src: `01 R.
+   05 A PIC X(6).
+   04 B REDEFINES A PIC X(6).
+   03 C PIC X(4).
+`,
+			dialect: IBMEnterprise(),
+			want: []span{
+				{name: "R", offset: 0, length: 10},
+				{name: "A", offset: 0, length: 6},
+				{name: "B", offset: 0, length: 6},
+				{name: "C", offset: 6, length: 4},
+			},
+			wantLength: 10,
+		},
+		{
+			// Every redefinition of A overlays A itself rather than
+			// the one before it, whatever number each was written
+			// with, so all three start at 0 and only D advances the
+			// cursor.
+			name: "several items may redefine one target with unequal level numbers",
+			src: `01 R.
+   05 A PIC X(6).
+   04 B REDEFINES A PIC X(6).
+   03 C REDEFINES A PIC X(6).
+   03 D PIC X(2).
+`,
+			dialect: IBMEnterprise(),
+			want: []span{
+				{name: "R", offset: 0, length: 8},
+				{name: "A", offset: 0, length: 6},
+				{name: "B", offset: 0, length: 6},
+				{name: "C", offset: 0, length: 6},
+				{name: "D", offset: 6, length: 2},
+			},
+			wantLength: 8,
+		},
+		{
+			// B's 04 closes both A2's 10 and A's 05, so B is A's
+			// sibling and redefines the whole group — the shape of
+			// the 1976 manual's own example, where the nonstandard
+			// 04 B-1 sits beside the 05 C-1 it was written after.
+			name: "a redefines closes back through several groups to reach its target",
+			src: `01 R.
+   05 A.
+      10 A1 PIC X(4).
+      10 A2 PIC X(6).
+   04 B REDEFINES A PIC X(10).
+   04 C PIC X(2).
+`,
+			dialect: IBMEnterprise(),
+			want: []span{
+				{name: "R", offset: 0, length: 12},
+				{name: "A", offset: 0, length: 10},
+				{name: "A1", offset: 0, length: 4},
+				{name: "A2", offset: 4, length: 6},
+				{name: "B", offset: 0, length: 10},
+				{name: "C", offset: 10, length: 2},
+			},
+			wantLength: 12,
+		},
+		{
+			// The other direction of unequal, as far as it goes: B's
+			// 07 is greater than the 05 of the group it closes back
+			// into and less than the 10 of the item it redefines.
+			// Strictly greater than its *target's* number is not
+			// reachable — an entry numbered above the nearest open
+			// item is subordinate to it, so it is never that item's
+			// sibling and can never redefine it; see the two error
+			// cases named "redefines numbered above" for what that
+			// is instead.
+			name: "a redefines numbered above its group still redefines its sibling",
+			src: `01 R.
+   05 GRP.
+      10 A PIC X(6).
+      07 B REDEFINES A PIC X(6).
+   05 C PIC X(2).
+`,
+			dialect: IBMEnterprise(),
+			want: []span{
+				{name: "R", offset: 0, length: 8},
+				{name: "GRP", offset: 0, length: 6},
+				{name: "A", offset: 0, length: 6},
+				{name: "B", offset: 0, length: 6},
+				{name: "C", offset: 6, length: 2},
+			},
+			wantLength: 8,
+		},
+		{
 			// Under a lenient dialect a longer redefining item
 			// extends the group it sits in rather than being an
 			// error, and C starts past the end of the longer of the
@@ -701,6 +802,24 @@ func TestNewLayoutErrors(t *testing.T) {
 			dialect:  IBMEnterprise(),
 			target:   &RedefinesError{},
 			contains: `no preceding item named "NOWHERE"`,
+		},
+		{
+			// A number above the nearest open item's makes the entry
+			// subordinate to that item rather than its sibling, so B
+			// becomes a child of A — and the group B then looks for
+			// its target in is A itself, which cannot contain A.
+			// This is the boundary of the extension: unequal level
+			// numbers are admitted, but only in the direction that
+			// leaves the two entries siblings.
+			name: "redefines numbered above a group target is subordinate to it instead",
+			src: `01 R.
+   05 A.
+      10 A1 PIC X(4).
+   07 B REDEFINES A PIC X(4).
+`,
+			dialect:  IBMEnterprise(),
+			target:   &RedefinesError{},
+			contains: `no preceding item named "A"`,
 		},
 		{
 			name: "redefines may not name an item that follows it",

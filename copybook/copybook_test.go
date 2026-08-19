@@ -818,6 +818,37 @@ func TestBuildErrors(t *testing.T) {
 			message: `level-10 item "B" at line 3, column 7 is subordinate to "A", which has a PICTURE and so is an elementary item`,
 		},
 		{
+			// The divergence from a literal reading of IBM's "treat
+			// the 04 as though it had been written as an 05": nothing
+			// is renumbered, so B's 04 sets the number the following
+			// siblings must not exceed and C's 05 lands inside B,
+			// which has a PICTURE. IBM compiles this; this package
+			// rejects it, deliberately (root SPEC.md, Semantics:
+			// "Level numbers are relative"). Pinned so the choice
+			// cannot change without a test changing with it.
+			name: "a lower-numbered sibling caps the numbers the siblings after it may use",
+			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
+				return parseFragment(t, "01 REC.\n   05 A PIC X(6).\n   04 B PIC X(2).\n   05 C PIC X(1).\n")
+			},
+			target:  &LevelSequenceError{},
+			message: `level-05 item "C" at line 4, column 4 is subordinate to "B", which has a PICTURE and so is an elementary item`,
+		},
+		{
+			// The boundary of the unequal-level-numbers extension a
+			// REDEFINES relies on: a lower-numbered entry closes
+			// groups until it is a sibling, but a higher-numbered one
+			// is subordinate to what precedes it and so can never be
+			// the sibling REDEFINES needs. Nothing about the
+			// REDEFINES clause changes that — the tree is built from
+			// level numbers alone.
+			name: "redefines numbered above an elementary target is subordinate to it instead",
+			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
+				return parseFragment(t, "01 REC.\n   05 A PIC X(6).\n   07 B REDEFINES A PIC X(6).\n")
+			},
+			target:  &LevelSequenceError{},
+			message: `level-07 item "B" at line 3, column 4 is subordinate to "A", which has a PICTURE and so is an elementary item`,
+		},
+		{
 			name: "condition name with nothing to qualify",
 			entries: func(t *testing.T) []*cobol.DataDescriptionEntry {
 				return parseFragment(t, "88 LONELY VALUE 'A'.\n")

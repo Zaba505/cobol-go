@@ -648,6 +648,12 @@ func (l *layouter) placeChildren(f *Field, item *Item) error {
 
 // redefinedBy resolves a child's REDEFINES clause against the items of its group
 // already placed, returning nil when it carries no such clause.
+//
+// The match is by name alone. REDEFINES requires the two entries to hold the
+// same level *in the hierarchy* — which they do by being items of one group —
+// and not to carry the same level number, so comparing Level here would reject
+// the copybooks IBM has admitted since 1976 (root SPEC.md, Semantics:
+// "REDEFINES asks for the same level, not the same level number").
 func (l *layouter) redefinedBy(child *Field, group *Item) (*Item, error) {
 	clause := redefinesOf(child.Entry)
 	if clause == nil || clause.Name == nil {
