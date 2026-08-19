@@ -3901,3 +3901,253 @@ func TestReadingDoesNotAllocate(t *testing.T) {
 		})
 	}
 }
+
+// TestReadAlphanumericMatchesWriteRuneUnderEveryCharset is the accessor-level
+// half of TestAlphaTableAppendFieldMatchesWriteRune: whatever the derived
+// table is worth, what [Reader.ReadAlphanumericJustified] returns has to be
+// what the [Charset.ToUnicode] plus [strings.Builder.WriteRune] loop it
+// replaced returned, for every byte value and under both justifications.
+//
+// It runs over alphaTableCharsets rather than alphanumericCharsets, so the
+// three charsets whose runes a code page would never spell — three UTF-8
+// bytes, four, and not a character at all — are on the accessor's path and not
+// only on the table's.
+func TestReadAlphanumericMatchesWriteRuneUnderEveryCharset(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range alphaTableCharsets {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := allByteValues()
+
+			var sb strings.Builder
+			for _, b := range src {
+				sb.WriteRune(tc.charset.ToUnicode(b))
+			}
+			translated := sb.String()
+			require.Greater(t, len(translated), len(src),
+				"this charset decodes the corpus one byte per byte, so a verbatim read would pass")
+
+			for _, j := range []Justification{JustifyLeft, JustifyRight} {
+				t.Run(j.String(), func(t *testing.T) {
+					t.Parallel()
+
+					// The reference trims the *translated* string, which is
+					// what the accessor documents: the space stripped is
+					// U+0020 and not the charset's space byte.
+					want := strings.TrimRight(translated, " ")
+					if j == JustifyRight {
+						want = strings.TrimLeft(translated, " ")
+					}
+
+					r, err := NewReader(bytes.NewReader(src), charsetEncoding(tc.charset))
+					require.NoError(t, err)
+
+					got, err := r.ReadAlphanumericJustified(len(src), j)
+					require.NoError(t, err)
+					require.Equal(t, want, got)
+				})
+			}
+		})
+	}
+}
+
+// TestReadAlphanumericReusesItsScratchAcrossFields walks a wide field, then a
+// narrow one, then a wide one again through a single [Reader], which is where
+// a translation scratch reused across fields shows a stale tail.
+//
+// The scratch is sized for the widest field the Reader has seen and never
+// shrunk — the policy [Reader.wide] already follows — so a narrow field
+// decoded into it is surrounded by the previous field's bytes on both sides.
+// Only the prefix the width says is meaningful may reach the caller.
+func TestReadAlphanumericReusesItsScratchAcrossFields(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range alphaTableCharsets {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cs := tc.charset
+			wide := allByteValues()
+			// A narrow field of bytes the charset spells as something other
+			// than a space, so nothing is trimmed and the whole of what the
+			// accessor returns is compared.
+			narrow := []byte{0x41, 0x42, 0x43}
+
+			var stream []byte
+			stream = append(stream, wide...)
+			stream = append(stream, narrow...)
+			stream = append(stream, wide...)
+
+			translate := func(b []byte) string {
+				var sb strings.Builder
+				for _, c := range b {
+					sb.WriteRune(cs.ToUnicode(c))
+				}
+				return strings.TrimRight(sb.String(), " ")
+			}
+
+			r, err := NewReader(bytes.NewReader(stream), charsetEncoding(cs))
+			require.NoError(t, err)
+
+			first, err := r.ReadAlphanumeric(len(wide))
+			require.NoError(t, err)
+			require.Equal(t, translate(wide), first)
+
+			middle, err := r.ReadAlphanumeric(len(narrow))
+			require.NoError(t, err)
+			require.Equal(t, translate(narrow), middle)
+
+			last, err := r.ReadAlphanumeric(len(wide))
+			require.NoError(t, err)
+			require.Equal(t, translate(wide), last)
+
+			// The first field's value survives the two after it, which is the
+			// aliasing half: a returned string that viewed the scratch would
+			// have been overwritten twice by now.
+			require.Equal(t, translate(wide), first)
+		})
+	}
+}
+
+// TestNewReaderTranslatesNothing is TestZonedAccessorsNeverTranslateThroughTheCharset's
+// premise stated on its own: constructing a [Reader] performs no character
+// translation at all, so the derived table cannot be built there however
+// tempting a fully built Reader is.
+//
+// It is separate because that test proves the rule through two zoned
+// accessors, and would still pass if the table were built in [NewReader] and
+// the zoned paths merely did not consult it. Counting from construction with
+// no read at all is what forbids the eager table.
+func TestNewReaderTranslatesNothing(t *testing.T) {
+	t.Parallel()
+
+	cs := &countingCharset{Charset: CP037()}
+	r, err := NewReader(bytes.NewReader(allByteValues()), charsetEncoding(cs))
+	require.NoError(t, err)
+	require.Zero(t, cs.toUnicode.Load(), "constructing a Reader translated characters")
+
+	// And the first alphanumeric read is where the table is derived: 256
+	// translations for the table, and none per byte after it.
+	_, err = r.ReadAlphanumeric(16)
+	require.NoError(t, err)
+	require.Equal(t, int64(256), cs.toUnicode.Load())
+
+	_, err = r.ReadAlphanumeric(16)
+	require.NoError(t, err)
+	require.Equal(t, int64(256), cs.toUnicode.Load(), "a second field re-derived the table")
+}
+
+// TestReadAlphanumericTrimsPaddingBeforeTranslating walks the two cases the
+// order of the trim and the translation is visible in: a field far wider than
+// [maxAlphaScratch] whose *value* is not, and a field that is nothing but
+// padding.
+//
+// The order is an implementation choice with no visible effect by design —
+// trimming the source bytes that spell U+0020 and trimming U+0020 off the
+// translated string are the same operation — so what pins it is the pair of
+// answers, under both justifications and under a charset whose space byte is
+// not 0x20.
+func TestReadAlphanumericTrimsPaddingBeforeTranslating(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range alphaTableCharsets {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cs := tc.charset
+			require.Equalf(t, ' ', cs.ToUnicode(cs.Space()),
+				"%s's space byte does not decode to U+0020", cs.Name())
+
+			const width = 200
+			value := []byte{0x41, 0x42, 0x43}
+			var content strings.Builder
+			for _, c := range value {
+				content.WriteRune(cs.ToUnicode(c))
+			}
+
+			testCases := []struct {
+				name    string
+				field   []byte
+				justify Justification
+				want    string
+			}{
+				{
+					name:    "padded right",
+					field:   append(slices.Clone(value), bytes.Repeat([]byte{cs.Space()}, width-len(value))...),
+					justify: JustifyLeft,
+					want:    content.String(),
+				},
+				{
+					name:    "padded left",
+					field:   append(bytes.Repeat([]byte{cs.Space()}, width-len(value)), value...),
+					justify: JustifyRight,
+					want:    content.String(),
+				},
+				{
+					name:    "all padding",
+					field:   bytes.Repeat([]byte{cs.Space()}, width),
+					justify: JustifyLeft,
+					want:    "",
+				},
+				{
+					name:    "all padding, right justified",
+					field:   bytes.Repeat([]byte{cs.Space()}, width),
+					justify: JustifyRight,
+					want:    "",
+				},
+			}
+
+			for _, c := range testCases {
+				t.Run(c.name, func(t *testing.T) {
+					t.Parallel()
+
+					require.Len(t, c.field, width)
+
+					r, err := NewReader(bytes.NewReader(c.field), charsetEncoding(cs))
+					require.NoError(t, err)
+
+					got, err := r.ReadAlphanumericJustified(width, c.justify)
+					require.NoError(t, err)
+					require.Equal(t, c.want, got)
+					require.Equal(t, int64(width), r.Offset(), "the whole field was consumed")
+				})
+			}
+		})
+	}
+}
+
+// TestReadAlphanumericZeroWidthTranslatesNothing pins the one field width that
+// has no bytes to translate. A zero-width PIC X item is legal to ask for — a
+// generated record layout can carry an OCCURS 0 group — and it must be an empty
+// string, must consume nothing, and must not be what makes a [Reader] derive a
+// 256-entry translation table.
+func TestReadAlphanumericZeroWidthTranslatesNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, j := range []Justification{JustifyLeft, JustifyRight} {
+		t.Run(j.String(), func(t *testing.T) {
+			t.Parallel()
+
+			cs := &countingCharset{Charset: CP037()}
+			r, err := NewReader(bytes.NewReader(allByteValues()), charsetEncoding(cs))
+			require.NoError(t, err)
+
+			got, err := r.ReadAlphanumericJustified(0, j)
+			require.NoError(t, err)
+			require.Empty(t, got)
+			require.Zero(t, r.Offset(), "a zero-width field consumed bytes")
+			require.Zero(t, cs.toUnicode.Load(), "a zero-width field translated characters")
+
+			// The next field still reads correctly, so the short circuit is
+			// not a state the Reader gets stuck in.
+			next, err := r.ReadAlphanumericJustified(4, j)
+			require.NoError(t, err)
+			require.Equal(t, string([]rune{
+				cs.ToUnicode(0x00), cs.ToUnicode(0x01),
+				cs.ToUnicode(0x02), cs.ToUnicode(0x03),
+			}), next)
+		})
+	}
+}

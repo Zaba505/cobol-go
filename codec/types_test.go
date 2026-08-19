@@ -11,11 +11,13 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -1495,3 +1497,414 @@ func TestPackageImportsOnlyStandardLibrary(t *testing.T) {
 	}
 	require.NotZero(t, checked, "no non-test Go files were checked")
 }
+
+// alphaTableCharsets is every charset the derived translation table is walked
+// over: the ones the package ships, the caller-supplied oddballCharset, and
+// three whose whole purpose is to sit outside what a code page would do.
+//
+// The last three are not in alphanumericCharsets, which drives the encoder's
+// round-trip walks as well as the reader's: none of them has a FromUnicode
+// worth round-tripping through, and a table that decodes correctly is what is
+// under test here rather than a charset a file could be written in. What they
+// pin is the three shapes a rune can take that a code page never produces —
+// three UTF-8 bytes, four, and no valid encoding at all.
+var alphaTableCharsets = func() []struct {
+	name    string
+	charset Charset
+} {
+	table := make([]struct {
+		name    string
+		charset Charset
+	}, 0, len(shippedCharsets)+6)
+	for _, sc := range shippedCharsets {
+		table = append(table, struct {
+			name    string
+			charset Charset
+		}{name: sc.name, charset: sc.charset})
+	}
+	return append(table,
+		struct {
+			name    string
+			charset Charset
+		}{name: "oddball", charset: oddballCharset{}},
+		struct {
+			name    string
+			charset Charset
+		}{name: "wide", charset: wideCharset{}},
+		struct {
+			name    string
+			charset Charset
+		}{name: "invalid runes", charset: invalidRuneCharset{}},
+		struct {
+			name    string
+			charset Charset
+		}{name: "not comparable", charset: nonComparableCharset{pad: []byte{1}}},
+		struct {
+			name    string
+			charset Charset
+		}{name: "embedded interface", charset: embeddingCharset{Charset: CP037()}},
+		struct {
+			name    string
+			charset Charset
+		}{name: "map field", charset: mapCharset{alias: map[rune]rune{'A': 'Z'}}},
+	)
+}()
+
+// TestAlphaTableMatchesWriteRuneForEveryByte is the equivalence the derived
+// table exists to be held to: for every one of the 256 byte values of every
+// charset, the packed entry must encode exactly what
+// [strings.Builder.WriteRune] would have written for that byte's rune.
+//
+// It is stated against WriteRune rather than against utf8.AppendRune — which
+// is what the table is built with — because WriteRune is the call the table
+// replaced. The two agree by definition today; asserting the one the accessor
+// used to make is what would catch them ceasing to.
+func TestAlphaTableMatchesWriteRuneForEveryByte(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range alphaTableCharsets {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			table := newAlphaTable(tc.charset)
+			wantMax := 0
+			for i := range 256 {
+				var sb strings.Builder
+				sb.WriteRune(tc.charset.ToUnicode(byte(i)))
+				want := sb.String()
+
+				var packed [utf8MaxRuneLen]byte
+				binary.LittleEndian.PutUint32(packed[:], table.enc[i])
+				got := string(packed[:table.width[i]])
+				require.Equalf(t, want, got, "byte %#02x of %s", i, tc.charset.Name())
+				wantMax = max(wantMax, len(want))
+			}
+			require.Equal(t, wantMax, table.max, "max is not the widest entry")
+			require.GreaterOrEqual(t, table.max, 1, "a rune encodes to at least one byte")
+			require.LessOrEqual(t, table.max, utf8MaxRuneLen)
+		})
+	}
+}
+
+// TestAlphaTableAppendFieldMatchesWriteRune walks the table's field-level
+// entry point over a field carrying all 256 byte values, which is where the
+// branchless four-byte store and the width-driven advance meet.
+//
+// The per-byte equality above cannot catch an off-by-one in that advance: an
+// entry can be right in isolation and still be laid down over its neighbour.
+func TestAlphaTableAppendFieldMatchesWriteRune(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range alphaTableCharsets {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := allByteValues()
+
+			var sb strings.Builder
+			for _, b := range src {
+				sb.WriteRune(tc.charset.ToUnicode(b))
+			}
+			want := sb.String()
+
+			table := newAlphaTable(tc.charset)
+			// A scratch reused at its widest is the state a second field
+			// meets, so every width below runs into the bytes the one before
+			// it left there.
+			scratch := make([]byte, table.fieldCap(len(src)))
+			got := table.translate(scratch, src)
+			require.Equal(t, want, string(got))
+			require.Equal(t, len(got), cap(got), "the translated prefix was not capped")
+
+			// Every width the table might see, so the reserve is exercised at
+			// the boundaries rather than only at 256.
+			for _, n := range []int{0, 1, 2, 3, 255} {
+				var head strings.Builder
+				for _, b := range src[:n] {
+					head.WriteRune(tc.charset.ToUnicode(b))
+				}
+				require.Equalf(t, head.String(), string(table.translate(scratch[:table.fieldCap(n)], src[:n])),
+					"field width %d", n)
+			}
+		})
+	}
+}
+
+// TestAlphaCacheSharesOneTablePerCharset pins the cache's whole reason for
+// existing: the table outlives any one [Reader], because [Unmarshal] builds a
+// Reader per record and a table built per Reader would be amortised over a
+// single one.
+//
+// It runs against a cache of its own rather than against [alphaTables], so it
+// asserts nothing about global state. Through the package-level cache the same
+// assertion is order dependent — every distinct pointer-typed charset any test
+// in the suite reads with is a permanent entry, and past alphaTablesMax the
+// sharing property legitimately stops holding — which would make this fail for
+// reasons that have nothing to do with what it checks.
+func TestAlphaCacheSharesOneTablePerCharset(t *testing.T) {
+	t.Parallel()
+
+	c := &alphaCache{max: alphaTablesMax}
+	require.Same(t, c.tableOf(ASCII()), c.tableOf(ASCII()))
+	require.Same(t, c.tableOf(CP037()), c.tableOf(CP037()))
+	require.NotSame(t, c.tableOf(ASCII()), c.tableOf(CP037()))
+	require.Equal(t, int64(2), c.len.Load())
+}
+
+// TestAlphaCacheKeepsAnsweringWhenFull walks the bound. A cached entry keeps its
+// charset reachable for the life of the program, so the cache has a ceiling —
+// and the branch past that ceiling has to keep returning correct tables rather
+// than nil or a shared wrong one.
+//
+// A cache of its own is what makes this reachable at all: through
+// [alphaTables] the branch needs 64 distinct charsets and leaves the process
+// cache full for every test after it.
+func TestAlphaCacheKeepsAnsweringWhenFull(t *testing.T) {
+	t.Parallel()
+
+	c := &alphaCache{max: 2}
+	first := c.tableOf(ASCII())
+	require.Same(t, first, c.tableOf(ASCII()))
+	require.NotNil(t, c.tableOf(CP037()))
+	require.Equal(t, int64(2), c.len.Load())
+
+	// Full. A charset first seen now gets a correct table that is simply not
+	// retained, so two lookups are two tables and both translate properly.
+	third := c.tableOf(oddballCharset{})
+	fourth := c.tableOf(oddballCharset{})
+	require.NotNil(t, third)
+	require.NotSame(t, third, fourth, "the cache stored past its bound")
+	require.Equal(t, newAlphaTable(oddballCharset{}).enc, third.enc)
+	require.Equal(t, int64(2), c.len.Load())
+
+	// And the entries that were already in keep being shared.
+	require.Same(t, first, c.tableOf(ASCII()))
+}
+
+// TestAlphaTableOfRefusesACharsetThatCannotBeAKey is the hazard of keying a
+// cache by an interface. [Charset] promises nothing about comparability, so a
+// caller whose charset carries a slice, a map or a function would panic the map
+// lookup rather than any code of their own — and inside sync.Map's store path
+// that panic would escape with its mutex held, so it cannot be recovered from
+// either.
+//
+// The answer is nil, which [Reader.ReadAlphanumericJustified] reads as "no
+// table, translate per byte". An *uncached table* was the first answer and is
+// worse than none: it costs 256 translations and a 1.5KiB allocation per
+// [Reader], and Unmarshal builds one per record.
+func TestAlphaTableOfRefusesACharsetThatCannotBeAKey(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		charset Charset
+		want    bool
+	}{
+		{name: "slice field", charset: nonComparableCharset{pad: []byte{1}}},
+		{name: "embedded interface", charset: embeddingCharset{Charset: ASCII()}},
+		{name: "map field", charset: mapCharset{}},
+		{name: "empty struct", charset: ASCII(), want: true},
+		{name: "pointer to an embedded interface", charset: &embeddingCharset{Charset: ASCII()}, want: true},
+		{name: "pointer to a slice field", charset: &nonComparableCharset{pad: []byte{1}}, want: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// reflect.Value.Comparable is the exact answer and is what the
+			// type walk has to agree with wherever it says yes. Where it
+			// says no the walk may be stricter, which is the safe
+			// direction; the cases above state which is which.
+			exact := reflect.ValueOf(tc.charset).Comparable()
+			require.Equal(t, tc.want, comparableCharset(tc.charset))
+			if comparableCharset(tc.charset) {
+				require.True(t, exact, "the walk approved a value == would panic on")
+			}
+
+			c := &alphaCache{max: alphaTablesMax}
+			var got *alphaTable
+			require.NotPanics(t, func() { got = c.tableOf(tc.charset) })
+			if !tc.want {
+				require.Nil(t, got, "a charset that cannot be a key got a table")
+				require.Zero(t, c.len.Load())
+				return
+			}
+			require.NotNil(t, got)
+		})
+	}
+}
+
+// TestUnmarshalDerivesTheTableOncePerCharset is the assertion the cache exists
+// for, and the one that fails if the table ever goes back to being per-[Reader].
+//
+// [Unmarshal] builds a Reader per record, so a per-Reader table would translate
+// 256 byte values *per record*: the count below would be 256 times the record
+// count rather than 256 in total. Every other test of the table would pass
+// either way, because they all read through one Reader and so through the
+// per-Reader memo rather than through the cache.
+func TestUnmarshalDerivesTheTableOncePerCharset(t *testing.T) {
+	t.Parallel()
+
+	// A pointer, so it is comparable and therefore cacheable, and distinct
+	// from every other charset the suite uses.
+	cs := &countingCharset{Charset: CP037()}
+	enc := charsetEncoding(cs)
+
+	// Two alphanumeric fields, because a record with one would still pass if
+	// the table were resolved per *field* rather than per Reader.
+	data := []byte{0xC1, 0xC2, 0xC3, 0xF1, 0xF2}
+
+	const records = 20
+	for range records {
+		var rec twoTextFields
+		require.NoError(t, Unmarshal(enc, data, &rec))
+		require.Equal(t, "ABC", rec.first)
+		require.Equal(t, "12", rec.second)
+	}
+	require.Equal(t, int64(256), cs.toUnicode.Load(),
+		"the table was derived more than once across %d records", records)
+}
+
+// twoTextFields is the smallest record that exercises the per-record path: two
+// alphanumeric fields and nothing else, so the only translation is theirs.
+type twoTextFields struct {
+	first, second string
+}
+
+func (r *twoTextFields) UnmarshalCOBOL(rd *Reader) error {
+	var err error
+	if r.first, err = rd.ReadAlphanumeric(3); err != nil {
+		return err
+	}
+	r.second, err = rd.ReadAlphanumeric(2)
+	return err
+}
+
+// wideCharset spells runes no code page would: three UTF-8 bytes for one half
+// of the byte space and four for the other. It exists because both shipped
+// charsets top out at two, so nothing else in the suite reaches the wide
+// entries of the packed table or the reserve that sizes a field for them.
+type wideCharset struct{}
+
+func (wideCharset) Name() string { return "wide" }
+
+func (wideCharset) ToUnicode(b byte) rune {
+	switch {
+	case b == 0x20:
+		return ' '
+	case b < 0x80:
+		// Three bytes: the CJK block, well above the two-byte ceiling.
+		return rune(0x4E00 + int(b))
+	default:
+		// Four bytes: a supplementary plane, the widest UTF-8 gets.
+		return rune(0x1F000 + int(b))
+	}
+}
+
+func (wideCharset) FromUnicode(r rune) (byte, bool) {
+	switch {
+	case r == ' ':
+		return 0x20, true
+	case r >= 0x4E00 && r < 0x4E80:
+		return byte(r - 0x4E00), true
+	case r >= 0x1F080 && r <= 0x1F0FF:
+		return byte(r - 0x1F000), true
+	}
+	return 0, false
+}
+
+func (wideCharset) Space() byte { return 0x20 }
+
+// invalidRuneCharset spells values that are not characters at all: a negative
+// one, a surrogate half, and one above [utf8.MaxRune].
+//
+// Nothing in the [Charset] contract forbids them — ToUnicode owes totality and
+// nothing else — and [strings.Builder.WriteRune] answers each with U+FFFD. The
+// table has to answer identically, which is a property of building it with
+// [utf8.EncodeRune] rather than one this package implements.
+type invalidRuneCharset struct{}
+
+func (invalidRuneCharset) Name() string { return "invalid-runes" }
+
+func (invalidRuneCharset) ToUnicode(b byte) rune {
+	switch b {
+	case 0x01:
+		return -1
+	case 0x02:
+		return 0xD800 // a leading surrogate, unencodable on its own
+	case 0x03:
+		return 0xDFFF // a trailing surrogate
+	case 0x04:
+		return utf8.MaxRune + 1
+	case 0x05:
+		return rune(0x7FFFFFFF)
+	}
+	return rune(b)
+}
+
+func (invalidRuneCharset) FromUnicode(r rune) (byte, bool) {
+	if r < 0 || r > 0xFF {
+		return 0, false
+	}
+	return byte(r), true
+}
+
+func (invalidRuneCharset) Space() byte { return 0x20 }
+
+// nonComparableCharset is a charset that cannot be a map key: pad is a slice,
+// so == on two of them panics. It is [ASCII] in every other respect.
+//
+// A caller's charset holding a slice is not far-fetched — a table read from a
+// file, or a fallback list — and nothing in the [Charset] documentation warns
+// against one, which is why the cache has to cope rather than the caller.
+type nonComparableCharset struct {
+	pad []byte
+}
+
+func (nonComparableCharset) Name() string { return "non-comparable" }
+
+func (nonComparableCharset) ToUnicode(b byte) rune { return rune(b) }
+
+func (nonComparableCharset) FromUnicode(r rune) (byte, bool) {
+	if r < 0 || r > 0xFF {
+		return 0, false
+	}
+	return byte(r), true
+}
+
+func (nonComparableCharset) Space() byte { return 0x20 }
+
+// embeddingCharset is the decorator shape a caller reaches for first: embed
+// [Charset], override what differs. Embedding an *interface* is what makes it
+// not comparable, which is worth a fixture of its own because nothing about the
+// shape looks like it carries a slice — and because the pointer to it is
+// comparable, so the remedy is one character.
+type embeddingCharset struct {
+	Charset
+}
+
+func (embeddingCharset) Name() string { return "embedding" }
+
+// mapCharset carries a map, the other way a struct stops being comparable.
+type mapCharset struct {
+	alias map[rune]rune
+}
+
+func (mapCharset) Name() string { return "map" }
+
+func (c mapCharset) ToUnicode(b byte) rune {
+	if r, ok := c.alias[rune(b)]; ok {
+		return r
+	}
+	return rune(b)
+}
+
+func (mapCharset) FromUnicode(r rune) (byte, bool) {
+	if r < 0 || r > 0xFF {
+		return 0, false
+	}
+	return byte(r), true
+}
+
+func (mapCharset) Space() byte { return 0x20 }

@@ -8,6 +8,7 @@ package codec
 import (
 	"bytes"
 	"io"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -351,6 +352,38 @@ func benchRecord() testRecord {
 	}
 }
 
+// BenchmarkNewReader measures construction alone, which is one of the two
+// figures that decide where a derived per-charset table may live.
+//
+// It is here because the pull in the two directions is real: anything
+// materialised in [NewReader] is paid by every [Unmarshal] call, since
+// Unmarshal builds a Reader per record, while anything left to the first read
+// is paid by a Reader that does not reuse it. #114 measured a 256-entry
+// translation table built here at 141 -> 723 ns/op and 1 -> 3 allocs/op, which
+// is what sent it to [alphaTables] instead. That pair of figures is that
+// issue's run on that author's machine; the ones on [maxAlphaScratch] are this
+// implementation on the machine of the pull request that landed it, and the two
+// baselines are not comparable to each other.
+//
+// Corpus: none — the [io.Reader] is never read from. The encoding is
+// [IBMEnterprise] rather than [GnuCOBOLASCII] because construction derives the
+// zoned byte tables from the charset, and cp037's are the more expensive pair
+// to derive.
+func BenchmarkNewReader(b *testing.B) {
+	enc := IBMEnterprise()
+	src := bytes.NewReader(nil)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r, err := NewReader(src, enc)
+		if err != nil {
+			b.Fatal(err)
+		}
+		runtime.KeepAlive(r)
+	}
+}
+
 // BenchmarkReadBytes measures [Reader.ReadBytes], which is the make +
 // io.ReadFull floor every other accessor sits on: no accessor of this package
 // can be cheaper than ReadBytes at its own width, and the difference between
@@ -547,6 +580,81 @@ func BenchmarkDecodeRecord(b *testing.B) {
 	b.StopTimer()
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
 }
+
+// BenchmarkUnmarshalRecord measures the per-record path a caller stepping
+// through a file actually takes: [Unmarshal] builds a [Reader] over one
+// record's bytes and drops it, so construction is paid once per record rather
+// than once per file.
+//
+// It is the counterweight to BenchmarkDecodeRecord, which reuses one Reader
+// across every iteration and therefore amortises construction to nothing. The
+// two disagree by exactly what a Reader costs to build, and a change that
+// moves work into construction to save it per field is visible here and
+// nowhere else.
+//
+// The charset axis is the second thing it exists for, and it is not a charset
+// axis in the sense BenchmarkReadAlphanumeric has one — both cases below spell
+// the record identically. What differs is whether the charset can be a map key,
+// and so whether its translation table is shared across records or absent: a
+// comparable charset reads through [alphaTables], one that is not comparable
+// reads per byte (see alphaTableOf). That is a cliff only this benchmark can
+// see, because it is the only one that builds a [Reader] per iteration, and the
+// "uncached" case is here to show the fallback costs about what the per-byte
+// loop always cost rather than 256 translations and a table per record.
+//
+// Corpus: benchRecord under benchRecordEncoding, the same record
+// BenchmarkDecodeRecord reads, so the difference between the two figures is
+// attributable to the Reader and not to the data.
+func BenchmarkUnmarshalRecord(b *testing.B) {
+	for _, cs := range benchUnmarshalCharsets {
+		b.Run(cs.name, func(b *testing.B) {
+			enc := benchRecordEncoding()
+			enc.Charset = cs.cs
+			require.Equal(b, cs.comparable, comparableCharset(cs.cs),
+				"this case does not exercise the cacheability it names")
+
+			fixture := benchRecord()
+			data, err := Marshal(enc, &fixture)
+			require.NoError(b, err)
+			require.Len(b, data, testRecordWidth)
+
+			var rec testRecord
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := Unmarshal(enc, data, &rec); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
+		})
+	}
+}
+
+// benchUnmarshalCharsets is BenchmarkUnmarshalRecord's cacheability axis: the
+// shipped [ASCII], which is an empty struct and so a usable map key, and the
+// same table wrapped in a struct that embeds the [Charset] interface, which is
+// the idiomatic decorator shape and is not comparable. Both decode the record
+// to identical values.
+var benchUnmarshalCharsets = []struct {
+	name       string
+	cs         Charset
+	comparable bool
+}{
+	{name: "cached", cs: ASCII(), comparable: true},
+	{name: "uncached", cs: benchEmbeddingCharset{Charset: ASCII()}},
+}
+
+// benchEmbeddingCharset is [ASCII] behind an embedded interface, which is what
+// makes it non-comparable and so uncacheable. It is separate from
+// embeddingCharset in types_test.go so that a change to that fixture cannot
+// silently move this benchmark's meaning.
+type benchEmbeddingCharset struct {
+	Charset
+}
+
+func (benchEmbeddingCharset) Name() string { return "ascii-embedded" }
 
 // BenchmarkWriteAlphanumeric is the mirror image of BenchmarkReadAlphanumeric,
 // over the same 2x2 of charset and corpus. The [Writer] side has never been
