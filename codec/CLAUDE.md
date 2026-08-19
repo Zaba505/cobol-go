@@ -69,8 +69,11 @@ bytes wide or `digits+1`. See below.
 
 Every error returned after construction is wrapped once in
 `*OffsetError{Offset, Err}`, so a bad byte deep inside a record is diagnosable.
-The offset is stamped in exactly one place per direction — `Reader.read` and
-`Writer.write`, the only two methods that move `off` — so it cannot drift.
+The offset is stamped in exactly one place per direction — `Reader.readInto`
+and `Writer.write`, the only two methods that move `off` — so it cannot drift.
+`Reader.read` and `Reader.readOwned` are the two buffer policies above
+`readInto` (below) and neither touches `off` itself, which is what keeps the
+owning path and the reusing one from drifting apart.
 Never construct an `OffsetError` outside those paths without a reason, and never
 add a second offset field to a leaf error.
 
@@ -118,6 +121,55 @@ setting rather than coercing them.
 A rejected field writes **nothing**. Validate first, build the whole field, then
 write it, so a failure cannot leave a half-field behind and desynchronize the
 record.
+
+## Reading buffers: reused by default, allocated on request
+
+`Reader.readInto` fills a buffer the caller supplies and is the only thing that
+moves the offset. Two methods sit on it and they are the whole of the buffer
+policy:
+
+- **`read(n)` returns a buffer the `Reader` owns and reuses.** Its bytes are
+  valid until the next read and no further, so every caller must consume them
+  before returning. This is the path all but one accessor takes.
+- **`readOwned(n)` allocates.** `ReadBytes` is its only caller, because
+  `ReadBytes` hands the slice to the user; its doc comment promises the slice is
+  the caller's own, and that promise is why the method cannot share the reused
+  buffer. Do not "optimize" it onto `read`.
+
+The reused side is two buffers, because the two families are bounded
+differently:
+
+- `Reader.num` is a **fixed array inline in the struct**, sized
+  `maxNumericWidth` — a `max` over `zonedWidth`, `packedWidth`, `comp6Width`,
+  `binaryWidth` and the two float widths at each family's own digit maximum. It
+  is **derived, never written as `32`**: 31 digits is a dialect ceiling
+  (`SPEC.md`, "18, or 31 with `ARITH(EXTEND)`") rather than a fact about COBOL,
+  and a literal would smash the buffer the day it moved.
+  `TestNumericScratchFitsEveryNumericUsage` checks the const against the width
+  functions, and checks it for *equality* with their maximum so it cannot
+  silently become oversized either.
+- `Reader.wide` is a **growable slice** for anything longer. `PIC X(n)` is
+  bounded only by the record, so alphanumeric fields wider than the array land
+  here, and so — deliberately — would a numeric field wider than the array, at
+  the cost of one allocation instead of a panic. Raising a digit maximum can
+  therefore never be a runtime fault on a legal field.
+
+Why it matters at all: a fresh `make` per field is not expensive because it is a
+`make`. An identical one whose result does not escape is stack allocated and
+free. It is expensive because `read` *returned* the slice, forcing it onto the
+heap — one allocation per field before any value exists. Removing the escape
+took `BenchmarkDecodeRecord` from 20 allocs/record to 9 and 507 ns to 399.
+
+Two invariants a change here must keep, both pinned by tests:
+
+- **Nothing an accessor returns may view the reused buffer.**
+  `zonedCodec.decodeField` and the packed/COMP-6 nibble slices allocate their
+  own, which is what makes this hold today.
+  `TestReadValuesDoNotAliasTheReusedBuffer` reads two records with one `Reader`
+  and requires the first record's values to survive the second.
+- **No read-ahead.** `read` slices to `n` and never to the buffer's capacity, so
+  the `io.Reader` still holds every byte no field asked for.
+  `TestReaderReadsNoFurtherThanTheFieldsAsked` requires that.
 
 ## Packed decimal: COMP-3 and COMP-6 are separate bodies on purpose
 
