@@ -308,20 +308,25 @@ func TestJustificationString(t *testing.T) {
 	require.Equal(t, JustifyLeft, Justification(0))
 }
 
+// shippedCharsets is every charset this package exports, and the single place
+// a new one is added to the suite: the bijectivity walk below and the
+// alphanumeric walks in decoder_test.go and encoder_test.go all run over it,
+// so a code page added to the package is covered by construction rather than
+// by remembering to extend three tables.
+var shippedCharsets = []struct {
+	name      string
+	charset   Charset
+	wantName  string
+	wantSpace byte
+}{
+	{name: "ascii", charset: ASCII(), wantName: "ASCII", wantSpace: 0x20},
+	{name: "cp037", charset: CP037(), wantName: "cp037", wantSpace: 0x40},
+}
+
 func TestCharsetIsTotalAndBijective(t *testing.T) {
 	t.Parallel()
 
-	testCases := []struct {
-		name      string
-		charset   Charset
-		wantName  string
-		wantSpace byte
-	}{
-		{name: "ascii", charset: ASCII(), wantName: "ASCII", wantSpace: 0x20},
-		{name: "cp037", charset: CP037(), wantName: "cp037", wantSpace: 0x40},
-	}
-
-	for _, tc := range testCases {
+	for _, tc := range shippedCharsets {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
