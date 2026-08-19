@@ -128,7 +128,7 @@ func usageFromString(s string) (Usage, bool) {
 // RENAMES entries occupy no storage and are not fields; they hang off the field
 // or the record they qualify, as [Field.Conditions] and [Field.Aliases].
 //
-// It is the number the entry was *written* with and not a depth: COBOL reads
+// Level is the number the entry was *written* with and not a depth: COBOL reads
 // level numbers relatively, so the children of one group may carry different
 // numbers and two fields with the same number may sit at different depths. Read
 // the hierarchy from [Field.Parent] and [Field.Children]; comparing Level to

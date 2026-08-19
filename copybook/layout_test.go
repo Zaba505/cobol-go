@@ -806,7 +806,8 @@ func TestNewLayoutErrors(t *testing.T) {
 		{
 			// A number above the nearest open item's makes the entry
 			// subordinate to that item rather than its sibling, so B
-			// lands inside A and A is not among A's own children.
+			// becomes a child of A — and the group B then looks for
+			// its target in is A itself, which cannot contain A.
 			// This is the boundary of the extension: unequal level
 			// numbers are admitted, but only in the direction that
 			// leaves the two entries siblings.

@@ -1259,11 +1259,34 @@ parse).
   a `04 B-1` written beside a `05 C-1` and says "the compiler will accept the
   nonstandard use of 04 and treat it as though it had been written as an 05".
 
-  Two consequences are worth stating outright. A lower-numbered entry sets the
-  number the *following* siblings must not exceed: after `04 B` closes back to a
-  record, a following `05 C` is subordinate to `B` rather than beside it. And an
-  entry can never be numbered **above** the item it is a sibling of, since being
-  a sibling is precisely what a number at or below that item's produces.
+  Two consequences are worth stating outright, and the first of them is a
+  **divergence** from the 1976 wording rather than a reading of it.
+
+  A lower-numbered entry sets the number the *following* siblings must not
+  exceed: after `04 B` closes back to a record, a following `05 C` is
+  subordinate to `B` rather than beside it, and where `B` has a `PICTURE` — so
+  can take no subordinates — the entry is an error. Read literally, IBM's
+  "treat it as though it had been written as an 05" is a *renumbering* rule, and
+  under a renumbering rule `05 C` would be `B`'s sibling and the source would
+  compile. This specification takes the **stack-relative** reading instead: the
+  number is compared against the entries actually written, and nothing is
+  rewritten. The 1976 sentence describes the outcome for the manual's own
+  example — where the nonstandard `04 B-1` is the *last* entry of its record and
+  no following entry can be affected — and not the general rule; a renumbering
+  rule would additionally have to say what a `04` following *two* differently
+  numbered siblings renumbers to, which no manual states. The stack-relative
+  reading is what makes a level number mean one thing everywhere, and it is what
+  every case in this section is pinned to; a copybook of the shape
+  `05 A PIC` / `04 B PIC` / `05 C PIC` is therefore rejected here and would
+  compile on IBM. That is a known and deliberate divergence, not an oversight,
+  and it is the one place in this section where this package is stricter than
+  the extension it admits.
+
+  The second consequence is directional: of two siblings, the **later** can
+  never be numbered above the earlier, since a number at or below the earlier
+  one's is precisely what makes the two siblings at all. The earlier of the two
+  may of course be numbered above the later — `05 A` beside `04 B` is the whole
+  point of the extension.
 
 - **`REDEFINES` asks for the same level, not the same level number.** The
   redefining entry must be an item of the same group as the entry it redefines —
@@ -1481,9 +1504,14 @@ round-trip fixtures are added in #23; this snippet is illustrative.)
   statements' area, one-statement-per-line and optional-period rules.
   <https://www.ibm.com/docs/en/cobol-zos/6.3.0?topic=statements-skip>
 - IBM Enterprise COBOL for z/OS 6.4 Language Reference, SC27-8713-03 — the
-  *IBM extension language elements* table and the `REDEFINES` clause, for
-  unequal level numbers at the same hierarchical level.
+  *IBM extension language elements* table, for unequal level numbers at the same
+  hierarchical level.
+  <https://www.ibm.com/docs/en/cobol-zos/6.4.0?topic=compiler-ibm-extension-language-elements>
+- IBM Enterprise COBOL for z/OS 6.4 Language Reference, SC27-8713-03 — the
+  `REDEFINES` clause, for "the same level in the hierarchy; however, the level
+  numbers need not be the same".
   <https://www.ibm.com/docs/en/cobol-zos/6.4.0?topic=reference-redefines-clause>
 - IBM OS Full American National Standard COBOL, GC28-6396-6 (Apr 1976), p. 94 —
   the earliest statement of the same extension, with the manual's own
-  standard/nonstandard example.
+  standard/nonstandard example. Scanned at
+  <http://www.bitsavers.org/pdf/ibm/360/os/cobol/GC28-6396-6_IBM_OS_Full_American_National_Standard_COBOL_Apr76.pdf>
