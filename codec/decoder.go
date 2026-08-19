@@ -12,7 +12,6 @@ import (
 	"math"
 	"math/big"
 	"strconv"
-	"strings"
 )
 
 // Reader reads the fields of a COBOL data file from an [io.Reader], one field
@@ -48,6 +47,21 @@ type Reader struct {
 	// short-lived object — [Unmarshal] builds one per record.
 	num  [maxNumericWidth]byte
 	wide []byte
+	// alpha is the charset's UTF-8 translation table, and alphaNum and
+	// alphaWide are the scratch the translated bytes are written into —
+	// the same fixed-array-plus-growable-slice pair num and wide are, for
+	// the same reason.
+	//
+	// alpha is resolved on the first alphanumeric read and not before.
+	// Deriving it calls [Charset.ToUnicode] 256 times, and
+	// TestZonedAccessorsNeverTranslateThroughTheCharset requires a Reader
+	// that reads only numeric fields to make no such call at all — which is
+	// codec/SPEC.md's rule that numeric decoding never routes through the
+	// charset, asserted from construction onward. Lazy is what keeps that
+	// true; see [alphaTables] for why the table itself is not per-Reader.
+	alpha     *alphaTable
+	alphaNum  [maxAlphaScratch]byte
+	alphaWide []byte
 }
 
 // maxNumericWidth is the width of [Reader.num], the fixed scratch every
@@ -76,6 +90,34 @@ const maxNumericWidth = max(
 	comp1Width,
 	comp2Width,
 )
+
+// maxAlphaScratch is the size of [Reader.alphaNum], the fixed scratch an
+// alphanumeric field's translated bytes are written into. It is
+// [maxNumericWidth]: the two reused scratches of a [Reader] are the same size,
+// so the numeric side reads a 32-byte field without touching the heap and the
+// alphanumeric side translates into 32 bytes without touching it either.
+//
+// Unlike maxNumericWidth this is a *policy* number that happens to be derived,
+// and it cannot be anything else: PIC X(n) is bounded by the record rather than
+// by a digit ceiling, so there is no width to derive one from. What pins it is
+// the other end — a [Reader] is what [Unmarshal] builds per record, so every
+// byte of it is paid once per record, and past this size the struct costs the
+// per-record path more than the translation saves it. Measured on
+// BenchmarkNewReader and BenchmarkUnmarshalRecord: at 32 bytes NewReader is
+// 258 -> 267 ns/op and the per-record path 631 -> 581; at 259 bytes, enough for
+// a 64-byte field under any charset, NewReader is 305 and the per-record path
+// 668 — slower than the code this replaced, on the strength of the struct
+// alone. Growing this array is therefore not a free way to widen the heap-free
+// case, and the benchmark pair is what says so.
+//
+// How wide a *field* that covers is charset-dependent, because a rune is one to
+// four UTF-8 bytes: 14 bytes under either shipped charset and 7 under one
+// mapping into a supplementary plane; see [alphaTable.fieldCap]. A field wider
+// than that is not a fault and not a panic — it falls to [Reader.alphaWide],
+// exactly as a numeric field wider than maxNumericWidth falls to
+// [Reader.wide], at the cost of one allocation that is then reused at that
+// size.
+const maxAlphaScratch = maxNumericWidth
 
 // NewReader returns a [Reader] that reads from r under the given encoding.
 //
@@ -187,6 +229,25 @@ func (r *Reader) readInto(buf []byte) error {
 	return nil
 }
 
+// alphaScratch returns a buffer of exactly n bytes for a translation to be
+// written into. It is [Reader.read]'s buffer policy applied to the other side
+// of the translation: the fixed array for anything that fits it, the growable
+// slice for anything that does not, and no allocation at all in the common
+// case.
+//
+// The two policies need separate buffers because both are live at once — the
+// source bytes of a wide field are sitting in [Reader.wide] while the
+// translation is being written.
+func (r *Reader) alphaScratch(n int) []byte {
+	if n <= len(r.alphaNum) {
+		return r.alphaNum[:n]
+	}
+	if cap(r.alphaWide) < n {
+		r.alphaWide = make([]byte, n)
+	}
+	return r.alphaWide[:n]
+}
+
 // ReadBytes reads the next n bytes as they stand, applying no character
 // translation and stripping no padding.
 //
@@ -243,16 +304,23 @@ func (r *Reader) ReadAlphanumericJustified(n int, j Justification) (string, erro
 	if err != nil {
 		return "", err
 	}
-	charset := r.enc.Charset
-	var sb strings.Builder
-	sb.Grow(n)
-	for _, c := range b {
-		sb.WriteRune(charset.ToUnicode(c))
+	if r.alpha == nil {
+		r.alpha = alphaTableOf(r.enc.Charset)
 	}
-	if j == JustifyRight {
-		return strings.TrimLeft(sb.String(), " "), nil
-	}
-	return strings.TrimRight(sb.String(), " "), nil
+	// The padding comes off the *source* bytes, before translation rather
+	// than after it, and the two are the same operation. The space stripped
+	// is U+0020 and the bytes stripped are the ones that spell it, which is
+	// exactly the correspondence [alphaTable.space] records; and a stripped
+	// U+0020 can never have been part of a wider character, because 0x20 is
+	// neither a UTF-8 lead byte nor a continuation byte.
+	//
+	// Doing it first is what makes the fixed scratch worth having. Fields in
+	// a real record are mostly padding — a PIC X(30) name holding eleven
+	// characters is the normal case, not the exception — so trimming first
+	// keeps a field far wider than [maxAlphaScratch] off the growable buffer,
+	// and translates only the bytes that survive.
+	src := r.alpha.trim(b, j)
+	return string(r.alpha.translate(r.alphaScratch(r.alpha.fieldCap(len(src))), src)), nil
 }
 
 // ReadZonedInt32 reads the next zoned decimal (USAGE DISPLAY) field of digits

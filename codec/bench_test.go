@@ -8,6 +8,7 @@ package codec
 import (
 	"bytes"
 	"io"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -351,6 +352,35 @@ func benchRecord() testRecord {
 	}
 }
 
+// BenchmarkNewReader measures construction alone, which is one of the two
+// figures that decide where a derived per-charset table may live.
+//
+// It is here because the pull in the two directions is real: anything
+// materialised in [NewReader] is paid by every [Unmarshal] call, since
+// Unmarshal builds a Reader per record, while anything left to the first read
+// is paid by a Reader that does not reuse it. A 256-entry translation table
+// built here measured 141 -> 723 ns/op and 1 -> 3 allocs/op, which is what
+// sent it to [alphaTables] instead.
+//
+// Corpus: none — the [io.Reader] is never read from. The encoding is
+// [IBMEnterprise] rather than [GnuCOBOLASCII] because construction derives the
+// zoned byte tables from the charset, and cp037's are the more expensive pair
+// to derive.
+func BenchmarkNewReader(b *testing.B) {
+	enc := IBMEnterprise()
+	src := bytes.NewReader(nil)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r, err := NewReader(src, enc)
+		if err != nil {
+			b.Fatal(err)
+		}
+		runtime.KeepAlive(r)
+	}
+}
+
 // BenchmarkReadBytes measures [Reader.ReadBytes], which is the make +
 // io.ReadFull floor every other accessor sits on: no accessor of this package
 // can be cheaper than ReadBytes at its own width, and the difference between
@@ -541,6 +571,40 @@ func BenchmarkDecodeRecord(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := rec.UnmarshalCOBOL(r); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "records/s")
+}
+
+// BenchmarkUnmarshalRecord measures the per-record path a caller stepping
+// through a file actually takes: [Unmarshal] builds a [Reader] over one
+// record's bytes and drops it, so construction is paid once per record rather
+// than once per file.
+//
+// It is the counterweight to BenchmarkDecodeRecord, which reuses one Reader
+// across every iteration and therefore amortises construction to nothing. The
+// two disagree by exactly what a Reader costs to build, and a change that
+// moves work into construction to save it per field is visible here and
+// nowhere else.
+//
+// Corpus: benchRecord under benchRecordEncoding, the same record
+// BenchmarkDecodeRecord reads, so the difference between the two figures is
+// attributable to the Reader and not to the data.
+func BenchmarkUnmarshalRecord(b *testing.B) {
+	enc := benchRecordEncoding()
+
+	fixture := benchRecord()
+	data, err := Marshal(enc, &fixture)
+	require.NoError(b, err)
+	require.Len(b, data, testRecordWidth)
+
+	var rec testRecord
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := Unmarshal(enc, data, &rec); err != nil {
 			b.Fatal(err)
 		}
 	}

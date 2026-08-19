@@ -313,6 +313,59 @@ translations a zoned field performs and requires zero, and
 `TestZonedAccessorsNeverTranslateThroughTheCharset` does the same one layer up,
 through `Reader` and `Writer`.
 
+## The alphanumeric translation table: derived once, cached per charset
+
+`ReadAlphanumericJustified` does **not** call `ToUnicode` per byte. It goes
+through `alphaTable`, the charset's translation materialised as UTF-8: `enc[c]`
+packs the encoding of byte `c` into a `uint32` little-endian and `width[c]` says
+how many of those four bytes count, so the inner loop stores a whole rune's
+worth unconditionally and advances by the width — no branch, no interface
+dispatch, no per-rune re-encode. It measured 2.1x on an ASCII-mapping corpus and
+2.9x on a multi-byte one, and took `BenchmarkDecodeRecord` from 405 to 307 ns.
+
+Four things about it are load bearing, and all four cost something to
+rediscover:
+
+- **It is not a `[256]byte`, and there is no "ASCII is verbatim" shortcut.**
+  128 of cp037's bytes spell runes above U+007F, and `ASCII()` is no better —
+  its `ToUnicode` is `rune(b)`, the identity in *rune* space, so 0xE9 spells
+  U+00E9 and costs two UTF-8 bytes. Encoding all 256 values of either charset
+  takes 384 bytes. `TestAlphaTableMatchesWriteRuneForEveryByte` and
+  `TestReadAlphanumericMatchesWriteRuneUnderEveryCharset` hold the result
+  byte-identical to the `ToUnicode` + `WriteRune` loop it replaced, over every
+  byte of every charset in the suite — including one whose runes need four UTF-8
+  bytes and one whose `ToUnicode` returns values that are not characters at all.
+- **It is built lazily, on the first alphanumeric read, and never in
+  `NewReader`.** `TestZonedAccessorsNeverTranslateThroughTheCharset` counts
+  `ToUnicode` calls from construction onward and requires **zero**;
+  materialising 256 entries at construction breaks that the moment a `Reader`
+  exists. `TestNewReaderTranslatesNothing` states the premise on its own.
+- **It is cached per `Charset` in `alphaTables`, not per `Reader`.** `Unmarshal`
+  builds a `Reader` per record, so a per-`Reader` table is amortised over one
+  record and the per-record path regresses. The key is an interface, which is a
+  panic waiting to happen: `Charset` promises nothing about comparability, so
+  `comparableCharset` answers from the type — reading an interface-typed field
+  as *not* comparable, conservatively — before anything reaches the map. Do not
+  replace it with `reflect.Value.Comparable`, which is the exact answer and
+  allocates four times per call, i.e. four allocations per record; and do not
+  wrap the map access in a `recover`, because `sync.Map`'s store path panics
+  with its mutex held.
+- **Padding comes off the source bytes, before translation.** `alphaTable.trim`
+  strips the bytes that spell U+0020, which agrees with trimming the translated
+  string because 0x20 is neither a UTF-8 lead byte nor a continuation byte.
+  Doing it first is what makes the 32-byte inline scratch worth having: a real
+  field is mostly padding, so a `PIC X(30)` name holding eleven characters
+  never reaches the growable buffer.
+
+The scratch follows the `num`/`wide` policy exactly — `Reader.alphaNum` is a
+fixed array of `maxAlphaScratch` bytes, `Reader.alphaWide` the growable
+fallback. `maxAlphaScratch` is `maxNumericWidth`, and it is a **policy** number:
+`PIC X(n)` has no width to derive one from, and past this size the struct costs
+`Unmarshal`'s per-record path more than the translation saves it. Both
+directions are benchmarked — `BenchmarkNewReader` and
+`BenchmarkUnmarshalRecord` — because they pull opposite ways, and a change here
+is not landable without running both.
+
 ## Zoned bytes: two halves that must not merge
 
 The bytes of a `USAGE DISPLAY` field come from two independent places, and

@@ -11,8 +11,12 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"reflect"
 	"slices"
 	"strconv"
+	"sync"
+	"sync/atomic"
+	"unicode/utf8"
 )
 
 // Charset is the character set of a data file: the mapping between the bytes
@@ -155,6 +159,201 @@ var cp037FromUnicode = func() map[rune]byte {
 	}
 	return m
 }()
+
+// alphaTable is the UTF-8 form of a [Charset]'s translation: for each of the
+// 256 byte values, the bytes that [strings.Builder.WriteRune] would have
+// written for the rune that charset spells it with.
+//
+// It exists because alphanumeric decoding used to make two calls per byte — an
+// interface dispatch to [Charset.ToUnicode] and a [strings.Builder.WriteRune]
+// that re-encoded the result — and those two were together the largest single
+// cost in decoding a record. The mapping is knowable once: [Charset.ToUnicode]
+// is documented total over all 256 byte values, so nothing about a byte's
+// translation depends on the field it appears in.
+//
+// It is emphatically **not** a [256]byte. 128 of cp037's 256 bytes spell runes
+// above U+007F, 97 of them inside the printable range the table exists for, and
+// [ASCII] is no better — its ToUnicode is rune(b), the identity in *rune* space
+// and not in byte space, so byte 0xE9 spells U+00E9, which is two UTF-8 bytes.
+// Encoding all 256 values of either charset takes 384 bytes, not 256. A byte
+// table, or a string(b) "ASCII is verbatim" shortcut, is silently lossy.
+//
+// The representation is a packed one so that the inner loop has no branch in
+// it. enc[c] holds the UTF-8 encoding of byte c little-endian — encoding byte i
+// in bits 8i..8i+7 — and width[c] says how many of those four bytes count. A
+// translation therefore writes four bytes per input byte unconditionally and
+// advances by the width, rather than switching on how wide the rune turned out
+// to be.
+type alphaTable struct {
+	// enc[c] is the UTF-8 encoding of the rune byte c spells, packed
+	// little-endian. Every UTF-8 encoding is at most four bytes, so one
+	// uint32 holds any of them.
+	enc [256]uint32
+	// width[c] is how many bytes of enc[c] are significant, 1 to 4.
+	width [256]uint8
+	// space[c] reports that byte c spells U+0020 — the padding an
+	// alphanumeric field is stripped of, in the byte the declared charset
+	// happens to spell it with rather than in a hard-coded 0x20 or 0x40.
+	space [256]bool
+	// max is the widest entry in width. It is what sizes a destination
+	// buffer: a field of n bytes decodes to at most n*max bytes, and for
+	// both shipped charsets max is 2 rather than 4, so the common case
+	// reserves half of what a worst-case assumption would.
+	max int
+}
+
+// utf8MaxRuneLen is the most bytes one rune occupies in UTF-8, and therefore
+// the number [alphaTable.translate] stores per input byte before advancing by
+// the real width. It is [utf8.UTFMax], named here so the four-byte
+// stores below read as "one rune's worth" rather than as a magic number.
+const utf8MaxRuneLen = utf8.UTFMax
+
+// newAlphaTable derives the UTF-8 translation table of cs by calling
+// [Charset.ToUnicode] for every one of the 256 byte values.
+//
+// Derived, never switched on a known page: a caller's own charset — cp500 or
+// cp1047 wrapped around encoding/charmap, say — gets a table on exactly the
+// same terms the two shipped ones do, which is the property
+// TestAlphaTableMatchesWriteRuneForEveryByte pins.
+//
+// [utf8.EncodeRune] is what makes the result byte-identical to the loop this
+// replaced. [strings.Builder.WriteRune] encodes through the same function, so a
+// rune that is negative, a surrogate half or above [utf8.MaxRune] becomes
+// U+FFFD here exactly as it did there — and nothing in the [Charset] contract
+// forbids ToUnicode returning one, since it owes totality and nothing else.
+func newAlphaTable(cs Charset) *alphaTable {
+	t := new(alphaTable)
+	var buf [utf8MaxRuneLen]byte
+	for i := range 256 {
+		n := utf8.EncodeRune(buf[:], cs.ToUnicode(byte(i)))
+		var v uint32
+		for j := n - 1; j >= 0; j-- {
+			v = v<<8 | uint32(buf[j])
+		}
+		t.enc[i] = v
+		t.width[i] = uint8(n)
+		t.space[i] = n == 1 && buf[0] == ' '
+		t.max = max(t.max, n)
+	}
+	return t
+}
+
+// trim strips a field's space padding from the end the justification does not
+// put the value at: the trailing bytes under [JustifyLeft], the leading ones
+// under [JustifyRight].
+//
+// It runs on the source bytes and answers in them, which is what lets the
+// translation that follows both be shorter and land in a smaller buffer. That
+// it agrees byte for byte with trimming U+0020 off the translated string is a
+// property of UTF-8 rather than of this table: 0x20 is neither a lead byte nor
+// a continuation byte, so a translated space is always a whole character and
+// never part of one.
+func (t *alphaTable) trim(src []byte, j Justification) []byte {
+	if j == JustifyRight {
+		i := 0
+		for i < len(src) && t.space[src[i]] {
+			i++
+		}
+		return src[i:]
+	}
+	i := len(src)
+	for i > 0 && t.space[src[i-1]] {
+		i--
+	}
+	return src[:i]
+}
+
+// translate writes the UTF-8 form of src into dst and returns the prefix of
+// dst that holds it.
+//
+// dst must be at least [alphaTable.fieldCap] of len(src) bytes long, which is
+// what lets the loop store a whole rune's worth at every position and advance
+// by the real width — no branch on how wide the rune turned out to be, and no
+// capacity check per byte. The bytes past the returned prefix are whatever
+// those unconditional stores left there, so the prefix is capped: it is about
+// to become a string, and a slice into a reused buffer with spare capacity is
+// the hazard [Reader.read] caps for the same reason.
+func (t *alphaTable) translate(dst, src []byte) []byte {
+	off := 0
+	for _, c := range src {
+		binary.LittleEndian.PutUint32(dst[off:], t.enc[c])
+		off += int(t.width[c])
+	}
+	return dst[:off:off]
+}
+
+// fieldCap is how long the destination of a width-n field must be: every byte
+// contributes at most [alphaTable.max] bytes, plus the slack that lets the last
+// one be written as a full four-byte store and then trimmed.
+//
+// The slack is what makes the loop branchless, and it is exactly what the
+// bounds check on the final store needs: at the last byte the offset is at most
+// (n-1)*max, and (n-1)*max + utf8MaxRuneLen <= n*max + utf8MaxRuneLen - 1 holds
+// for every max >= 1.
+func (t *alphaTable) fieldCap(n int) int {
+	return n*t.max + utf8MaxRuneLen - 1
+}
+
+// alphaTables caches the derived table of each [Charset] a program actually
+// uses, because neither of the two obvious homes for it works.
+//
+// It cannot be built in [NewReader]: TestZonedAccessorsNeverTranslateThroughTheCharset
+// counts [Charset.ToUnicode] calls from construction onward and requires zero,
+// which is codec/SPEC.md's rule that numeric decoding never routes through the
+// charset. Materialising 256 entries at construction breaks that rule the
+// moment a Reader exists, whether or not it ever reads an alphanumeric field.
+//
+// And a per-[Reader] table is amortised over one record, because [Unmarshal]
+// builds a Reader per record: measured, that took NewReader from 141 to 723
+// ns/op and 1 alloc to 3, and made the per-record path 1.86x slower. The table
+// outlives any one Reader; the cache is where that fact is written down.
+//
+// **The key is an interface, and an interface key is a panic waiting to
+// happen.** [Charset] promises nothing about comparability, so a caller whose
+// charset is a struct with a slice or a map in it would panic the map lookup
+// rather than the caller's own code. alphaTableOf checks comparability of the
+// *value* before it goes near the map and builds an uncached table otherwise,
+// so such a charset is slower by one table per Reader and never a crash.
+//
+// A cached entry keeps its charset reachable for the life of the program, so
+// the cache is bounded: past alphaTablesMax distinct charsets it stops storing
+// and keeps answering, which turns a caller that mints charsets in a loop into
+// a performance question rather than a leak. Two entries is the realistic
+// occupancy — [ASCII] and [CP037] are zero-size structs, so every ASCII()
+// equals every other.
+var alphaTables sync.Map // Charset -> *alphaTable
+
+// alphaTablesLen tracks how many entries [alphaTables] holds. sync.Map has no
+// length, and the bound below needs one; it is approximate under concurrent
+// stores, which is acceptable for a cap whose purpose is "not unbounded".
+var alphaTablesLen atomic.Int64
+
+// alphaTablesMax bounds [alphaTables]. Each entry is about 1.3KB of table plus
+// whatever the charset itself retains, so this is a ceiling in the tens of
+// kilobytes. It is far above the two entries a program using the shipped
+// charsets occupies and far above the handful a program wrapping code pages
+// would.
+const alphaTablesMax = 64
+
+// alphaTableOf returns the derived table of cs, from the cache where cs can
+// safely be a map key and freshly built where it cannot.
+func alphaTableOf(cs Charset) *alphaTable {
+	if !comparableCharset(cs) {
+		return newAlphaTable(cs)
+	}
+	if t, ok := alphaTables.Load(cs); ok {
+		return t.(*alphaTable)
+	}
+	t := newAlphaTable(cs)
+	if alphaTablesLen.Load() >= alphaTablesMax {
+		return t
+	}
+	actual, loaded := alphaTables.LoadOrStore(cs, t)
+	if !loaded {
+		alphaTablesLen.Add(1)
+	}
+	return actual.(*alphaTable)
+}
 
 // SignConvention is how an overpunched sign is spelled in the sign-carrying
 // byte of a zoned decimal field.
@@ -1842,4 +2041,50 @@ func (e FloatRangeError) Error() string {
 		"%s floating point value %s in a field of %d bytes: %s",
 		e.Format, e.Value, e.Width, e.Reason,
 	)
+}
+
+// comparableCharset reports whether cs may be used as a map key, which
+// [alphaTableOf] must know before it goes anywhere near [alphaTables]: a
+// non-comparable key panics inside the map, and inside sync.Map's store path
+// that panic escapes while its mutex is held. Recovering from it is therefore
+// not an option, so the question has to be answered first.
+//
+// It is answered from the *type*, and answered conservatively. The exact
+// answer is reflect.Value.Comparable, which walks the dynamic value and so
+// tells a struct{ X any } holding an int from one holding a slice — but it
+// allocates four times per call, which on this path is four allocations per
+// [Reader] and so per record. comparableType instead reads any interface-typed
+// field as not comparable, which is wrong only in the direction that costs a
+// charset its cached table and can never be wrong in the direction that
+// panics.
+func comparableCharset(cs Charset) bool {
+	return comparableType(reflect.TypeOf(cs))
+}
+
+// comparableType is comparableCharset's recursion: reflect.Type.Comparable
+// with interface-typed fields ruled out.
+//
+// reflect.Type.Comparable answers for the type, and an interface type is
+// comparable as a type — it is the dynamic value inside it that may not be, so
+// a struct carrying one is a value that == accepts or panics on depending on
+// what was put in it. Every other kind either is comparable or is not,
+// whatever it holds.
+func comparableType(t reflect.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Kind() {
+	case reflect.Interface:
+		return false
+	case reflect.Array:
+		return comparableType(t.Elem())
+	case reflect.Struct:
+		for i := range t.NumField() {
+			if !comparableType(t.Field(i).Type) {
+				return false
+			}
+		}
+		return true
+	}
+	return t.Comparable()
 }
