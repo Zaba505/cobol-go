@@ -6,8 +6,11 @@
 package cobol
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 )
 
@@ -3130,4 +3133,248 @@ type UnsupportedNodeError struct {
 // Error implements the [error] interface.
 func (e UnsupportedNodeError) Error() string {
 	return fmt.Sprintf("cannot print unsupported node %T", e.Node)
+}
+
+// ErrEntryChanged is the cause an [EntryCheckError] carries when an entry
+// printed and re-read without error, but as an entry different from the one
+// printed: a PICTURE string carrying clause text, say, which re-reads as the
+// PICTURE clause and a second clause beside it.
+var ErrEntryChanged = errors.New("entry re-reads as a different entry")
+
+// EntryCheckError is returned by [CheckEntries] for the first entry that would
+// not survive a [Print] and a [Parse] of the output. Index is the entry's index
+// in the checked slice and Pos is the entry's own Pos — the zero Pos for a nil
+// entry, and whatever the caller set for an entry it built itself. Printed is
+// the text Print wrote for the entry, its leading comments included; it is empty
+// when Print could not write the entry at all.
+//
+// Err is the cause: the [UnsupportedNodeError] when Print could not write the
+// entry, the parse error when the output did not re-read, or [ErrEntryChanged]
+// when it re-read as a different entry. A parse error is positioned within the
+// printed text, not within whatever the entries came from; Position reports the
+// entry's own Pos, and is what an errors.As for [Positioned] finds first.
+type EntryCheckError struct {
+	Index   int
+	Pos     Pos
+	Printed string
+	Err     error
+}
+
+// Position implements [Positioned], returning the entry's Pos.
+func (e EntryCheckError) Position() Pos { return e.Pos }
+
+// Unwrap returns the cause, so errors.Is and errors.As reach it.
+func (e EntryCheckError) Unwrap() error { return e.Err }
+
+// Error implements the [error] interface.
+func (e EntryCheckError) Error() string {
+	where := fmt.Sprintf("entry %d", e.Index)
+	if e.Pos != (Pos{}) {
+		where += fmt.Sprintf(" at line %d, column %d", e.Pos.Line, e.Pos.Column)
+	}
+	if e.Printed == "" {
+		return fmt.Sprintf("%s does not print: %v", where, e.Err)
+	}
+	return fmt.Sprintf("%s, printed as %q, does not re-read: %v", where, strings.TrimSuffix(e.Printed, "\n"), e.Err)
+}
+
+// CheckEntries reports whether entries — typically ones a caller built by hand
+// rather than read with [Parse] — are entries Parse would produce. It returns nil
+// when they are, and otherwise an [EntryCheckError] naming the first entry that
+// is not, by index and by that entry's Pos.
+//
+// The check is the round trip the format contract states (SPEC.md "Reference
+// format independence"): entries is printed exactly as [Print] prints a
+// [Fragment] holding them — in free format, the only format Print writes — and
+// the output is re-read with Parse in free format with [WithFragment]. Each entry
+// must re-read as exactly one entry equal to it. Equality ignores every Pos and
+// every comment, and does not tell a nil slice from an empty one; everything else
+// — level numbers, names, the clauses, their order, and the case of every word —
+// must match. So an entry is refused when Print cannot write it (a nil entry, or
+// a SIGN position spelled "leading" rather than "LEADING"), when its text does not
+// re-read (an 88 carrying a PICTURE clause, or two VALUE literals on an ordinary
+// item), and when its text re-reads as something else (a PICTURE string carrying
+// "OCCURS 4", or a USAGE spelled "comp" where Parse writes "COMP").
+//
+// The entries are checked together, as one copybook, because that is how Parse
+// reads them: a level-number hierarchy that does not hold is refused as Parse
+// would refuse it. The entry reported is the first one whose failure does not
+// depend on the entries after it: every entry before it passes the check on its
+// own as a copybook, so a parse error Parse reports only at a later entry — after
+// an entry whose text swallowed its own separator period, say — is still charged
+// to the entry that caused it. A nil or empty slice passes. CheckEntries does
+// not modify entries.
+func CheckEntries(entries []*DataDescriptionEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	blocks, err := printEntryBlocks(entries)
+	var printErr EntryCheckError
+	if errors.As(err, &printErr) {
+		// The entries before the one Print could not write may hold an earlier
+		// failure of their own, which is the one to report.
+		if prefixErr := CheckEntries(entries[:printErr.Index]); prefixErr != nil {
+			return prefixErr
+		}
+		return err
+	}
+	var text strings.Builder
+	for _, b := range blocks {
+		text.WriteString(b.text)
+	}
+
+	f, err := Parse(strings.NewReader(text.String()), WithFragment())
+	if err != nil {
+		i := len(entries) - 1
+		var p Positioned
+		if errors.As(err, &p) {
+			i = blockAtLine(blocks, p.Position().Line)
+		}
+		// A parse error can surface after the entry that caused it — an entry
+		// whose text swallows its own separator period is reported at the next
+		// entry's level number — and an earlier entry may re-read as a different
+		// one. Either way the entries before i hold the failure to report.
+		if prefixErr := CheckEntries(entries[:i]); prefixErr != nil {
+			return prefixErr
+		}
+		return entryCheckError(entries, blocks, i, err)
+	}
+
+	reread := make([][]*DataDescriptionEntry, len(entries))
+	for _, got := range f.Fragment.Entries {
+		i := blockAtLine(blocks, got.Pos.Line)
+		reread[i] = append(reread[i], got)
+	}
+	for i, entry := range entries {
+		if len(reread[i]) != 1 || !equalIgnoringPos(reflect.ValueOf(entry), reflect.ValueOf(reread[i][0])) {
+			return entryCheckError(entries, blocks, i, ErrEntryChanged)
+		}
+	}
+	return nil
+}
+
+// entryBlock is the text [Print] writes for one data-description entry — its
+// leading comments, then the entry line — and the line of the printed fragment
+// the text starts on.
+type entryBlock struct {
+	line int
+	text string
+}
+
+// printEntryBlocks prints entries as [Print] prints a [Fragment] holding them,
+// one block per entry, so a position in the output can be traced to the entry
+// whose text holds it. It returns an [EntryCheckError] for the first entry Print
+// cannot write.
+func printEntryBlocks(entries []*DataDescriptionEntry) ([]entryBlock, error) {
+	depths := EntryDepths(entries)
+	blocks := make([]entryBlock, len(entries))
+	line := 1
+	for i, entry := range entries {
+		var buf bytes.Buffer
+		pr := &printer{w: &buf}
+		for action := printDataEntry(entry, depths[i], nil); action != nil && pr.err == nil; {
+			action = action(pr, nil)
+		}
+		if pr.err != nil {
+			return nil, EntryCheckError{Index: i, Pos: entryPos(entry), Err: pr.err}
+		}
+		blocks[i] = entryBlock{line: line, text: buf.String()}
+		line += strings.Count(blocks[i].text, "\n")
+	}
+	return blocks, nil
+}
+
+// blockAtLine returns the index of the block holding the given line of the
+// printed fragment: the last block starting at or before it.
+func blockAtLine(blocks []entryBlock, line int) int {
+	i := 0
+	for j, b := range blocks {
+		if b.line <= line {
+			i = j
+		}
+	}
+	return i
+}
+
+// entryCheckError builds the [EntryCheckError] charging err to entry i.
+func entryCheckError(entries []*DataDescriptionEntry, blocks []entryBlock, i int, err error) error {
+	return EntryCheckError{Index: i, Pos: entryPos(entries[i]), Printed: blocks[i].text, Err: err}
+}
+
+// entryPos returns the Pos of an entry, or the zero Pos for a nil one.
+func entryPos(entry *DataDescriptionEntry) Pos {
+	if entry == nil {
+		return Pos{}
+	}
+	return entry.Pos
+}
+
+var (
+	posType      = reflect.TypeFor[Pos]()
+	commentsType = reflect.TypeFor[[]*Comment]()
+)
+
+// equalIgnoringPos reports whether a and b are the same AST, ignoring every
+// field of type [Pos] and every comment list, and treating a nil slice as equal
+// to an empty one. It walks the values by reflection, so a field added to a node
+// is compared without this function changing.
+func equalIgnoringPos(a, b reflect.Value) bool {
+	if !a.IsValid() || !b.IsValid() {
+		return a.IsValid() == b.IsValid()
+	}
+	if a.Type() != b.Type() {
+		return false
+	}
+	switch a.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if a.IsNil() || b.IsNil() {
+			return a.IsNil() == b.IsNil()
+		}
+		return equalIgnoringPos(a.Elem(), b.Elem())
+	case reflect.Struct:
+		for i := range a.NumField() {
+			if ft := a.Type().Field(i).Type; ft == posType || ft == commentsType {
+				continue
+			}
+			if !equalIgnoringPos(a.Field(i), b.Field(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Slice, reflect.Array:
+		if a.Len() != b.Len() {
+			return false
+		}
+		for i := range a.Len() {
+			if !equalIgnoringPos(a.Index(i), b.Index(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Map:
+		if a.Len() != b.Len() {
+			return false
+		}
+		for _, k := range a.MapKeys() {
+			if !equalIgnoringPos(a.MapIndex(k), b.MapIndex(k)) {
+				return false
+			}
+		}
+		return true
+	case reflect.String:
+		return a.String() == b.String()
+	case reflect.Bool:
+		return a.Bool() == b.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return a.Int() == b.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return a.Uint() == b.Uint()
+	case reflect.Float32, reflect.Float64:
+		return a.Float() == b.Float()
+	case reflect.Complex64, reflect.Complex128:
+		return a.Complex() == b.Complex()
+	default:
+		// Funcs, channels and unsafe pointers have no place in the AST.
+		return false
+	}
 }

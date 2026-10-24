@@ -42,6 +42,7 @@ func TestPositioned(t *testing.T) {
 		{name: "unexpected token", err: UnexpectedTokenError{Expected: []TokenType{TokenSymbol}, Actual: tok}},
 		{name: "unexpected keyword", err: UnexpectedKeywordError{Expected: []string{"PIC"}, Actual: tok}},
 		{name: "trailing token", err: TrailingTokenError{Actual: tok}},
+		{name: "entry check", err: EntryCheckError{Index: 2, Pos: pos, Printed: "01 A PIC X.\n", Err: ErrEntryChanged}},
 	}
 
 	for _, tc := range testCases {
