@@ -4644,3 +4644,96 @@ func TestPrintRefusesUnprintableLiterals(t *testing.T) {
 		})
 	}
 }
+
+// Digit-led words survive Parse → Print → Parse: a data-name such as 1ST-FIELD
+// in a fragment, and the numbered paragraph and section names of a program
+// together with the PERFORM, PERFORM … THRU, GO TO and SORT procedure targets
+// that name them (SPEC §"Digit-led words and numeric literals"). The printed
+// text is checked too, since a word printed back must still lex as one word.
+func TestPrintDigitLedWordsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		src      string
+		opts     []ParseOption
+		contains []string
+	}{
+		{
+			name: "fragment",
+			src: "01 REC.\n" +
+				"   05 1ST-FIELD PIC X.\n" +
+				"   05 2ND-FIELD PIC 9(4) VALUE 1000.\n",
+			opts:     []ParseOption{WithFragment()},
+			contains: []string{"05 1ST-FIELD PIC X.", "05 2ND-FIELD PIC 9(4) VALUE 1000."},
+		},
+		{
+			name: "fixed-format fragment",
+			src: "       01 REC.\n" +
+				"           05 1ST-FIELD PIC X.\n",
+			opts:     []ParseOption{WithFragment(), WithSourceFormat(FixedFormat)},
+			contains: []string{"05 1ST-FIELD PIC X."},
+		},
+		{
+			name: "program",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"DATA DIVISION.\n" +
+				"WORKING-STORAGE SECTION.\n" +
+				"01 1ST-COUNT PIC 9(4).\n" +
+				"PROCEDURE DIVISION.\n" +
+				"0000-MAIN.\n" +
+				"    PERFORM 1000-INIT THRU 1999-EXIT.\n" +
+				"    PERFORM 2000.\n" +
+				"    PERFORM 3000-3999.\n" +
+				"    SORT W ASCENDING KEY K INPUT PROCEDURE 1000-INIT THRU 1999-EXIT\n" +
+				"        GIVING OUT-FILE.\n" +
+				"    COMPUTE 1ST-COUNT = 1000 - 1ST-COUNT.\n" +
+				"    GO TO 9999-EXIT.\n" +
+				"1000-INIT.\n" +
+				"    MOVE 1.5E3 TO 1ST-COUNT.\n" +
+				"1999-EXIT.\n" +
+				"    EXIT.\n" +
+				"2000.\n" +
+				"    EXIT.\n" +
+				"3000-3999.\n" +
+				"    EXIT.\n" +
+				"9999-EXIT.\n" +
+				"    STOP RUN.\n",
+			contains: []string{
+				"01 1ST-COUNT PIC 9(4).",
+				"1000-INIT.",
+				"PERFORM 1000-INIT THROUGH 1999-EXIT",
+				"PERFORM 3000-3999",
+				"INPUT PROCEDURE 1000-INIT THROUGH 1999-EXIT",
+				"COMPUTE 1ST-COUNT = 1000 - 1ST-COUNT",
+				"GO TO 9999-EXIT",
+				"3000-3999.",
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			first, err := Parse(strings.NewReader(tc.src), tc.opts...)
+			require.NoError(t, err)
+
+			var buf bytes.Buffer
+			require.NoError(t, Print(&buf, first))
+
+			reparse := []ParseOption{}
+			if first.Fragment != nil {
+				reparse = append(reparse, WithFragment())
+			}
+			second, err := Parse(strings.NewReader(buf.String()), reparse...)
+			require.NoError(t, err, buf.String())
+
+			require.Equal(t, withoutPos(first), withoutPos(second))
+			for _, want := range tc.contains {
+				require.Contains(t, buf.String(), want)
+			}
+		})
+	}
+}

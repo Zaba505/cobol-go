@@ -887,8 +887,16 @@ func tokenizeSeparatorPeriod(start Pos) tokenizerAction {
 // first non-blank character of that line's Area B with no intervening space (SPEC
 // §"Line Continuation" → Words and numeric literals).
 func tokenizeWord(start Pos, first rune) tokenizerAction {
+	return tokenizeWordFrom(start, utf8.AppendRune(nil, first))
+}
+
+// tokenizeWordFrom continues a COBOL word whose leading runes, value, have
+// already been read from start. [tokenizeWord] enters it with a word's first
+// letter; [tokenizeNumber] enters it with the digits (and any hyphens or
+// underscores) of a digit-led run once that run turns out to be a word (SPEC
+// §"Digit-led words and numeric literals").
+func tokenizeWordFrom(start Pos, value []byte) tokenizerAction {
 	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
-		value := utf8.AppendRune(nil, first)
 		for {
 			if t.fixed && t.pos.Column > fixedAreaBEndColumn {
 				if t.fixedAdvanceToContinuation() {
@@ -1002,7 +1010,16 @@ func tokenizePictureString(start Pos) tokenizerAction {
 // optional sign and/or the first digit. The literal is integer digits, an
 // optional decimal point (t.decimalPoint, honoring DECIMAL-POINT IS COMMA)
 // followed by fractional digits, and an optional E/e exponent with an optional
-// sign. Decoding the value is deferred to a later story.
+// sign — which an unsigned run reads only after a decimal point. Decoding the value is deferred to a later
+// story.
+//
+// An unsigned run that meets a letter, or a hyphen or underscore leading on to a
+// letter or digit, before any decimal point is not a numeric literal but a
+// digit-led COBOL word such as 1000-INIT or 1ST-FIELD: the digits read so far
+// become the start of a [TokenIdentifier] (SPEC §"Digit-led words and numeric
+// literals"). Once a decimal point is read the run is committed to a numeric
+// literal, so 1.5E3 is a number and 1E5 is a word; -1E5, being signed, is a
+// number as it always was.
 //
 // It peeks each candidate rune before consuming it, so a rune that does not
 // belong to the literal is left in the buffer for the next dispatch rather than
@@ -1014,6 +1031,9 @@ func tokenizeNumber(start Pos, value []byte) tokenizerAction {
 	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
 		seenPoint := false
 		seenExp := false
+		// A sign never begins a word, so a signed run stays a numeric literal
+		// whatever follows its digits.
+		signed := value[0] == '+' || value[0] == '-'
 		emit := func(next tokenizerAction) tokenizerAction {
 			return yieldTokenThen(Token{Pos: start, Type: TokenNumber, Value: value}, next)
 		}
@@ -1047,21 +1067,103 @@ func tokenizeNumber(start Pos, value []byte) tokenizerAction {
 				seenPoint = true
 				r, _ := t.next()
 				value = utf8.AppendRune(value, r)
-			case (b == 'E' || b == 'e') && !seenExp && t.peekExponentDigits():
+			case (b == 'E' || b == 'e') && (seenPoint || signed) && !seenExp && t.peekExponentDigits():
+				// An unsigned run takes an exponent only after a decimal point;
+				// without one the E makes the run a word (below). A signed run
+				// is never a word, so it has nothing to tell apart and keeps
+				// reading an exponent with or without a decimal point (-1E5).
 				// The exponent admits no further decimal point.
 				seenExp = true
-				seenPoint = true
 				r, _ := t.next()
 				value = utf8.AppendRune(value, r)
 				if sb, ok := t.peekByte(); ok && (sb == '+' || sb == '-') {
 					sign, _ := t.next()
 					value = utf8.AppendRune(value, sign)
 				}
+			case !seenPoint && !signed && isWordStart(rune(b)):
+				// A letter before any decimal point: a digit-led word.
+				return tokenizeWordFrom(start, value)
+			case !seenPoint && !signed && (b == '-' || b == '_'):
+				// A hyphen or underscore joins a word only when a letter or
+				// digit follows it; 1000 - X and 1000- X keep their minus.
+				return tokenizeNumberJoin(start, value)
 			default:
 				return emit(tokenizeCOBOL)
 			}
 		}
 	}
+}
+
+// pendingRune is a rune consumed at pos whose token is not yet decided.
+type pendingRune struct {
+	pos Pos
+	r   rune
+}
+
+// tokenizeNumberJoin decides an unsigned, point-free digit run, value read from
+// start, that is directly followed by a hyphen or underscore. It consumes the
+// whole run of hyphens and underscores — across a fixed-format continuation when
+// the run reaches column 72 — and then peeks: a letter or digit makes value, the
+// run and what follows one digit-led word (1000-INIT, 1000-2000); anything else
+// leaves value a numeric literal, and each rune of the run is then emitted as it
+// would have lexed on its own — a hyphen as the minus operator, an underscore as
+// an [UnexpectedCharacterError] — so 1000- X tokenizes exactly as it always has.
+//
+// The run is consumed rather than peeked because it may span a continuation, and
+// a consumed rune cannot be backed up after a peek (see [tokenizer.peekByte]);
+// holding the runes with their positions is what lets the undecided case replay
+// them.
+func tokenizeNumberJoin(start Pos, value []byte) tokenizerAction {
+	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
+		var run []pendingRune
+		for {
+			if t.fixed && t.pos.Column > fixedAreaBEndColumn {
+				if t.fixedAdvanceToContinuation() {
+					t.fixedSkipToAreaBContent()
+					continue
+				}
+				break
+			}
+			b, ok := t.peekByte()
+			if !ok {
+				break
+			}
+			if b == '-' || b == '_' {
+				pos := t.pos
+				r, _ := t.next()
+				run = append(run, pendingRune{pos: pos, r: r})
+				continue
+			}
+			if isWordStart(rune(b)) || isDigit(rune(b)) {
+				for _, pr := range run {
+					value = utf8.AppendRune(value, pr.r)
+				}
+				return tokenizeWordFrom(start, value)
+			}
+			break
+		}
+		num := Token{Pos: start, Type: TokenNumber, Value: value}
+		return yieldTokenThen(num, replayRunes(run))
+	}
+}
+
+// replayRunes emits each rune of a hyphen/underscore run that turned out not to
+// belong to a word, in order, as it lexes standing alone: a hyphen is the minus
+// operator; an underscore begins no token and is an [UnexpectedCharacterError],
+// which ends the stream as any unexpected character does.
+func replayRunes(run []pendingRune) tokenizerAction {
+	if len(run) == 0 {
+		return tokenizeCOBOL
+	}
+	head := run[0]
+	if head.r != '-' {
+		return func(_ *tokenizer, yield func(Token, error) bool) tokenizerAction {
+			yield(Token{}, UnexpectedCharacterError{Pos: head.pos, R: head.r})
+			return nil
+		}
+	}
+	tok := Token{Pos: head.pos, Type: TokenSymbol, Value: []byte{'-'}}
+	return yieldTokenThen(tok, replayRunes(run[1:]))
 }
 
 // tokenizeString accumulates an alphanumeric literal delimited by delim (a
@@ -1365,9 +1467,10 @@ func tokenizeComment(start Pos, value []byte) tokenizerAction {
 	}
 }
 
-// isWordStart reports whether r may begin a COBOL word. Word start is restricted
-// to an ASCII letter in this slice so the dispatch stays unambiguous before
-// numeric literals (which also begin with a digit) are tokenized.
+// isWordStart reports whether r is an ASCII letter, which always begins a COBOL
+// word. A word may also begin with a digit, but a digit run is dispatched to
+// [tokenizeNumber], which hands it over to [tokenizeWordFrom] once it proves to
+// be a word (SPEC §"Digit-led words and numeric literals").
 func isWordStart(r rune) bool {
 	return ('A' <= r && r <= 'Z') || ('a' <= r && r <= 'z')
 }

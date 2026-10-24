@@ -389,6 +389,15 @@ format-independent alternative.
   decimal point (`.`), and an optional exponent introduced by `E`/`e`
   (*GnuCOBOL §2.1.19.1*). Examples: `0`, `42`, `-7`, `3.14`, `-2.95`,
   `9.92E25`, `5.7E-14`.
+- In an **unsigned** literal an exponent is allowed **only after a decimal
+  point**: a floating-point literal's mantissa contains a decimal point (as IBM
+  Enterprise COBOL defines it: "a decimal point must be included in the
+  mantissa"). `1E5`, with no decimal point, is therefore not a numeric literal
+  but a user-defined word; see
+  [Digit-led words and numeric literals](#digit-led-words-and-numeric-literals).
+  A **signed** literal can never be read as a word, so it has nothing to tell
+  apart and keeps the optional decimal point: `-1E5` and `+1E5` are numeric
+  literals, as they always were.
 - At most one sign and at most one decimal point in the mantissa. A decimal
   point may not be the last character of the literal token (a trailing `.` is a
   separator period).
@@ -446,6 +455,62 @@ argument (*GnuCOBOL §2.1.19.3*). See Semantics.
   entirely of digits.
 - Maximum length **31** characters (COBOL 2014); extendable to 63 in GnuCOBOL
   via `-std` compatibility flags.
+
+> **Procedure names.** This package reads "may consist entirely of digits" as
+> "need contain no letter": a paragraph- or section-name may be all digits
+> (`1000`) or digits joined by hyphens or underscores (`1000-2000`). Anywhere
+> else — a data-name, a file-name, a data reference — a word with no letter is
+> refused with a positioned `InvalidWordError`. The procedure-name positions are
+> the paragraph and section headers (declarative sections included), the
+> `PERFORM` target and its `THROUGH`/`THRU` end, the `GO TO` targets, the
+> `USE FOR DEBUGGING` targets, and the `SORT`/`MERGE` `INPUT`/`OUTPUT
+> PROCEDURE` names and their `THROUGH`/`THRU` end. (`ALTER` also names
+> procedures, but this package does not parse `ALTER` yet; its procedure-names
+> will take the same rule when it does.)
+
+#### Digit-led words and numeric literals
+
+A word and a numeric literal can both begin with a digit, so the tokenizer
+needs one rule to tell them apart. An earlier revision of this reference left
+it open: the rule above made `1E5` a word (it contains a letter) while the
+numeric literal's optional decimal point and optional exponent made it a
+number. The rule this package follows:
+
+> A run that begins with a **digit** is read as far as the COBOL word
+> characters (letters, digits, `-`, `_`) go. It is a **word** when, **before
+> any decimal point**, it meets a letter, or a hyphen or underscore that is
+> followed — after any further hyphens and underscores — by a letter or a
+> digit. Otherwise it is a **numeric literal**. A run that begins with a
+> **sign** is always a numeric literal: a word never begins with `+` or `-`.
+
+What that means case by case:
+
+| source | tokens | why |
+|---|---|---|
+| `1ST-FIELD`, `12AB`, `9999-EXIT` | one word | a letter in the run |
+| `1000-INIT` | one word | the hyphen leads on to a letter |
+| `1000-2000`, `1_000` | one word, with no letter | the hyphen or underscore leads on to a digit; valid only as a procedure-name (above) |
+| `1000` | numeric literal | no letter, no hyphen; as a paragraph-name it is still read as one (an all-digit procedure-name) |
+| `1000 - X` | numeric literal, `-`, word | spaces end the run; COBOL's arithmetic operators are space-separated |
+| `1000- X` | numeric literal, `-`, word | the hyphen leads on to a space, so it is the operator |
+| `1000 -X` | numeric literal, `-`, word | the run ended at the space; `-X` is no signed number |
+| `1000 -5` | numeric literal, numeric literal | `-5` is a signed literal, as before |
+| `1E5`, `1E-5` | one word | no decimal point, so `E` is a letter (`1E-5`: the hyphen leads on to a digit) |
+| `1E+5` | word `1E`, numeric literal `+5` | `+` is no word character, so the run ends at `1E` |
+| `1.5E3`, `1.0E-5`, `9.92E25` | numeric literal | a decimal point, then an exponent |
+| `3.14ABC` | numeric literal, word | the decimal point commits the run to a number, which ends at the letter |
+| `-1ST` | numeric literal `-1`, word `ST` | a sign never begins a word |
+| `-1E5`, `+1E5` | numeric literal | a signed run is never a word, so its exponent needs no decimal point |
+| `5.` | numeric literal, separator period | a trailing `.` is a separator, as before |
+
+The rule holds in both reference formats. In fixed format the run is classified
+over its joined text: a digit-led word split at column 72 and resumed on a
+continuation line (`1000-IN` / `IT`, or `1000` / `-INIT`) is one word, exactly
+as an ordinary word is. A PICTURE character-string is scanned by its own rule
+after `PIC`/`PICTURE` and is unaffected — `PIC 9(4)` and `PIC 99V9` are PICTURE
+strings, not words. A hyphen that turns out not to join a word is the minus
+operator, exactly as if the digits had been a numeric literal all along, so
+every numeric literal that tokenized before this rule still does.
 
 ### Symbols and Operators
 
@@ -1001,8 +1066,10 @@ sentence  = { statement } "."
 statement = « a verb-led imperative or conditional statement; see catalog »
 ```
 
-- A `paragraph-name` / `section-name` is a user-defined word (may be all
-  digits). A **sentence** is one or more statements ended by a separator period.
+- A `paragraph-name` / `section-name` is a user-defined word that need contain
+  no letter (`1000`, `1000-2000`; see "User-defined word"). The commonest
+  mainframe convention, a number then a name (`1000-INIT`, `9999-EXIT`), is an
+  ordinary digit-led word. A **sentence** is one or more statements ended by a separator period.
 - A program with statements directly under PROCEDURE DIVISION uses the
   paragraph form; once any `SECTION` appears, the body is section-organized.
 

@@ -2170,8 +2170,41 @@ func (p *parser) expectFollow(follow ...string) error {
 
 // expect pulls the next token and requires its type to be one of types,
 // returning [UnexpectedEndOfTokensError] if the stream is exhausted or
-// [UnexpectedTokenError] if the type does not match.
+// [UnexpectedTokenError] if the type does not match. A word with no letter in
+// it, such as 1000-2000, is an [InvalidWordError]: only a procedure-name may be
+// letterless, and procedure-names are read with [parser.expectProcedureName].
 func (p *parser) expect(types ...TokenType) (Token, error) {
+	tok, err := p.expectType(types...)
+	if err != nil {
+		return Token{}, err
+	}
+	if err := requireLetter(tok); err != nil {
+		return Token{}, err
+	}
+	return tok, nil
+}
+
+// expectProcedureName pulls a paragraph- or section-name: an identifier, which
+// unlike every other user-defined word needs no letter (1000-2000), or an
+// all-digit word, which the tokenizer reads as a [TokenNumber] (SPEC
+// §"User-defined word").
+func (p *parser) expectProcedureName() (Token, error) {
+	return p.expectType(TokenIdentifier, TokenNumber)
+}
+
+// requireLetter refuses an identifier token that contains no letter with an
+// [InvalidWordError] (SPEC §"User-defined word": a user-defined word other than
+// a procedure-name must contain at least one letter). Any other token passes.
+func requireLetter(tok Token) error {
+	if tok.Type != TokenIdentifier || slices.ContainsFunc(tok.Value, func(b byte) bool { return isWordStart(rune(b)) }) {
+		return nil
+	}
+	return InvalidWordError{Pos: tok.Pos, Word: string(tok.Value)}
+}
+
+// expectType is [parser.expect] without the letter check: it requires only the
+// token's type.
+func (p *parser) expectType(types ...TokenType) (Token, error) {
 	tok, err, ok := p.advance()
 	if err != nil {
 		return Token{}, err
@@ -2190,7 +2223,7 @@ func (p *parser) expect(types ...TokenType) (Token, error) {
 // are case-insensitive). It returns [UnexpectedKeywordError] when an identifier
 // of the wrong spelling is read.
 func (p *parser) expectKeyword(kw ...string) (Token, error) {
-	tok, err := p.expect(TokenIdentifier)
+	tok, err := p.expectType(TokenIdentifier)
 	if err != nil {
 		return Token{}, err
 	}
@@ -3255,6 +3288,9 @@ func parseEntryName(p *parser, entry *DataDescriptionEntry) (parserAction[*DataD
 			p.consume()
 			entry.Filler = true
 		case tok.Type == TokenIdentifier && !isDataClauseKeyword(tok):
+			if err := requireLetter(tok); err != nil {
+				return nil, err
+			}
 			p.consume()
 			entry.Name = &Word{Pos: tok.Pos, Value: string(tok.Value)}
 		}
@@ -3854,7 +3890,7 @@ func parseDeclarativeSectionOpt(p *parser, div *ProcedureDivision) (parserAction
 // (name SECTION .), its mandatory USE statement, and the paragraphs that run until
 // the next declarative section header or END DECLARATIVES.
 func parseDeclarativeSection(p *parser) (*DeclarativeSection, error) {
-	name, err := p.expect(TokenIdentifier, TokenNumber)
+	name, err := p.expectProcedureName()
 	if err != nil {
 		return nil, err
 	}
@@ -4072,7 +4108,7 @@ func parseDebuggingUse(p *parser, pos Pos) (UseSpec, error) {
 	// Otherwise one or more procedure-names (which may be all digits), running to
 	// the terminating period.
 	for {
-		name, err := p.expect(TokenIdentifier, TokenNumber)
+		name, err := p.expectProcedureName()
 		if err != nil {
 			return nil, err
 		}
@@ -4195,7 +4231,7 @@ func parseSectionOpt(p *parser, div *ProcedureDivision) (parserAction[*Procedure
 // parseSection parses a section header (name SECTION [segment-number] .) and its
 // paragraphs, which run until the next section header or end of input.
 func parseSection(p *parser) (*Section, error) {
-	name, err := p.expect(TokenIdentifier, TokenNumber)
+	name, err := p.expectProcedureName()
 	if err != nil {
 		return nil, err
 	}
@@ -4882,6 +4918,12 @@ func parsePerformStatement(p *parser, kw Token) (Statement, error) {
 // a count ("n TIMES …" inline) or a procedure-name (out-of-line).
 func parsePerformWithOperand(p *parser, stmt *PerformStatement) (Statement, error) {
 	lead, _, _ := p.peek()
+	if requireLetter(lead) != nil {
+		// A letterless word (1000-2000) is no data reference and no count, so it
+		// can only be the procedure-name of an out-of-line PERFORM.
+		p.consume()
+		return parsePerformTarget(p, stmt, &Word{Pos: lead.Pos, Value: string(lead.Value)})
+	}
 	first, err := parseOperand(p)
 	if err != nil {
 		return nil, err
@@ -4902,6 +4944,13 @@ func parsePerformWithOperand(p *parser, stmt *PerformStatement) (Statement, erro
 	if !ok {
 		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier, TokenNumber}, Actual: lead}
 	}
+	return parsePerformTarget(p, stmt, name)
+}
+
+// parsePerformTarget finishes an out-of-line PERFORM whose procedure-name, name,
+// has been read: an optional THROUGH/THRU range end, then the optional loop
+// specification.
+func parsePerformTarget(p *parser, stmt *PerformStatement, name *Word) (Statement, error) {
 	stmt.Target = name
 
 	through, err := p.peekKeyword("THROUGH", "THRU")
@@ -4911,7 +4960,7 @@ func parsePerformWithOperand(p *parser, stmt *PerformStatement) (Statement, erro
 	if through {
 		p.consume()
 		// A procedure-name may be an identifier or an all-digit word.
-		t, err := p.expect(TokenIdentifier, TokenNumber)
+		t, err := p.expectProcedureName()
 		if err != nil {
 			return nil, err
 		}
@@ -5763,6 +5812,21 @@ func (p *parser) peekFileName(stop ...string) (bool, error) {
 	return true, nil
 }
 
+// parseProcedureName consumes one procedure-name — an identifier, letterless or
+// not, or an all-digit word — and returns it as a [Word]. As in [parseFileName], a
+// reserved statement verb, scope terminator, or phrase keyword in its place is
+// rejected rather than swallowed as a name.
+func parseProcedureName(p *parser) (*Word, error) {
+	tok, err := p.expectProcedureName()
+	if err != nil {
+		return nil, err
+	}
+	if isStatementVerb(tok) || isScopeTerminator(tok) || isPhraseKeyword(tok) {
+		return nil, UnexpectedTokenError{Expected: []TokenType{TokenIdentifier, TokenNumber}, Actual: tok}
+	}
+	return &Word{Pos: tok.Pos, Value: string(tok.Value)}, nil
+}
+
 // parseFileName consumes one identifier token and returns it as a file- or
 // record-name [Word]. A file-name is a user-defined word, so a reserved statement
 // verb, scope terminator, or phrase keyword in its place (e.g. READ with no
@@ -6452,7 +6516,7 @@ func parseSortProcedure(p *parser, leadPos Pos) (*SortProcedure, error) {
 	if err := p.skipOptionalKeyword("IS"); err != nil {
 		return nil, err
 	}
-	target, err := parseFileName(p)
+	target, err := parseProcedureName(p)
 	if err != nil {
 		return nil, err
 	}
@@ -6461,7 +6525,7 @@ func parseSortProcedure(p *parser, leadPos Pos) (*SortProcedure, error) {
 		return nil, err
 	} else if through {
 		p.consume()
-		end, err := parseFileName(p)
+		end, err := parseProcedureName(p)
 		if err != nil {
 			return nil, err
 		}
@@ -7783,6 +7847,9 @@ func parseIdentifierToken(p *parser) (*Identifier, error) {
 // been read: optional IN/OF qualification followed by an optional parenthesized
 // subscript or reference-modifier (SPEC.md "identifier").
 func parseIdentifier(p *parser, name Token) (*Identifier, error) {
+	if err := requireLetter(name); err != nil {
+		return nil, err
+	}
 	id := &Identifier{Pos: name.Pos, Name: &Word{Pos: name.Pos, Value: string(name.Value)}}
 
 	for {
@@ -8517,6 +8584,24 @@ func (e InvalidLevelNumberError) Position() Pos { return e.Pos }
 // Error implements the [error] interface.
 func (e InvalidLevelNumberError) Error() string {
 	return fmt.Sprintf("invalid level-number %q at line %d, column %d, expected 01-49, 66, 77, or 88", e.Value, e.Pos.Line, e.Pos.Column)
+}
+
+// InvalidWordError is returned when a user-defined word other than a
+// procedure-name contains no letter — a run of digits joined by hyphens or
+// underscores, such as 1000-2000 (SPEC §"User-defined word"). Only a paragraph-
+// or section-name may be letterless. Pos is the word's position and Word its
+// spelling.
+type InvalidWordError struct {
+	Pos  Pos
+	Word string
+}
+
+// Position implements [Positioned], returning Pos.
+func (e InvalidWordError) Position() Pos { return e.Pos }
+
+// Error implements the [error] interface.
+func (e InvalidWordError) Error() string {
+	return fmt.Sprintf("invalid word %q at line %d, column %d: a user-defined word other than a procedure-name must contain a letter", e.Word, e.Pos.Line, e.Pos.Column)
 }
 
 // SearchAllConstraintError is returned when a SEARCH ALL statement violates the
