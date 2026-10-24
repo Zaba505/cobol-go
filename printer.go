@@ -24,6 +24,15 @@ func indent(depth int) string {
 }
 
 // Print the given [File] to the given writer as COBOL source.
+//
+// Print always writes free format, whichever reference format the source was
+// parsed from: a [File] records no source format for the printer to reproduce.
+// The output has no sequence area, indicator column or Area A / Area B
+// placement, and every comment — a fixed-format "*" or "/" comment line
+// included — is written as a free-format "*>" line. Re-read the output with
+// [Parse] in free format (the default), keeping [WithFragment] when f holds a
+// copybook fragment; the result equals f with positions ignored (SPEC.md
+// "Reference format independence").
 func Print(w io.Writer, f *File) error {
 	pr := &printer{w: w}
 	for action := printFile; action != nil && pr.err == nil; {
