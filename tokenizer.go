@@ -1009,8 +1009,8 @@ func tokenizePictureString(start Pos) tokenizerAction {
 // whose value is the raw lexeme. value already holds the consumed prefix — an
 // optional sign and/or the first digit. The literal is integer digits, an
 // optional decimal point (t.decimalPoint, honoring DECIMAL-POINT IS COMMA)
-// followed by fractional digits, and — only after a decimal point — an optional
-// E/e exponent with an optional sign. Decoding the value is deferred to a later
+// followed by fractional digits, and an optional E/e exponent with an optional
+// sign — which an unsigned run reads only after a decimal point. Decoding the value is deferred to a later
 // story.
 //
 // An unsigned run that meets a letter, or a hyphen or underscore leading on to a
@@ -1018,7 +1018,8 @@ func tokenizePictureString(start Pos) tokenizerAction {
 // digit-led COBOL word such as 1000-INIT or 1ST-FIELD: the digits read so far
 // become the start of a [TokenIdentifier] (SPEC §"Digit-led words and numeric
 // literals"). Once a decimal point is read the run is committed to a numeric
-// literal, so 1.5E3 is a number and 1E5 is a word.
+// literal, so 1.5E3 is a number and 1E5 is a word; -1E5, being signed, is a
+// number as it always was.
 //
 // It peeks each candidate rune before consuming it, so a rune that does not
 // belong to the literal is left in the buffer for the next dispatch rather than
@@ -1066,11 +1067,12 @@ func tokenizeNumber(start Pos, value []byte) tokenizerAction {
 				seenPoint = true
 				r, _ := t.next()
 				value = utf8.AppendRune(value, r)
-			case (b == 'E' || b == 'e') && seenPoint && !seenExp && t.peekExponentDigits():
-				// A floating-point mantissa has a decimal point, so only a run
-				// that has read one takes an exponent; without it the E makes
-				// the run a word (below). The exponent admits no further
-				// decimal point.
+			case (b == 'E' || b == 'e') && (seenPoint || signed) && !seenExp && t.peekExponentDigits():
+				// An unsigned run takes an exponent only after a decimal point;
+				// without one the E makes the run a word (below). A signed run
+				// is never a word, so it has nothing to tell apart and keeps
+				// reading an exponent with or without a decimal point (-1E5).
+				// The exponent admits no further decimal point.
 				seenExp = true
 				r, _ := t.next()
 				value = utf8.AppendRune(value, r)

@@ -389,11 +389,15 @@ format-independent alternative.
   decimal point (`.`), and an optional exponent introduced by `E`/`e`
   (*GnuCOBOL §2.1.19.1*). Examples: `0`, `42`, `-7`, `3.14`, `-2.95`,
   `9.92E25`, `5.7E-14`.
-- An exponent is allowed **only after a decimal point**: a floating-point
-  literal's mantissa contains a decimal point (as IBM Enterprise COBOL defines
-  it: "a decimal point must be included in the mantissa"). `1E5`, with no
-  decimal point, is therefore not a numeric literal but a user-defined word;
-  see [Digit-led words and numeric literals](#digit-led-words-and-numeric-literals).
+- In an **unsigned** literal an exponent is allowed **only after a decimal
+  point**: a floating-point literal's mantissa contains a decimal point (as IBM
+  Enterprise COBOL defines it: "a decimal point must be included in the
+  mantissa"). `1E5`, with no decimal point, is therefore not a numeric literal
+  but a user-defined word; see
+  [Digit-led words and numeric literals](#digit-led-words-and-numeric-literals).
+  A **signed** literal can never be read as a word, so it has nothing to tell
+  apart and keeps the optional decimal point: `-1E5` and `+1E5` are numeric
+  literals, as they always were.
 - At most one sign and at most one decimal point in the mantissa. A decimal
   point may not be the last character of the literal token (a trailing `.` is a
   separator period).
@@ -460,7 +464,9 @@ argument (*GnuCOBOL §2.1.19.3*). See Semantics.
 > the paragraph and section headers (declarative sections included), the
 > `PERFORM` target and its `THROUGH`/`THRU` end, the `GO TO` targets, the
 > `USE FOR DEBUGGING` targets, and the `SORT`/`MERGE` `INPUT`/`OUTPUT
-> PROCEDURE` names and their `THROUGH`/`THRU` end.
+> PROCEDURE` names and their `THROUGH`/`THRU` end. (`ALTER` also names
+> procedures, but this package does not parse `ALTER` yet; its procedure-names
+> will take the same rule when it does.)
 
 #### Digit-led words and numeric literals
 
@@ -494,6 +500,7 @@ What that means case by case:
 | `1.5E3`, `1.0E-5`, `9.92E25` | numeric literal | a decimal point, then an exponent |
 | `3.14ABC` | numeric literal, word | the decimal point commits the run to a number, which ends at the letter |
 | `-1ST` | numeric literal `-1`, word `ST` | a sign never begins a word |
+| `-1E5`, `+1E5` | numeric literal | a signed run is never a word, so its exponent needs no decimal point |
 | `5.` | numeric literal, separator period | a trailing `.` is a separator, as before |
 
 The rule holds in both reference formats. In fixed format the run is classified

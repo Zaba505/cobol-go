@@ -5406,7 +5406,8 @@ func TestParserDigitLedWords(t *testing.T) {
 				"2000.\n" +
 				"    EXIT.\n" +
 				"3000-3999.\n" +
-				"    EXIT.\n" +
+				"    GO TO 3000-3999.\n" +
+				"    GO TO 2000 3000-3999 DEPENDING ON I.\n" +
 				"9999-EXIT.\n" +
 				"    STOP RUN.\n",
 			expected: &File{
@@ -5453,12 +5454,29 @@ func TestParserDigitLedWords(t *testing.T) {
 									},
 									exitPara(11, "1999-EXIT"),
 									exitPara(13, "2000"),
-									exitPara(15, "3000-3999"),
 									{
-										Pos:  Pos{Line: 17, Column: 1},
-										Name: &Word{Pos: Pos{Line: 17, Column: 1}, Value: "9999-EXIT"},
+										Pos:  Pos{Line: 15, Column: 1},
+										Name: &Word{Pos: Pos{Line: 15, Column: 1}, Value: "3000-3999"},
 										Sentences: []*Sentence{
-											sentence(&StopStatement{Pos: Pos{Line: 18, Column: 5}, Run: true}, Pos{Line: 18, Column: 5}),
+											sentence(&GoToStatement{
+												Pos:     Pos{Line: 16, Column: 5},
+												Targets: []*Word{{Pos: Pos{Line: 16, Column: 11}, Value: "3000-3999"}},
+											}, Pos{Line: 16, Column: 5}),
+											sentence(&GoToStatement{
+												Pos: Pos{Line: 17, Column: 5},
+												Targets: []*Word{
+													{Pos: Pos{Line: 17, Column: 11}, Value: "2000"},
+													{Pos: Pos{Line: 17, Column: 16}, Value: "3000-3999"},
+												},
+												DependingOn: &Identifier{Pos: Pos{Line: 17, Column: 39}, Name: &Word{Pos: Pos{Line: 17, Column: 39}, Value: "I"}},
+											}, Pos{Line: 17, Column: 5}),
+										},
+									},
+									{
+										Pos:  Pos{Line: 18, Column: 1},
+										Name: &Word{Pos: Pos{Line: 18, Column: 1}, Value: "9999-EXIT"},
+										Sentences: []*Sentence{
+											sentence(&StopStatement{Pos: Pos{Line: 19, Column: 5}, Run: true}, Pos{Line: 19, Column: 5}),
 										},
 									},
 								},
@@ -5585,6 +5603,40 @@ func TestParserLetterlessWord(t *testing.T) {
 				"    MOVE 1000-2000 TO X.\n",
 			pos:  Pos{Line: 4, Column: 10},
 			word: "1000-2000",
+		},
+		{
+			name: "indexed-by name",
+			src:  "01 REC.\n   05 T PIC X OCCURS 5 INDEXED BY 1-2.\n",
+			opts: []ParseOption{WithFragment()},
+			pos:  Pos{Line: 2, Column: 35},
+			word: "1-2",
+		},
+		{
+			name: "qualifier",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE X OF 1-2 TO Y.\n",
+			pos:  Pos{Line: 4, Column: 15},
+			word: "1-2",
+		},
+		{
+			name: "file-name",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    READ 1-2.\n",
+			pos:  Pos{Line: 4, Column: 10},
+			word: "1-2",
+		},
+		{
+			name: "sort key name",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    SORT W ASCENDING KEY 1-2 USING A GIVING B.\n",
+			pos:  Pos{Line: 4, Column: 26},
+			word: "1-2",
 		},
 		{
 			name: "receiving data reference",

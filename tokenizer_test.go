@@ -1819,6 +1819,11 @@ func TestTokenizerDigitLedWords(t *testing.T) {
 			expected: []Token{num(1, 1, "3.14"), word(1, 5, "ABC")},
 		},
 		{
+			name:     "signed exponent without a decimal point stays a literal",
+			src:      "-1E5 +1e5",
+			expected: []Token{num(1, 1, "-1E5"), num(1, 6, "+1e5")},
+		},
+		{
 			name:     "a sign never begins a word",
 			src:      "-1ST",
 			expected: []Token{num(1, 1, "-1"), word(1, 3, "ST")},
