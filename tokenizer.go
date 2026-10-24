@@ -67,7 +67,7 @@ const (
 	TokenComment    TokenType = iota // e.g. *> inline or full-line comment
 	TokenIdentifier                  // e.g. IDENTIFICATION, DIVISION, a data name
 	TokenSymbol                      // e.g. ".", "(", ")"
-	TokenString                      // e.g. "literal"
+	TokenString                      // e.g. "literal", or X'C1' with its prefix (see [StringLiteral])
 	TokenNumber                      // e.g. 123, 45.67
 	TokenPicture                     // e.g. S9(4)V99, X(10) (the SPEC's PictureString)
 	TokenDebug                       // a fixed-format column-7 'D'/'d' debugging line
@@ -1090,7 +1090,8 @@ func tokenizeString(start Pos, delim rune) tokenizerAction {
 // have both been consumed, the prefix at start. It emits one [TokenString] whose
 // value is the raw lexeme with the prefix as written (letter case preserved), so
 // X'C1C2' and x'c1c2' are each one token; the parser reads the prefix back into
-// [StringLiteral.Kind].
+// [StringLiteral.Kind]. A [TokenString] value therefore opens with either a
+// delimiter or one of the six prefix letters, and with nothing else.
 //
 // The body is scanned exactly as [tokenizeString] scans an unprefixed literal —
 // doubled delimiters, the fixed-format column-72 continuation and all — and is
@@ -1137,6 +1138,9 @@ func tokenizeDelimitedLiteral(start Pos, value []byte, delim rune, kind LiteralK
 					continue
 				}
 				if kind != LiteralAlphanumeric {
+					// A malformed literal ends the stream, as an unterminated
+					// one does: every tokenizer error here is terminal, and
+					// the parser stops at the first one in any case.
 					if reason := checkLiteralBody(kind, literalBody(value)); reason != "" {
 						yield(Token{}, InvalidLiteralError{Pos: start, Kind: kind, Literal: string(value), Reason: reason})
 						return nil

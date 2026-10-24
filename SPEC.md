@@ -349,6 +349,13 @@ format-independent alternative.
   >
   > A body that breaks its rule — `X'ABC'`, `X'G0'`, `O'8'`, `B'2'` — is an
   > `InvalidLiteralError` at the prefix's position.
+  >
+  > In free format a prefixed literal continues the way any literal does,
+  > with the `&` operator between whole literal tokens: `X'C1' & X'C2'` is two
+  > prefixed literal tokens and an `&`, each fragment carrying its own prefix.
+  > The `&` joins tokens rather than text, so a fragment never inherits the
+  > prefix of the one before it. (The parser does not yet read `&`
+  > concatenation for any literal; that is a separate story.)
 
   > **Resolved (H and B):** an earlier revision listed `H"…"` both here, as a
   > hexadecimal alphanumeric literal, and below as a hexadecimal numeric one,

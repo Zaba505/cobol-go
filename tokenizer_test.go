@@ -1523,6 +1523,20 @@ func TestTokenizerPrefixedLiterals(t *testing.T) {
 			expected: []Token{word(1, 1, "Q"), str(1, 2, "'C1'")},
 		},
 		{
+			// Free format continues a literal with the & operator, which joins
+			// whole literal tokens; each prefixed fragment stays one token, prefix
+			// and all, whatever the line break between them.
+			name: "free format concatenation",
+			src:  "X'C1' &\n  X'C2' & 'A'",
+			expected: []Token{
+				str(1, 1, "X'C1'"),
+				{Pos: Pos{Line: 1, Column: 7}, Type: TokenSymbol, Value: []byte("&")},
+				str(2, 3, "X'C2'"),
+				{Pos: Pos{Line: 2, Column: 9}, Type: TokenSymbol, Value: []byte("&")},
+				str(2, 11, "'A'"),
+			},
+		},
+		{
 			name:     "fixed format",
 			src:      "000100     MOVE X'C1C2' TO F.\n",
 			opts:     []TokenizeOption{WithFixedFormat()},

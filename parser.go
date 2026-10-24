@@ -1117,6 +1117,11 @@ func (k LiteralKind) Prefix() string {
 	}
 }
 
+// valid reports whether k is one of the declared kinds.
+func (k LiteralKind) valid() bool {
+	return LiteralAlphanumeric <= k && k <= LiteralBoolean
+}
+
 // Numeric reports whether k denotes a numeric value rather than a string of
 // characters or bits: true for [LiteralHexadecimalNumeric] and
 // [LiteralOctalNumeric] only.
@@ -1162,8 +1167,10 @@ func (k LiteralKind) digitName() string {
 func stringLiteral(tok Token) *StringLiteral {
 	value := string(tok.Value)
 	kind := LiteralAlphanumeric
-	if value != "" && value[0] != '"' && value[0] != '\'' {
+	if value != "" {
 		kind = literalKindOfPrefix(rune(value[0]))
+	}
+	if kind != LiteralAlphanumeric {
 		value = value[1:]
 	}
 	return &StringLiteral{Pos: tok.Pos, Kind: kind, Value: value}

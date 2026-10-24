@@ -8,6 +8,7 @@ package cobol
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -4502,19 +4503,38 @@ func TestPrintPrefixedLiterals(t *testing.T) {
 }
 
 // Every prefix survives Parse → Print → Parse in a VALUE clause, in a
-// condition-name's value list, and in procedure statements, with its kind
-// intact.
+// condition-name's value list, in CURRENCY SIGN, and in procedure statements —
+// the hex-literal staples STRING, UNSTRING and INSPECT among them — with its kind
+// intact. A round trip alone cannot catch a parser site that drops the kind,
+// since both parses would drop it alike, so every literal in the first parse is
+// also checked to carry the kind its prefix names.
 func TestPrintPrefixedLiteralsRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	literals := []string{"X'C1C2'", "x\"c1\"", "H'FF'", "O'17'", "N'AB'", "Z'AB'", "B'1010'"}
+	testCases := []struct {
+		lit  string
+		kind LiteralKind
+	}{
+		{lit: "X'C1C2'", kind: LiteralHexadecimal},
+		{lit: "x\"c1\"", kind: LiteralHexadecimal},
+		{lit: "H'FF'", kind: LiteralHexadecimalNumeric},
+		{lit: "O'17'", kind: LiteralOctalNumeric},
+		{lit: "N'AB'", kind: LiteralNational},
+		{lit: "Z'AB'", kind: LiteralNullTerminated},
+		{lit: "B'1010'", kind: LiteralBoolean},
+	}
 
-	for _, l := range literals {
-		t.Run(l, func(t *testing.T) {
+	for _, tc := range testCases {
+		t.Run(tc.lit, func(t *testing.T) {
 			t.Parallel()
 
+			l := tc.lit
 			src := "IDENTIFICATION DIVISION.\n" +
 				"PROGRAM-ID. P.\n" +
+				"ENVIRONMENT DIVISION.\n" +
+				"CONFIGURATION SECTION.\n" +
+				"SPECIAL-NAMES.\n" +
+				"    CURRENCY SIGN IS " + l + ".\n" +
 				"DATA DIVISION.\n" +
 				"WORKING-STORAGE SECTION.\n" +
 				"01 F PIC X(4) VALUE " + l + ".\n" +
@@ -4522,11 +4542,22 @@ func TestPrintPrefixedLiteralsRoundTrip(t *testing.T) {
 				"PROCEDURE DIVISION.\n" +
 				"    MOVE " + l + " TO F.\n" +
 				"    DISPLAY " + l + " F.\n" +
-				"    IF F = " + l + " DISPLAY 'Y' END-IF.\n" +
+				"    IF F = " + l + " DISPLAY F END-IF.\n" +
+				"    STRING F DELIMITED BY " + l + " INTO G END-STRING.\n" +
+				"    UNSTRING F DELIMITED BY " + l + " INTO G END-UNSTRING.\n" +
+				"    INSPECT F REPLACING ALL " + l + " BY SPACE.\n" +
+				"    CALL " + l + ".\n" +
 				"    STOP RUN.\n"
 
 			first, err := Parse(strings.NewReader(src))
 			require.NoError(t, err)
+
+			lits := collectStringLiterals(first)
+			require.Len(t, lits, 11)
+			for _, got := range lits {
+				require.Equal(t, tc.kind, got.Kind, "literal at %v", got.Pos)
+				require.Equal(t, l[1:], got.Value, "literal at %v", got.Pos)
+			}
 
 			var buf bytes.Buffer
 			require.NoError(t, Print(&buf, first))
@@ -4535,7 +4566,81 @@ func TestPrintPrefixedLiteralsRoundTrip(t *testing.T) {
 			require.NoError(t, err, buf.String())
 
 			require.Equal(t, withoutPos(first), withoutPos(second))
-			require.Contains(t, buf.String(), "MOVE "+strings.ToUpper(l[:1])+l[1:]+" TO F")
+			require.Contains(t, buf.String(), "MOVE "+tc.kind.Prefix()+l[1:]+" TO F")
+		})
+	}
+}
+
+// collectStringLiterals returns every *StringLiteral reachable from f, found by
+// reflection so that no statement type can be missed by a hand-written walk.
+func collectStringLiterals(f *File) []*StringLiteral {
+	var out []*StringLiteral
+	seen := map[uintptr]bool{}
+	var walk func(v reflect.Value)
+	walk = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.Pointer:
+			if v.IsNil() || seen[v.Pointer()] {
+				return
+			}
+			seen[v.Pointer()] = true
+			if lit, ok := v.Interface().(*StringLiteral); ok {
+				out = append(out, lit)
+				return
+			}
+			walk(v.Elem())
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
+			}
+		case reflect.Struct:
+			for i := range v.NumField() {
+				if v.Type().Field(i).IsExported() {
+					walk(v.Field(i))
+				}
+			}
+		case reflect.Slice:
+			for i := range v.Len() {
+				walk(v.Index(i))
+			}
+		}
+	}
+	walk(reflect.ValueOf(f))
+	return out
+}
+
+// A literal the printer cannot write back faithfully — a kind that is not one
+// of the declared ones, or a prefixed body that breaks its kind's digit rule —
+// is refused with an UnsupportedNodeError rather than printed as source that
+// loses the kind or that Parse refuses.
+func TestPrintRefusesUnprintableLiterals(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		lit  *StringLiteral
+	}{
+		{name: "unknown kind", lit: &StringLiteral{Kind: LiteralKind(99), Value: "'AB'"}},
+		{name: "odd hexadecimal body", lit: &StringLiteral{Kind: LiteralHexadecimal, Value: "'0'"}},
+		{name: "non-bit boolean body", lit: &StringLiteral{Kind: LiteralBoolean, Value: "'2'"}},
+		{name: "prefixed body without delimiters", lit: &StringLiteral{Kind: LiteralNational, Value: "AB"}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{{
+				Level: 77,
+				Name:  &Word{Value: "F"},
+				Clauses: []DataClause{
+					&PictureClause{Picture: "X"},
+					&ValueClause{Values: []ValueSpec{{From: tc.lit}}},
+				},
+			}}}}
+
+			var target UnsupportedNodeError
+			require.ErrorAs(t, Print(io.Discard, f), &target)
 		})
 	}
 }

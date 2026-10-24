@@ -36,6 +36,7 @@ func TestParserCopy(t *testing.T) {
 			"05 :TAG:-NAME PIC X(20).\n",
 		"PAYLIB.CUSTREC": "01 PAY-RECORD.\n",
 		"lower.cpy":      "01 LOWER-RECORD.\n",
+		"FLAGS":          "77 F PIC X.\n88 F-NUL VALUE X'00'.\n",
 	}
 
 	testCases := []struct {
@@ -43,6 +44,32 @@ func TestParserCopy(t *testing.T) {
 		src      string
 		expected *File
 	}{
+		{
+			// A prefixed literal is one REPLACING operand and one text word of
+			// the copybook, so it is replaced whole, prefix and all.
+			name: "replacing a prefixed literal",
+			src:  "COPY FLAGS REPLACING X'00' BY x'FF'.\n",
+			expected: &File{
+				Fragment: &Fragment{
+					Entries: []*DataDescriptionEntry{
+						{
+							Pos:     Pos{Line: 1, Column: 1},
+							Level:   77,
+							Name:    &Word{Pos: Pos{Line: 1, Column: 4}, Value: "F"},
+							Clauses: []DataClause{&PictureClause{Pos: Pos{Line: 1, Column: 6}, Picture: "X"}},
+						},
+						{
+							Pos:   Pos{Line: 2, Column: 1},
+							Level: 88,
+							Name:  &Word{Pos: Pos{Line: 2, Column: 4}, Value: "F-NUL"},
+							Clauses: []DataClause{&ValueClause{Pos: Pos{Line: 2, Column: 10}, Values: []ValueSpec{
+								{From: &StringLiteral{Pos: Pos{Line: 2, Column: 16}, Kind: LiteralHexadecimal, Value: "'FF'"}},
+							}}},
+						},
+					},
+				},
+			},
+		},
 		{
 			name: "copy a whole record",
 			src:  "COPY CUSTREC.\n",
