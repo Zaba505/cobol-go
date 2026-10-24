@@ -1008,6 +1008,9 @@ type LayoutError struct {
 	Reason string
 }
 
+// Position implements [cobol.Positioned], returning Pos.
+func (e LayoutError) Position() cobol.Pos { return e.Pos }
+
 // Error implements the [error] interface.
 func (e LayoutError) Error() string {
 	return fmt.Sprintf("item %s at line %d, column %d %s",
@@ -1023,6 +1026,9 @@ type OccursError struct {
 	Name   string
 	Reason string
 }
+
+// Position implements [cobol.Positioned], returning Pos.
+func (e OccursError) Position() cobol.Pos { return e.Pos }
 
 // Error implements the [error] interface.
 func (e OccursError) Error() string {
@@ -1041,6 +1047,9 @@ type RedefinesError struct {
 	Reason string
 }
 
+// Position implements [cobol.Positioned], returning Pos.
+func (e RedefinesError) Position() cobol.Pos { return e.Pos }
+
 // Error implements the [error] interface.
 func (e RedefinesError) Error() string {
 	return fmt.Sprintf("REDEFINES on item %s at line %d, column %d: %s",
@@ -1055,6 +1064,9 @@ type OccurrenceError struct {
 	Occurs int
 	Index  int
 }
+
+// Position implements [cobol.Positioned], returning Pos.
+func (e OccurrenceError) Position() cobol.Pos { return e.Pos }
 
 // Error implements the [error] interface.
 func (e OccurrenceError) Error() string {

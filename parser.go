@@ -8325,6 +8325,9 @@ type UnexpectedTokenError struct {
 	Actual   Token
 }
 
+// Position implements [Positioned]: it is the position of the token Actual.
+func (e UnexpectedTokenError) Position() Pos { return e.Actual.Pos }
+
 // Error implements the [error] interface.
 func (e UnexpectedTokenError) Error() string {
 	return fmt.Sprintf("unexpected token %s at line %d, column %d, expected one of %v", e.Actual, e.Actual.Pos.Line, e.Actual.Pos.Column, e.Expected)
@@ -8336,6 +8339,9 @@ type UnexpectedKeywordError struct {
 	Expected []string
 	Actual   Token
 }
+
+// Position implements [Positioned]: it is the position of the token Actual.
+func (e UnexpectedKeywordError) Position() Pos { return e.Actual.Pos }
 
 // Error implements the [error] interface.
 func (e UnexpectedKeywordError) Error() string {
@@ -8355,6 +8361,9 @@ type TrailingTokenError struct {
 	Actual Token
 }
 
+// Position implements [Positioned]: it is the position of the token Actual.
+func (e TrailingTokenError) Position() Pos { return e.Actual.Pos }
+
 // Error implements the [error] interface.
 func (e TrailingTokenError) Error() string {
 	return fmt.Sprintf("unexpected token %s at line %d, column %d, expected end of input", e.Actual, e.Actual.Pos.Line, e.Actual.Pos.Column)
@@ -8366,6 +8375,9 @@ type InvalidLevelNumberError struct {
 	Pos   Pos
 	Value string
 }
+
+// Position implements [Positioned], returning Pos.
+func (e InvalidLevelNumberError) Position() Pos { return e.Pos }
 
 // Error implements the [error] interface.
 func (e InvalidLevelNumberError) Error() string {
@@ -8380,6 +8392,9 @@ type SearchAllConstraintError struct {
 	Pos    Pos
 	Reason string
 }
+
+// Position implements [Positioned], returning Pos.
+func (e SearchAllConstraintError) Position() Pos { return e.Pos }
 
 // Error implements the [error] interface.
 func (e SearchAllConstraintError) Error() string {

@@ -92,6 +92,22 @@
 // [github.com/Zaba505/cobol-go/codec.Reader] and hand the count to
 // [Layout.ResolveCounts] instead.
 //
+// # Errors
+//
+// Every error this package returns that carries a source position — the
+// position of the data description entry it was reported against — implements
+// [cobol.Positioned], so one errors.As reaches the position of a [LevelError], a
+// [RedefinesError] or any other of them without naming each type:
+//
+//	var p cobol.Positioned
+//	if errors.As(err, &p) {
+//		at := p.Position()
+//	}
+//
+// The interface is the root package's rather than one of this package's own, so
+// that the same errors.As target also matches the root package's parse errors.
+// [DialectError] carries no source position and does not implement it.
+//
 // This package imports the root cobol package (for the AST) and picture (for the
 // parsed PICTURE character-string of each elementary item), and nothing else in
 // this module. In particular it does not import codec: the only bytes it reads
