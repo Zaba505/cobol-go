@@ -4034,6 +4034,188 @@ func TestParserUsageComp6(t *testing.T) {
 	})
 }
 
+// TestParserConditionValueKeywords pins the four spellings of a level-88
+// condition-name's VALUE clause, and the two crossed pairings the parser also
+// admits (SPEC.md condition-name-entry). The noise word IS or ARE is consumed as
+// a keyword and never becomes a value — reading ARE as the first value was the
+// silent defect this test was written for. Every spelling yields the same
+// ValueClause, positioned at the VALUE/VALUES keyword, with the values after the
+// noise word keeping their own positions.
+func TestParserConditionValueKeywords(t *testing.T) {
+	t.Parallel()
+
+	// Every case is the same two-entry copybook: a 77 item and the
+	// condition-name on it. Only the 88 entry's clause differs.
+	cond := func(format SourceFormat, clausePos Pos, values ...ValueSpec) *File {
+		item := &DataDescriptionEntry{
+			Pos:     Pos{Line: 1, Column: 1},
+			Level:   77,
+			Name:    &Word{Pos: Pos{Line: 1, Column: 4}, Value: "STATUS-CODE"},
+			Clauses: []DataClause{&PictureClause{Pos: Pos{Line: 1, Column: 16}, Picture: "X"}},
+		}
+		condition := &DataDescriptionEntry{
+			Pos:   Pos{Line: 2, Column: 4},
+			Level: 88,
+			Name:  &Word{Pos: Pos{Line: 2, Column: 7}, Value: "STATUS-OK"},
+		}
+		if format == FixedFormat {
+			item.Pos = Pos{Line: 1, Column: 8}
+			item.Name.Pos = Pos{Line: 1, Column: 12}
+			item.Clauses[0].(*PictureClause).Pos = Pos{Line: 1, Column: 24}
+			condition.Pos = Pos{Line: 2, Column: 12}
+			condition.Name.Pos = Pos{Line: 2, Column: 16}
+		}
+		condition.Clauses = []DataClause{&ValueClause{Pos: clausePos, Values: values}}
+		return &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{item, condition}}}
+	}
+	str := func(line, col int, v string) Type {
+		return &StringLiteral{Pos: Pos{Line: line, Column: col}, Value: v}
+	}
+	num := func(line, col int, v string) Type {
+		return &NumericLiteral{Pos: Pos{Line: line, Column: col}, Value: v}
+	}
+
+	const (
+		freeItem  = "77 STATUS-CODE PIC X.\n"
+		fixedItem = "000100 77  STATUS-CODE PIC X.\n"
+	)
+
+	testCases := []struct {
+		name     string
+		src      string
+		format   SourceFormat
+		expected *File
+	}{
+		{
+			// The issue's reproduction: one THRU range after VALUES ARE.
+			name:   "values are with a thru range",
+			src:    freeItem + "   88 STATUS-OK VALUES ARE 'A' THRU 'C'.\n",
+			format: FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17},
+				ValueSpec{From: str(2, 28, "'A'"), Through: str(2, 37, "'C'")}),
+		},
+		{
+			name:   "values are with a through range",
+			src:    freeItem + "   88 STATUS-OK VALUES ARE 'A' THROUGH 'C'.\n",
+			format: FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17},
+				ValueSpec{From: str(2, 28, "'A'"), Through: str(2, 40, "'C'")}),
+		},
+		{
+			name:     "values are with one value",
+			src:      freeItem + "   88 STATUS-OK VALUES ARE 'A'.\n",
+			format:   FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17}, ValueSpec{From: str(2, 28, "'A'")}),
+		},
+		{
+			name:   "values are with several values",
+			src:    freeItem + "   88 STATUS-OK VALUES ARE 'A' 'B' 'C'.\n",
+			format: FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17},
+				ValueSpec{From: str(2, 28, "'A'")},
+				ValueSpec{From: str(2, 32, "'B'")},
+				ValueSpec{From: str(2, 36, "'C'")}),
+		},
+		{
+			name:   "values are with values and ranges mixed",
+			src:    freeItem + "   88 STATUS-OK VALUES ARE 1 3 THRU 5.\n",
+			format: FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17},
+				ValueSpec{From: num(2, 28, "1")},
+				ValueSpec{From: num(2, 30, "3"), Through: num(2, 37, "5")}),
+		},
+		{
+			// Reserved words are case-insensitive, ARE included.
+			name:   "values are in lower case",
+			src:    freeItem + "   88 STATUS-OK values are 'A' thru 'C'.\n",
+			format: FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17},
+				ValueSpec{From: str(2, 28, "'A'"), Through: str(2, 37, "'C'")}),
+		},
+		{
+			name:     "values are in mixed case",
+			src:      freeItem + "   88 STATUS-OK Values Are 'A'.\n",
+			format:   FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17}, ValueSpec{From: str(2, 28, "'A'")}),
+		},
+		{
+			name:   "value without a noise word",
+			src:    freeItem + "   88 STATUS-OK VALUE 'A' THRU 'C'.\n",
+			format: FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17},
+				ValueSpec{From: str(2, 23, "'A'"), Through: str(2, 32, "'C'")}),
+		},
+		{
+			name:   "value is",
+			src:    freeItem + "   88 STATUS-OK VALUE IS 'A' THRU 'C'.\n",
+			format: FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17},
+				ValueSpec{From: str(2, 26, "'A'"), Through: str(2, 35, "'C'")}),
+		},
+		{
+			name:   "values without a noise word",
+			src:    freeItem + "   88 STATUS-OK VALUES 'A' THRU 'C'.\n",
+			format: FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17},
+				ValueSpec{From: str(2, 24, "'A'"), Through: str(2, 33, "'C'")}),
+		},
+		{
+			// A crossed pairing, accepted by choice (SPEC.md
+			// condition-name-entry): ARE is reserved, so it cannot be a value.
+			name:   "crossed pairing value are",
+			src:    freeItem + "   88 STATUS-OK VALUE ARE 'A' THRU 'C'.\n",
+			format: FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17},
+				ValueSpec{From: str(2, 27, "'A'"), Through: str(2, 36, "'C'")}),
+		},
+		{
+			name:   "crossed pairing values is",
+			src:    freeItem + "   88 STATUS-OK VALUES IS 'A' THRU 'C'.\n",
+			format: FreeFormat,
+			expected: cond(FreeFormat, Pos{Line: 2, Column: 17},
+				ValueSpec{From: str(2, 27, "'A'"), Through: str(2, 36, "'C'")}),
+		},
+		{
+			name:   "values are with a thru range in fixed format",
+			src:    fixedItem + "000200     88  STATUS-OK VALUES ARE 'A' THRU 'C'.\n",
+			format: FixedFormat,
+			expected: cond(FixedFormat, Pos{Line: 2, Column: 26},
+				ValueSpec{From: str(2, 37, "'A'"), Through: str(2, 46, "'C'")}),
+		},
+		{
+			name:   "values are with several values in fixed format and lower case",
+			src:    fixedItem + "000200     88  STATUS-OK values are 'A' 'B'.\n",
+			format: FixedFormat,
+			expected: cond(FixedFormat, Pos{Line: 2, Column: 26},
+				ValueSpec{From: str(2, 37, "'A'")},
+				ValueSpec{From: str(2, 41, "'B'")}),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f, err := Parse(strings.NewReader(tc.src), WithFragment(), WithSourceFormat(tc.format))
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, f)
+		})
+	}
+
+	// ARE is a keyword, not a value, so VALUES ARE with nothing after it has no
+	// value at all — the period is what the parser meets where a value belongs.
+	t.Run("values are without a value", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := Parse(strings.NewReader(freeItem+"   88 STATUS-OK VALUES ARE.\n"), WithFragment())
+
+		var target UnexpectedTokenError
+		require.ErrorAs(t, err, &target)
+		require.Equal(t, Pos{Line: 2, Column: 27}, target.Actual.Pos)
+	})
+}
+
 // TestParserFragmentErrors pins the two ends of the mode: a copybook is rejected
 // without WithFragment (the behaviour the issue reported), and a whole source file
 // is rejected with it, rather than the parser silently dropping everything past the
