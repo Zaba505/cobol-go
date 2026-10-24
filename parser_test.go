@@ -5661,3 +5661,275 @@ func TestParserLetterlessWord(t *testing.T) {
 		})
 	}
 }
+
+// ALL followed by a nonnumeric literal or a figurative constant parses as one
+// AllLiteral value wherever SPEC.md's literal is admitted: a data item's VALUE,
+// a condition-name's VALUE list, and procedure operands and conditions.
+func TestParserAllLiteral(t *testing.T) {
+	t.Parallel()
+
+	// item is "77 F PIC X(5) VALUE <value>." with VALUE at column 15.
+	item := func(value Type) *File {
+		return &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{{
+			Pos:   Pos{Line: 1, Column: 1},
+			Level: 77,
+			Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "F"},
+			Clauses: []DataClause{
+				&PictureClause{Pos: Pos{Line: 1, Column: 6}, Picture: "X(5)"},
+				&ValueClause{Pos: Pos{Line: 1, Column: 15}, Values: []ValueSpec{{From: value}}},
+			},
+		}}}}
+	}
+	// cond is "77 F PIC X(5).\n88 <name> VALUE <values>." with VALUE at column 5
+	// past the end of the condition-name.
+	cond := func(name string, values ...ValueSpec) *File {
+		return &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{
+			{
+				Pos:     Pos{Line: 1, Column: 1},
+				Level:   77,
+				Name:    &Word{Pos: Pos{Line: 1, Column: 4}, Value: "F"},
+				Clauses: []DataClause{&PictureClause{Pos: Pos{Line: 1, Column: 6}, Picture: "X(5)"}},
+			},
+			{
+				Pos:   Pos{Line: 2, Column: 1},
+				Level: 88,
+				Name:  &Word{Pos: Pos{Line: 2, Column: 4}, Value: name},
+				Clauses: []DataClause{&ValueClause{
+					Pos:    Pos{Line: 2, Column: 5 + len(name)},
+					Values: values,
+				}},
+			},
+		}}}
+	}
+	all := func(line, col int, lit Type) *AllLiteral {
+		return &AllLiteral{Pos: Pos{Line: line, Column: col}, Literal: lit}
+	}
+	str := func(line, col int, kind LiteralKind, v string) *StringLiteral {
+		return &StringLiteral{Pos: Pos{Line: line, Column: col}, Kind: kind, Value: v}
+	}
+	word := func(line, col int, v string) *Word {
+		return &Word{Pos: Pos{Line: line, Column: col}, Value: v}
+	}
+	// program wraps one procedure statement on line 4, at column 5.
+	program := func(stmt Statement) *File {
+		return &File{Programs: []*Program{{
+			Pos: Pos{Line: 1, Column: 1},
+			Divisions: []Division{
+				&IdentificationDivision{
+					Pos: Pos{Line: 1, Column: 1},
+					ProgramID: &ProgramID{
+						Pos:  Pos{Line: 2, Column: 1},
+						Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+					},
+				},
+				&ProcedureDivision{
+					Pos: Pos{Line: 3, Column: 1},
+					Paragraphs: []*Paragraph{{
+						Pos: Pos{Line: 4, Column: 5},
+						Sentences: []*Sentence{{
+							Pos:        Pos{Line: 4, Column: 5},
+							Statements: []Statement{stmt},
+						}},
+					}},
+				},
+			},
+		}}}
+	}
+	const programHead = "IDENTIFICATION DIVISION.\nPROGRAM-ID. P.\nPROCEDURE DIVISION.\n"
+	ident := func(line, col int, name string) *Identifier {
+		return &Identifier{Pos: Pos{Line: line, Column: col}, Name: word(line, col, name)}
+	}
+
+	testCases := []struct {
+		name     string
+		src      string
+		opts     []ParseOption
+		expected *File
+	}{
+		{
+			name:     "data item with an alphanumeric literal",
+			src:      "77 F PIC X(5) VALUE ALL '*'.\n",
+			expected: item(all(1, 21, str(1, 25, LiteralAlphanumeric, "'*'"))),
+		},
+		{
+			name:     "data item with a figurative constant",
+			src:      "77 F PIC X(5) VALUE ALL SPACES.\n",
+			expected: item(all(1, 21, word(1, 25, "SPACES"))),
+		},
+		{
+			name:     "data item with a hexadecimal literal",
+			src:      "77 F PIC X(5) VALUE ALL X'FF'.\n",
+			expected: item(all(1, 21, str(1, 25, LiteralHexadecimal, "'FF'"))),
+		},
+		{
+			name:     "data item with a national literal",
+			src:      "77 F PIC X(5) VALUE ALL N'A'.\n",
+			expected: item(all(1, 21, str(1, 25, LiteralNational, "'A'"))),
+		},
+		{
+			name:     "data item with value is",
+			src:      "77 F PIC X(5) VALUE IS ALL '*'.\n",
+			expected: item(all(1, 24, str(1, 28, LiteralAlphanumeric, "'*'"))),
+		},
+		{
+			name:     "lower case",
+			src:      "77 F PIC X(5) value all spaces.\n",
+			expected: item(all(1, 21, word(1, 25, "spaces"))),
+		},
+		{
+			name:     "mixed case",
+			src:      "77 F PIC X(5) VALUE All '*'.\n",
+			expected: item(all(1, 21, str(1, 25, LiteralAlphanumeric, "'*'"))),
+		},
+		{
+			// The issue's regression: this read as the two values ALL and '*'.
+			name:     "condition-name with an alphanumeric literal",
+			src:      "77 F PIC X(5).\n88 F-STARS VALUE ALL '*'.\n",
+			expected: cond("F-STARS", ValueSpec{From: all(2, 18, str(2, 22, LiteralAlphanumeric, "'*'"))}),
+		},
+		{
+			name:     "condition-name with a figurative constant",
+			src:      "77 F PIC X(5).\n88 F-BLANK VALUE ALL SPACES.\n",
+			expected: cond("F-BLANK", ValueSpec{From: all(2, 18, word(2, 22, "SPACES"))}),
+		},
+		{
+			name: "condition-name with an ALL value among others",
+			src:  "77 F PIC X(5).\n88 F-SET VALUE 'A' ALL '*' 'B'.\n",
+			expected: cond("F-SET",
+				ValueSpec{From: str(2, 16, LiteralAlphanumeric, "'A'")},
+				ValueSpec{From: all(2, 20, str(2, 24, LiteralAlphanumeric, "'*'"))},
+				ValueSpec{From: str(2, 28, LiteralAlphanumeric, "'B'")}),
+		},
+		{
+			name: "condition-name with an ALL range",
+			src:  "77 F PIC X(5).\n88 F-SET VALUE ALL 'A' THRU ALL 'C'.\n",
+			expected: cond("F-SET", ValueSpec{
+				From:    all(2, 16, str(2, 20, LiteralAlphanumeric, "'A'")),
+				Through: all(2, 29, str(2, 33, LiteralAlphanumeric, "'C'")),
+			}),
+		},
+		{
+			name: "fixed format",
+			src:  "000100 77  F PIC X(5) VALUE ALL '*'.\n",
+			opts: []ParseOption{WithSourceFormat(FixedFormat)},
+			expected: &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{{
+				Pos:   Pos{Line: 1, Column: 8},
+				Level: 77,
+				Name:  &Word{Pos: Pos{Line: 1, Column: 12}, Value: "F"},
+				Clauses: []DataClause{
+					&PictureClause{Pos: Pos{Line: 1, Column: 14}, Picture: "X(5)"},
+					&ValueClause{Pos: Pos{Line: 1, Column: 23}, Values: []ValueSpec{
+						{From: all(1, 29, str(1, 33, LiteralAlphanumeric, "'*'"))},
+					}},
+				},
+			}}}},
+		},
+		{
+			name: "move",
+			src:  programHead + "    MOVE ALL '*' TO F.\n",
+			expected: program(&MoveStatement{
+				Pos:     Pos{Line: 4, Column: 5},
+				Source:  all(4, 10, str(4, 14, LiteralAlphanumeric, "'*'")),
+				Targets: []*Identifier{ident(4, 21, "F")},
+			}),
+		},
+		{
+			name: "move a figurative constant in lower case",
+			src:  programHead + "    move all zeros to F.\n",
+			expected: program(&MoveStatement{
+				Pos:     Pos{Line: 4, Column: 5},
+				Source:  all(4, 10, word(4, 14, "zeros")),
+				Targets: []*Identifier{ident(4, 23, "F")},
+			}),
+		},
+		{
+			name: "display",
+			src:  programHead + "    DISPLAY ALL '-'.\n",
+			expected: program(&DisplayStatement{
+				Pos:      Pos{Line: 4, Column: 5},
+				Operands: []Type{all(4, 13, str(4, 17, LiteralAlphanumeric, "'-'"))},
+			}),
+		},
+		{
+			name: "relation condition",
+			src:  programHead + "    IF F = ALL '*' DISPLAY F END-IF.\n",
+			expected: program(&IfStatement{
+				Pos: Pos{Line: 4, Column: 5},
+				Cond: &RelationCondition{
+					Pos:   Pos{Line: 4, Column: 8},
+					Left:  ident(4, 8, "F"),
+					Op:    "=",
+					Right: all(4, 12, str(4, 16, LiteralAlphanumeric, "'*'")),
+				},
+				Then: []Statement{&DisplayStatement{
+					Pos:      Pos{Line: 4, Column: 20},
+					Operands: []Type{ident(4, 28, "F")},
+				}},
+				EndIf: true,
+			}),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := tc.opts
+			if tc.expected.Fragment != nil {
+				opts = append([]ParseOption{WithFragment()}, opts...)
+			}
+			f, err := Parse(strings.NewReader(tc.src), opts...)
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, f)
+		})
+	}
+}
+
+// ALL repeats only a nonnumeric literal or a figurative constant other than
+// ALL. Everything else — a second ALL, nothing at all, a numeric literal of any
+// kind (SPEC §Literals, "Resolved (ALL before a numeric literal)"), a data-name —
+// is refused with an AllLiteralError positioned at the ALL keyword.
+func TestParserAllLiteralErrors(t *testing.T) {
+	t.Parallel()
+
+	const programHead = "IDENTIFICATION DIVISION.\nPROGRAM-ID. P.\nPROCEDURE DIVISION.\n"
+
+	testCases := []struct {
+		name     string
+		src      string
+		fragment bool
+		pos      Pos
+	}{
+		{name: "all all on a data item", src: "77 F PIC X(5) VALUE ALL ALL '*'.\n", fragment: true, pos: Pos{Line: 1, Column: 21}},
+		{name: "all all on a condition-name", src: "77 F PIC X(5).\n88 F-STARS VALUE ALL ALL '*'.\n", fragment: true, pos: Pos{Line: 2, Column: 18}},
+		{name: "all all in a move", src: programHead + "    MOVE ALL ALL '*' TO F.\n", pos: Pos{Line: 4, Column: 10}},
+		{name: "all before a period", src: "77 F PIC X(5) VALUE ALL.\n", fragment: true, pos: Pos{Line: 1, Column: 21}},
+		{name: "all at end of input", src: "77 F PIC X(5) VALUE ALL", fragment: true, pos: Pos{Line: 1, Column: 21}},
+		{name: "all on a condition-name at end of input", src: "77 F PIC X(5).\n88 F-STARS VALUE ALL", fragment: true, pos: Pos{Line: 2, Column: 18}},
+		{name: "all in a move with nothing after it", src: programHead + "    MOVE ALL", pos: Pos{Line: 4, Column: 10}},
+		{name: "all before a numeric literal", src: "77 F PIC 9(5) VALUE ALL 5.\n", fragment: true, pos: Pos{Line: 1, Column: 21}},
+		{name: "all before a signed numeric literal", src: "77 F PIC S9(5) VALUE ALL -1.\n", fragment: true, pos: Pos{Line: 1, Column: 22}},
+		{name: "all before a hexadecimal numeric literal", src: "77 F PIC X(5) VALUE ALL H'FF'.\n", fragment: true, pos: Pos{Line: 1, Column: 21}},
+		{name: "all before an octal numeric literal", src: "77 F PIC X(5) VALUE ALL O'17'.\n", fragment: true, pos: Pos{Line: 1, Column: 21}},
+		{name: "all before a numeric literal in a move", src: programHead + "    MOVE ALL 5 TO F.\n", pos: Pos{Line: 4, Column: 10}},
+		{name: "all before a data-name in a move", src: programHead + "    MOVE ALL G TO F.\n", pos: Pos{Line: 4, Column: 10}},
+		{name: "all before a data-name in a condition", src: programHead + "    IF F = ALL G DISPLAY F END-IF.\n", pos: Pos{Line: 4, Column: 12}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var opts []ParseOption
+			if tc.fragment {
+				opts = append(opts, WithFragment())
+			}
+			_, err := Parse(strings.NewReader(tc.src), opts...)
+
+			var target AllLiteralError
+			require.ErrorAs(t, err, &target)
+			require.Equal(t, tc.pos, target.Position())
+		})
+	}
+}

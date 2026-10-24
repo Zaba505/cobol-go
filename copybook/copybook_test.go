@@ -347,6 +347,50 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
+			// An ALL value is one AllLiteral holding the literal it repeats,
+			// never a value named ALL followed by the literal.
+			name: "condition names with all literal values",
+			src: `01 REC.
+   05 FLAG PIC X(5).
+      88 FLAG-STARS VALUE ALL '*'.
+      88 FLAG-BLANK VALUE ALL SPACES 'X'.
+`,
+			want: func(t *testing.T, e []*cobol.DataDescriptionEntry) []*Field {
+				rec := &Field{Pos: at(1, 1), Level: 1, Name: "REC", Kind: KindGroup, Entry: e[0]}
+				flag := &Field{
+					Pos:     at(2, 4),
+					Level:   5,
+					Name:    "FLAG",
+					Picture: pic(t, "X(5)"),
+					Parent:  rec,
+					Entry:   e[1],
+				}
+				flag.Conditions = []*Condition{
+					{
+						Pos:  at(3, 7),
+						Name: "FLAG-STARS",
+						Values: []cobol.ValueSpec{
+							{From: &cobol.AllLiteral{Pos: at(3, 27), Literal: &cobol.StringLiteral{Pos: at(3, 31), Value: "'*'"}}},
+						},
+						Parent: flag,
+						Entry:  e[2],
+					},
+					{
+						Pos:  at(4, 7),
+						Name: "FLAG-BLANK",
+						Values: []cobol.ValueSpec{
+							{From: &cobol.AllLiteral{Pos: at(4, 27), Literal: &cobol.Word{Pos: at(4, 31), Value: "SPACES"}}},
+							{From: &cobol.StringLiteral{Pos: at(4, 38), Value: "'X'"}},
+						},
+						Parent: flag,
+						Entry:  e[3],
+					},
+				}
+				rec.Children = []*Field{flag}
+				return []*Field{rec}
+			},
+		},
+		{
 			name: "condition names attach to the item they follow",
 			src: `01 REC.
    05 STATUS-CODE PIC X.

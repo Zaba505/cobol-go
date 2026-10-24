@@ -428,6 +428,34 @@ is determined by the context they are used in (the size of the receiving item),
 so they may not be used where a fixed length is required, e.g. as a subprogram
 argument (*GnuCOBOL §2.1.19.3*). See Semantics.
 
+**Which literals `ALL` may precede.** `ALL` is followed by exactly one of:
+
+- a **nonnumeric literal** — an alphanumeric literal, or a prefixed literal of
+  any kind but the two numeric ones: `ALL '*'`, `ALL X'FF'`, `ALL N'A'`,
+  `ALL Z'AB'`, `ALL B'10'`; or
+- a **figurative constant other than `ALL`** — `ALL SPACES`, `ALL ZERO`. Here
+  `ALL` adds nothing, since a figurative constant already fills its receiver;
+  it is admitted because it is common in real source and is written back as
+  read.
+
+> **Resolved (`ALL` before a numeric literal): refused.** `ALL 5`, `ALL -1`,
+> `ALL H'FF'` and `ALL O'17'` are parse errors. COBOL 85 defines the form as
+> `ALL` followed by a *nonnumeric* literal, and the reason holds for every
+> numeric kind: a numeric literal denotes a value rather than a string of
+> characters, so "the literal repeated to fill the receiving field" has no
+> single meaning for it — repeating the digits of `-1` is a different string
+> from repeating the value. Accepting it would only hand a consumer a node
+> with no defined fill to compute. `ALL ALL '*'`, `ALL` before a data-name, and
+> `ALL` with nothing after it are refused too.
+>
+> The parser reads the form as an `AllLiteral` node whose `Literal` is the
+> `StringLiteral` or figurative-constant `Word` it repeats, wherever `literal`
+> is admitted: a data item's `VALUE`, a condition-name's `VALUE` list, and any
+> procedure-division operand or arithmetic primary. Where a statement has its
+> own `ALL` phrase before an operand — `INSPECT … TALLYING … FOR ALL`,
+> `INSPECT … REPLACING ALL`, `UNSTRING … DELIMITED BY ALL` — that `ALL` belongs
+> to the phrase, not to the operand.
+
 ### Keywords and Reserved Words
 
 - COBOL defines a large fixed set of **reserved words** (GnuCOBOL: "well over
@@ -793,7 +821,9 @@ figurative-constant = "ZERO"  | "ZEROS"  | "ZEROES"
                     | "HIGH-VALUE" | "HIGH-VALUES"
                     | "LOW-VALUE"  | "LOW-VALUES"
                     | "QUOTE" | "QUOTES" | "NULL" | "NULLS"
-                    | "ALL" literal
+                    | "ALL" all-operand
+all-operand         = AlphanumericLiteral   « any kind but H"…" and O"…" »
+                    | figurative-constant   « other than an "ALL" form »
 comment-entry       = « free-form text up to the next header; not tokenized as
                         COBOL words — see the ambiguity note under Identification »
 ```

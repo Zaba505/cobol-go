@@ -2963,6 +2963,9 @@ func clearTypePos(v Type) {
 		n.Pos = Pos{}
 	case *StringLiteral:
 		n.Pos = Pos{}
+	case *AllLiteral:
+		n.Pos = Pos{}
+		clearTypePos(n.Literal)
 	case *NumericLiteral:
 		n.Pos = Pos{}
 	case *Identifier:
@@ -3518,6 +3521,11 @@ func clearExprPos(e Expr) {
 	case *StringLiteral:
 		if n != nil {
 			n.Pos = Pos{}
+		}
+	case *AllLiteral:
+		if n != nil {
+			n.Pos = Pos{}
+			clearTypePos(n.Literal)
 		}
 	case *BinaryExpr:
 		if n != nil {
@@ -4734,6 +4742,238 @@ func TestPrintDigitLedWordsRoundTrip(t *testing.T) {
 			for _, want := range tc.contains {
 				require.Contains(t, buf.String(), want)
 			}
+		})
+	}
+}
+
+// An ALL literal prints as the ALL keyword, a space, and the literal it repeats,
+// in a VALUE clause and in a procedure operand alike.
+func TestPrintAllLiteral(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		value    *AllLiteral
+		expected string
+	}{
+		{
+			name:     "alphanumeric literal",
+			value:    &AllLiteral{Literal: &StringLiteral{Value: "'*'"}},
+			expected: "77 F PIC X(5) VALUE ALL '*'.\n",
+		},
+		{
+			name:     "hexadecimal literal",
+			value:    &AllLiteral{Literal: &StringLiteral{Kind: LiteralHexadecimal, Value: "'FF'"}},
+			expected: "77 F PIC X(5) VALUE ALL X'FF'.\n",
+		},
+		{
+			name:     "figurative constant keeps its spelling",
+			value:    &AllLiteral{Literal: &Word{Value: "spaces"}},
+			expected: "77 F PIC X(5) VALUE ALL spaces.\n",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{{
+				Level: 77,
+				Name:  &Word{Value: "F"},
+				Clauses: []DataClause{
+					&PictureClause{Picture: "X(5)"},
+					&ValueClause{Values: []ValueSpec{{From: tc.value}}},
+				},
+			}}}}
+
+			var buf bytes.Buffer
+			require.NoError(t, Print(&buf, f))
+			require.Equal(t, tc.expected, buf.String())
+		})
+	}
+
+	t.Run("move", func(t *testing.T) {
+		t.Parallel()
+
+		stmt := &MoveStatement{
+			Source:  &AllLiteral{Literal: &StringLiteral{Value: "'*'"}},
+			Targets: []*Identifier{{Name: &Word{Value: "F"}}},
+		}
+		text, ok := statementText(t, stmt)
+		require.True(t, ok)
+		require.Equal(t, "MOVE ALL '*' TO F", text)
+	})
+}
+
+// statementText prints a program whose only statement is stmt and returns the
+// statement's line, trimmed, reporting whether Print succeeded.
+func statementText(t *testing.T, stmt Statement) (string, bool) {
+	t.Helper()
+
+	f := &File{Programs: []*Program{{Divisions: []Division{
+		&IdentificationDivision{ProgramID: &ProgramID{Name: &Word{Value: "P"}}},
+		&ProcedureDivision{Paragraphs: []*Paragraph{{Sentences: []*Sentence{{Statements: []Statement{stmt}}}}}},
+	}}}}
+	var buf bytes.Buffer
+	if err := Print(&buf, f); err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, "MOVE") {
+			return strings.TrimSuffix(strings.TrimSpace(line), "."), true
+		}
+	}
+	return "", false
+}
+
+// An ALL literal survives Parse → Print → Parse in a data item's VALUE clause,
+// in a condition-name's value list (a THRU range included), in a MOVE, and in a
+// relation condition — and the first parse holds an AllLiteral at each of them,
+// since a round trip alone cannot tell a correct reading from one that misreads
+// ALL the same way twice.
+func TestPrintAllLiteralRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		lit  string
+	}{
+		{name: "alphanumeric literal", lit: "'*'"},
+		{name: "hexadecimal literal", lit: "X'FF'"},
+		{name: "figurative constant", lit: "SPACES"},
+		{name: "figurative constant in lower case", lit: "zeroes"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			l := "ALL " + tc.lit
+			src := "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"DATA DIVISION.\n" +
+				"WORKING-STORAGE SECTION.\n" +
+				"01 F PIC X(5) VALUE " + l + ".\n" +
+				"    88 F-ALL VALUE " + l + ".\n" +
+				"    88 F-SET VALUE 'A' " + l + " THRU " + l + ".\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE " + l + " TO F.\n" +
+				"    IF F = " + l + " DISPLAY F END-IF.\n" +
+				"    STOP RUN.\n"
+
+			first, err := Parse(strings.NewReader(src))
+			require.NoError(t, err)
+			require.Len(t, collectAllLiterals(first), 6)
+
+			var buf bytes.Buffer
+			require.NoError(t, Print(&buf, first))
+			require.Contains(t, buf.String(), "MOVE "+l+" TO F")
+
+			second, err := Parse(strings.NewReader(buf.String()))
+			require.NoError(t, err, buf.String())
+
+			require.Equal(t, withoutPos(first), withoutPos(second))
+		})
+	}
+
+	// A copybook fragment round-trips the same way, in fixed format as well.
+	t.Run("fragment in fixed format", func(t *testing.T) {
+		t.Parallel()
+
+		src := "000100 01  F PIC X(5) VALUE ALL '*'.\n" +
+			"000200     88  F-STARS VALUE ALL '*'.\n"
+
+		first, err := Parse(strings.NewReader(src), WithFragment(), WithSourceFormat(FixedFormat))
+		require.NoError(t, err)
+		require.Len(t, collectAllLiterals(first), 2)
+
+		var buf bytes.Buffer
+		require.NoError(t, Print(&buf, first))
+
+		second, err := Parse(&buf, WithFragment())
+		require.NoError(t, err)
+		require.Equal(t, withoutPos(first), withoutPos(second))
+	})
+}
+
+// collectAllLiterals returns every *AllLiteral reachable from f, by the same
+// reflective walk as collectStringLiterals.
+func collectAllLiterals(f *File) []*AllLiteral {
+	var out []*AllLiteral
+	seen := map[uintptr]bool{}
+	var walk func(v reflect.Value)
+	walk = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.Pointer:
+			if v.IsNil() || seen[v.Pointer()] {
+				return
+			}
+			seen[v.Pointer()] = true
+			if lit, ok := v.Interface().(*AllLiteral); ok {
+				out = append(out, lit)
+				return
+			}
+			walk(v.Elem())
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
+			}
+		case reflect.Struct:
+			for i := range v.NumField() {
+				if v.Type().Field(i).IsExported() {
+					walk(v.Field(i))
+				}
+			}
+		case reflect.Slice:
+			for i := range v.Len() {
+				walk(v.Index(i))
+			}
+		}
+	}
+	walk(reflect.ValueOf(f))
+	return out
+}
+
+// An ALL literal Parse would not read back — one repeating nothing, a numeric
+// literal, a data-name, another ALL literal, or an unprintable literal — is
+// refused with an UnsupportedNodeError rather than printed.
+func TestPrintRefusesUnprintableAllLiterals(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name  string
+		value Type
+	}{
+		{name: "nil", value: (*AllLiteral)(nil)},
+		{name: "no literal", value: &AllLiteral{}},
+		{name: "nil string literal", value: &AllLiteral{Literal: (*StringLiteral)(nil)}},
+		{name: "numeric literal", value: &AllLiteral{Literal: &NumericLiteral{Value: "5"}}},
+		{name: "hexadecimal numeric literal", value: &AllLiteral{Literal: &StringLiteral{Kind: LiteralHexadecimalNumeric, Value: "'FF'"}}},
+		{name: "octal numeric literal", value: &AllLiteral{Literal: &StringLiteral{Kind: LiteralOctalNumeric, Value: "'17'"}}},
+		{name: "data-name", value: &AllLiteral{Literal: &Word{Value: "G"}}},
+		{name: "all as a word", value: &AllLiteral{Literal: &Word{Value: "ALL"}}},
+		{name: "nested all literal", value: &AllLiteral{Literal: &AllLiteral{Literal: &StringLiteral{Value: "'*'"}}}},
+		{name: "odd hexadecimal body", value: &AllLiteral{Literal: &StringLiteral{Kind: LiteralHexadecimal, Value: "'F'"}}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{{
+				Level: 77,
+				Name:  &Word{Value: "F"},
+				Clauses: []DataClause{
+					&PictureClause{Picture: "X(5)"},
+					&ValueClause{Values: []ValueSpec{{From: tc.value}}},
+				},
+			}}}}
+
+			var target UnsupportedNodeError
+			require.ErrorAs(t, Print(io.Discard, f), &target)
+
+			_, ok := statementText(t, &MoveStatement{Source: tc.value, Targets: []*Identifier{{Name: &Word{Value: "F"}}}})
+			require.False(t, ok)
 		})
 	}
 }
