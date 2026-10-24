@@ -39,6 +39,7 @@ func TestPositioned(t *testing.T) {
 		{name: "copybook cycle", err: CopyBookCycleError{Pos: pos, Name: "CUST", Stack: []string{"CUST", "CUST"}}},
 		{name: "missing copybook resolver", err: MissingCopyBookResolverError{Pos: pos, Name: "CUST"}},
 		{name: "invalid level number", err: InvalidLevelNumberError{Pos: pos, Value: "50"}},
+		{name: "invalid word", err: InvalidWordError{Pos: pos, Word: "1000-2000"}},
 		{name: "search all constraint", err: SearchAllConstraintError{Pos: pos, Reason: "two WHENs"}},
 		{name: "unexpected token", err: UnexpectedTokenError{Expected: []TokenType{TokenSymbol}, Actual: tok}},
 		{name: "unexpected keyword", err: UnexpectedKeywordError{Expected: []string{"PIC"}, Actual: tok}},
@@ -79,6 +80,11 @@ func TestPositionedFromParse(t *testing.T) {
 			name: "invalid literal",
 			src:  "01 REC PIC X.\n   88 REC-NUL VALUE X'0'.\n",
 			pos:  Pos{Line: 2, Column: 21},
+		},
+		{
+			name: "invalid word",
+			src:  "01 REC.\n   05 1000-2000 PIC X.\n",
+			pos:  Pos{Line: 2, Column: 7},
 		},
 		{
 			name: "trailing token",

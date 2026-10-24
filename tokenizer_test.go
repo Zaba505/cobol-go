@@ -1653,3 +1653,278 @@ func TestTokenizerInvalidPrefixedLiterals(t *testing.T) {
 		})
 	}
 }
+
+// A run that begins with a digit is a word when, before any decimal point, it
+// meets a letter, or a hyphen or underscore leading on to a letter or digit;
+// otherwise it is a numeric literal (SPEC §"Digit-led words and numeric
+// literals"). Each case is pinned in free format, and the fixed-format cases
+// cover the run split at column 72 by a continuation line. The ruler shows
+// column numbers and is not part of the source.
+//
+//	----+----1----+----2----+----3----+----4----+----5----+----6----+----7--
+func TestTokenizerDigitLedWords(t *testing.T) {
+	t.Parallel()
+
+	collect := func(seq iter.Seq2[Token, error]) ([]Token, error) {
+		var tokens []Token
+		for tok, err := range seq {
+			if err != nil {
+				return tokens, err
+			}
+			tokens = append(tokens, tok)
+		}
+		return tokens, nil
+	}
+	word := func(line, col int, v string) Token {
+		return Token{Pos: Pos{Line: line, Column: col}, Type: TokenIdentifier, Value: []byte(v)}
+	}
+	num := func(line, col int, v string) Token {
+		return Token{Pos: Pos{Line: line, Column: col}, Type: TokenNumber, Value: []byte(v)}
+	}
+	sym := func(line, col int, v string) Token {
+		return Token{Pos: Pos{Line: line, Column: col}, Type: TokenSymbol, Value: []byte(v)}
+	}
+	// fixedAt places content so that it begins at column col of a fixed-format
+	// line with a blank indicator.
+	fixedAt := func(col int, content string) string {
+		return strings.Repeat(" ", col-1) + content + "\n"
+	}
+
+	testCases := []struct {
+		name     string
+		src      string
+		opts     []TokenizeOption
+		expected []Token
+	}{
+		{
+			name:     "digit then letters",
+			src:      "1ST-FIELD",
+			expected: []Token{word(1, 1, "1ST-FIELD")},
+		},
+		{
+			name:     "letter straight after the digits",
+			src:      "12AB",
+			expected: []Token{word(1, 1, "12AB")},
+		},
+		{
+			name: "digit-led data-name in an entry",
+			src:  "05 1ST-FIELD PIC X.",
+			expected: []Token{
+				num(1, 1, "05"),
+				word(1, 4, "1ST-FIELD"),
+				word(1, 14, "PIC"),
+				{Pos: Pos{Line: 1, Column: 18}, Type: TokenPicture, Value: []byte("X")},
+				sym(1, 19, "."),
+			},
+		},
+		{
+			name:     "numbered paragraph name",
+			src:      "1000-INIT.",
+			expected: []Token{word(1, 1, "1000-INIT"), sym(1, 10, ".")},
+		},
+		{
+			name:     "numbered exit paragraph",
+			src:      "9999-EXIT",
+			expected: []Token{word(1, 1, "9999-EXIT")},
+		},
+		{
+			name:     "digits joined by a hyphen",
+			src:      "1000-2000",
+			expected: []Token{word(1, 1, "1000-2000")},
+		},
+		{
+			name:     "digits joined by an underscore",
+			src:      "1_000",
+			expected: []Token{word(1, 1, "1_000")},
+		},
+		{
+			name:     "a run of hyphens leading on to a letter",
+			src:      "1000--X",
+			expected: []Token{word(1, 1, "1000--X")},
+		},
+		{
+			name:     "subtraction with spaces both sides",
+			src:      "1000 - X",
+			expected: []Token{num(1, 1, "1000"), sym(1, 6, "-"), word(1, 8, "X")},
+		},
+		{
+			name:     "hyphen followed by a space",
+			src:      "1000- X",
+			expected: []Token{num(1, 1, "1000"), sym(1, 5, "-"), word(1, 7, "X")},
+		},
+		{
+			name:     "hyphen preceded by a space",
+			src:      "1000 -X",
+			expected: []Token{num(1, 1, "1000"), sym(1, 6, "-"), word(1, 7, "X")},
+		},
+		{
+			name:     "signed literal after a space",
+			src:      "1000 -5",
+			expected: []Token{num(1, 1, "1000"), num(1, 6, "-5")},
+		},
+		{
+			name:     "hyphen then a separator period",
+			src:      "1000-.",
+			expected: []Token{num(1, 1, "1000"), sym(1, 5, "-"), sym(1, 6, ".")},
+		},
+		{
+			name:     "hyphen at end of input",
+			src:      "1000-",
+			expected: []Token{num(1, 1, "1000"), sym(1, 5, "-")},
+		},
+		{
+			name:     "all digits stays a numeric literal",
+			src:      "1000.",
+			expected: []Token{num(1, 1, "1000"), sym(1, 5, ".")},
+		},
+		{
+			name:     "exponent shape without a decimal point",
+			src:      "1E5",
+			expected: []Token{word(1, 1, "1E5")},
+		},
+		{
+			name:     "lower-case exponent shape without a decimal point",
+			src:      "1e5",
+			expected: []Token{word(1, 1, "1e5")},
+		},
+		{
+			name:     "negative exponent shape without a decimal point",
+			src:      "1E-5",
+			expected: []Token{word(1, 1, "1E-5")},
+		},
+		{
+			name:     "positive exponent shape without a decimal point",
+			src:      "1E+5",
+			expected: []Token{word(1, 1, "1E"), num(1, 3, "+5")},
+		},
+		{
+			name:     "exponent after a decimal point",
+			src:      "1.5E3",
+			expected: []Token{num(1, 1, "1.5E3")},
+		},
+		{
+			name:     "negative exponent after a decimal point",
+			src:      "1.0E-5",
+			expected: []Token{num(1, 1, "1.0E-5")},
+		},
+		{
+			name:     "exponent after a decimal comma",
+			src:      "1,5E3",
+			opts:     []TokenizeOption{WithDecimalComma()},
+			expected: []Token{num(1, 1, "1,5E3")},
+		},
+		{
+			name:     "letter after a decimal point ends the literal",
+			src:      "3.14ABC",
+			expected: []Token{num(1, 1, "3.14"), word(1, 5, "ABC")},
+		},
+		{
+			name:     "a sign never begins a word",
+			src:      "-1ST",
+			expected: []Token{num(1, 1, "-1"), word(1, 3, "ST")},
+		},
+		{
+			name: "PICTURE string is unchanged",
+			src:  "PIC 9(4) VALUE 1000.",
+			expected: []Token{
+				word(1, 1, "PIC"),
+				{Pos: Pos{Line: 1, Column: 5}, Type: TokenPicture, Value: []byte("9(4)")},
+				word(1, 10, "VALUE"),
+				num(1, 16, "1000"),
+				sym(1, 20, "."),
+			},
+		},
+		{
+			name: "fixed format digit-led data-name",
+			src:  fixedAt(8, "01 1ST-FIELD PIC X."),
+			opts: []TokenizeOption{WithFixedFormat()},
+			expected: []Token{
+				num(1, 8, "01"),
+				word(1, 11, "1ST-FIELD"),
+				word(1, 21, "PIC"),
+				{Pos: Pos{Line: 1, Column: 25}, Type: TokenPicture, Value: []byte("X")},
+				sym(1, 26, "."),
+			},
+		},
+		{
+			name:     "fixed format word continued after its letters began",
+			src:      fixedAt(66, "1000-IN") + "      -    IT.\n",
+			opts:     []TokenizeOption{WithFixedFormat()},
+			expected: []Token{word(1, 66, "1000-INIT"), sym(2, 14, ".")},
+		},
+		{
+			name:     "fixed format digits continued by a hyphen",
+			src:      fixedAt(69, "1000") + "      -    -INIT.\n",
+			opts:     []TokenizeOption{WithFixedFormat()},
+			expected: []Token{word(1, 69, "1000-INIT"), sym(2, 17, ".")},
+		},
+		{
+			name:     "fixed format hyphen at column 72 continued by a letter",
+			src:      fixedAt(68, "1000-") + "      -    INIT.\n",
+			opts:     []TokenizeOption{WithFixedFormat()},
+			expected: []Token{word(1, 68, "1000-INIT"), sym(2, 16, ".")},
+		},
+		{
+			name:     "fixed format digit at column 72 continued by letters",
+			src:      fixedAt(72, "1") + "      -    ST-FIELD\n",
+			opts:     []TokenizeOption{WithFixedFormat()},
+			expected: []Token{word(1, 72, "1ST-FIELD")},
+		},
+		{
+			name: "fixed format hyphen at column 72 with no continuation",
+			src:  fixedAt(68, "1000-") + fixedAt(12, "X."),
+			opts: []TokenizeOption{WithFixedFormat()},
+			expected: []Token{
+				num(1, 68, "1000"),
+				sym(1, 72, "-"),
+				word(2, 12, "X"),
+				sym(2, 13, "."),
+			},
+		},
+		{
+			name:     "fixed format numeric literal continued stays a literal",
+			src:      fixedAt(69, "1234") + "      -    5678.\n",
+			opts:     []TokenizeOption{WithFixedFormat()},
+			expected: []Token{num(1, 69, "12345678"), sym(2, 16, ".")},
+		},
+		{
+			name:     "fixed format letters in the identification area make no word",
+			src:      fixedAt(72, "1ABCDEFGH"),
+			opts:     []TokenizeOption{WithFixedFormat()},
+			expected: []Token{num(1, 72, "1")},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tokens, err := collect(Tokenize(strings.NewReader(tc.src), tc.opts...))
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, tokens)
+		})
+	}
+}
+
+// An underscore that leads on to no letter or digit joins no word, so it lexes
+// as it always has after a numeric literal: as an unexpected character, at its
+// own position.
+func TestTokenizerDigitLedTrailingUnderscore(t *testing.T) {
+	t.Parallel()
+
+	var tokens []Token
+	var got error
+	for tok, err := range Tokenize(strings.NewReader("1000_ X")) {
+		if err != nil {
+			got = err
+			break
+		}
+		tokens = append(tokens, tok)
+	}
+
+	require.Equal(t, []Token{{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("1000")}}, tokens)
+	var unexpected UnexpectedCharacterError
+	require.ErrorAs(t, got, &unexpected)
+	require.Equal(t, UnexpectedCharacterError{Pos: Pos{Line: 1, Column: 5}, R: '_'}, unexpected)
+}

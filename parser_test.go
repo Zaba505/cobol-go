@@ -5303,3 +5303,309 @@ func TestLiteralKind(t *testing.T) {
 		})
 	}
 }
+
+// A digit-led word reaches the parser as a word (SPEC §"Digit-led words and
+// numeric literals"): a data-name such as 1ST-FIELD, and the numbered paragraph
+// names of mainframe programs, which PERFORM, PERFORM … THRU and GO TO name as
+// their targets. A letterless procedure-name (3000-3999) and an all-digit one
+// (2000) are procedure-names too.
+func TestParserDigitLedWords(t *testing.T) {
+	t.Parallel()
+
+	ident := &IdentificationDivision{
+		Pos: Pos{Line: 1, Column: 1},
+		ProgramID: &ProgramID{
+			Pos:  Pos{Line: 2, Column: 1},
+			Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+		},
+	}
+	sentence := func(stmt Statement, pos Pos) *Sentence {
+		return &Sentence{Pos: pos, Statements: []Statement{stmt}}
+	}
+	exitPara := func(line int, name string) *Paragraph {
+		return &Paragraph{
+			Pos:  Pos{Line: line, Column: 1},
+			Name: &Word{Pos: Pos{Line: line, Column: 1}, Value: name},
+			Sentences: []*Sentence{
+				sentence(&ExitStatement{Pos: Pos{Line: line + 1, Column: 5}}, Pos{Line: line + 1, Column: 5}),
+			},
+		}
+	}
+
+	testCases := []struct {
+		name     string
+		src      string
+		opts     []ParseOption
+		expected *File
+	}{
+		{
+			name: "digit-led data-name in a fragment",
+			src: "01 REC.\n" +
+				"   05 1ST-FIELD PIC X.\n",
+			opts: []ParseOption{WithFragment()},
+			expected: &File{
+				Fragment: &Fragment{
+					Entries: []*DataDescriptionEntry{
+						{
+							Pos:   Pos{Line: 1, Column: 1},
+							Level: 1,
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "REC"},
+						},
+						{
+							Pos:   Pos{Line: 2, Column: 4},
+							Level: 5,
+							Name:  &Word{Pos: Pos{Line: 2, Column: 7}, Value: "1ST-FIELD"},
+							Clauses: []DataClause{
+								&PictureClause{Pos: Pos{Line: 2, Column: 17}, Picture: "X"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			//	----+----1----+----2----+----3
+			name: "digit-led data-name in a fixed-format fragment",
+			src: "       01 REC.\n" +
+				"           05 1ST-FIELD PIC X.\n",
+			opts: []ParseOption{WithFragment(), WithSourceFormat(FixedFormat)},
+			expected: &File{
+				Fragment: &Fragment{
+					Entries: []*DataDescriptionEntry{
+						{
+							Pos:   Pos{Line: 1, Column: 8},
+							Level: 1,
+							Name:  &Word{Pos: Pos{Line: 1, Column: 11}, Value: "REC"},
+						},
+						{
+							Pos:   Pos{Line: 2, Column: 12},
+							Level: 5,
+							Name:  &Word{Pos: Pos{Line: 2, Column: 15}, Value: "1ST-FIELD"},
+							Clauses: []DataClause{
+								&PictureClause{Pos: Pos{Line: 2, Column: 25}, Picture: "X"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "numbered paragraphs and the statements that name them",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"0000-MAIN.\n" +
+				"    PERFORM 1000-INIT.\n" +
+				"    PERFORM 1000-INIT THRU 1999-EXIT.\n" +
+				"    GO TO 9999-EXIT.\n" +
+				"1000-INIT.\n" +
+				"    PERFORM 2000.\n" +
+				"    PERFORM 3000-3999.\n" +
+				"1999-EXIT.\n" +
+				"    EXIT.\n" +
+				"2000.\n" +
+				"    EXIT.\n" +
+				"3000-3999.\n" +
+				"    EXIT.\n" +
+				"9999-EXIT.\n" +
+				"    STOP RUN.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							ident,
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Paragraphs: []*Paragraph{
+									{
+										Pos:  Pos{Line: 4, Column: 1},
+										Name: &Word{Pos: Pos{Line: 4, Column: 1}, Value: "0000-MAIN"},
+										Sentences: []*Sentence{
+											sentence(&PerformStatement{
+												Pos:    Pos{Line: 5, Column: 5},
+												Target: &Word{Pos: Pos{Line: 5, Column: 13}, Value: "1000-INIT"},
+											}, Pos{Line: 5, Column: 5}),
+											sentence(&PerformStatement{
+												Pos:     Pos{Line: 6, Column: 5},
+												Target:  &Word{Pos: Pos{Line: 6, Column: 13}, Value: "1000-INIT"},
+												Through: &Word{Pos: Pos{Line: 6, Column: 28}, Value: "1999-EXIT"},
+											}, Pos{Line: 6, Column: 5}),
+											sentence(&GoToStatement{
+												Pos:     Pos{Line: 7, Column: 5},
+												Targets: []*Word{{Pos: Pos{Line: 7, Column: 11}, Value: "9999-EXIT"}},
+											}, Pos{Line: 7, Column: 5}),
+										},
+									},
+									{
+										Pos:  Pos{Line: 8, Column: 1},
+										Name: &Word{Pos: Pos{Line: 8, Column: 1}, Value: "1000-INIT"},
+										Sentences: []*Sentence{
+											sentence(&PerformStatement{
+												Pos:    Pos{Line: 9, Column: 5},
+												Target: &Word{Pos: Pos{Line: 9, Column: 13}, Value: "2000"},
+											}, Pos{Line: 9, Column: 5}),
+											sentence(&PerformStatement{
+												Pos:    Pos{Line: 10, Column: 5},
+												Target: &Word{Pos: Pos{Line: 10, Column: 13}, Value: "3000-3999"},
+											}, Pos{Line: 10, Column: 5}),
+										},
+									},
+									exitPara(11, "1999-EXIT"),
+									exitPara(13, "2000"),
+									exitPara(15, "3000-3999"),
+									{
+										Pos:  Pos{Line: 17, Column: 1},
+										Name: &Word{Pos: Pos{Line: 17, Column: 1}, Value: "9999-EXIT"},
+										Sentences: []*Sentence{
+											sentence(&StopStatement{Pos: Pos{Line: 18, Column: 5}, Run: true}, Pos{Line: 18, Column: 5}),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "numbered sections and a sort procedure range",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"1000-MAIN SECTION.\n" +
+				"    SORT W ASCENDING KEY K INPUT PROCEDURE 2000-IN THRU 2999 OUTPUT PROCEDURE 3000-3999.\n" +
+				"2000-IN SECTION.\n" +
+				"    EXIT.\n",
+			expected: &File{
+				Programs: []*Program{
+					{
+						Pos: Pos{Line: 1, Column: 1},
+						Divisions: []Division{
+							ident,
+							&ProcedureDivision{
+								Pos: Pos{Line: 3, Column: 1},
+								Sections: []*Section{
+									{
+										Pos:  Pos{Line: 4, Column: 1},
+										Name: &Word{Pos: Pos{Line: 4, Column: 1}, Value: "1000-MAIN"},
+										Paragraphs: []*Paragraph{
+											{
+												Pos: Pos{Line: 5, Column: 5},
+												Sentences: []*Sentence{
+													sentence(&SortStatement{
+														Pos:  Pos{Line: 5, Column: 5},
+														File: &Word{Pos: Pos{Line: 5, Column: 10}, Value: "W"},
+														Keys: []SortKey{
+															{
+																Pos:       Pos{Line: 5, Column: 12},
+																Ascending: true,
+																Names:     []*Word{{Pos: Pos{Line: 5, Column: 26}, Value: "K"}},
+															},
+														},
+														Input: &SortProcedure{
+															Pos:     Pos{Line: 5, Column: 28},
+															Target:  &Word{Pos: Pos{Line: 5, Column: 44}, Value: "2000-IN"},
+															Through: &Word{Pos: Pos{Line: 5, Column: 57}, Value: "2999"},
+														},
+														Output: &SortProcedure{
+															Pos:    Pos{Line: 5, Column: 62},
+															Target: &Word{Pos: Pos{Line: 5, Column: 79}, Value: "3000-3999"},
+														},
+													}, Pos{Line: 5, Column: 5}),
+												},
+											},
+										},
+									},
+									{
+										Pos:  Pos{Line: 6, Column: 1},
+										Name: &Word{Pos: Pos{Line: 6, Column: 1}, Value: "2000-IN"},
+										Paragraphs: []*Paragraph{
+											{
+												Pos: Pos{Line: 7, Column: 5},
+												Sentences: []*Sentence{
+													sentence(&ExitStatement{Pos: Pos{Line: 7, Column: 5}}, Pos{Line: 7, Column: 5}),
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f, err := Parse(strings.NewReader(tc.src), tc.opts...)
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, f)
+		})
+	}
+}
+
+// A user-defined word with no letter in it is valid only as a procedure-name
+// (SPEC §"User-defined word"); anywhere else it is refused with a positioned
+// InvalidWordError.
+func TestParserLetterlessWord(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		src  string
+		opts []ParseOption
+		pos  Pos
+		word string
+	}{
+		{
+			name: "data-name",
+			src:  "01 REC.\n   05 1000-2000 PIC X.\n",
+			opts: []ParseOption{WithFragment()},
+			pos:  Pos{Line: 2, Column: 7},
+			word: "1000-2000",
+		},
+		{
+			name: "depending-on data-name",
+			src:  "01 REC.\n   05 T PIC X OCCURS 1 TO 5 DEPENDING ON 1_2.\n",
+			opts: []ParseOption{WithFragment()},
+			pos:  Pos{Line: 2, Column: 42},
+			word: "1_2",
+		},
+		{
+			name: "data reference",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE 1000-2000 TO X.\n",
+			pos:  Pos{Line: 4, Column: 10},
+			word: "1000-2000",
+		},
+		{
+			name: "receiving data reference",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE X TO 1-2.\n",
+			pos:  Pos{Line: 4, Column: 15},
+			word: "1-2",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := Parse(strings.NewReader(tc.src), tc.opts...)
+
+			var invalid InvalidWordError
+			require.ErrorAs(t, err, &invalid)
+			require.Equal(t, InvalidWordError{Pos: tc.pos, Word: tc.word}, invalid)
+		})
+	}
+}

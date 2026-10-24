@@ -106,6 +106,27 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
+			// A data-name may begin with a digit (cobol SPEC §"Digit-led words
+			// and numeric literals"); the field carries it as written.
+			name: "digit-led data-name",
+			src: `01 REC.
+   05 1ST-FIELD PIC X.
+`,
+			want: func(t *testing.T, e []*cobol.DataDescriptionEntry) []*Field {
+				rec := &Field{Pos: at(1, 1), Level: 1, Name: "REC", Kind: KindGroup, Entry: e[0]}
+				first := &Field{
+					Pos:     at(2, 4),
+					Level:   5,
+					Name:    "1ST-FIELD",
+					Picture: pic(t, "X"),
+					Parent:  rec,
+					Entry:   e[1],
+				}
+				rec.Children = []*Field{first}
+				return []*Field{rec}
+			},
+		},
+		{
 			name: "nested groups close at the next lower level",
 			src: `01 REC.
    05 ADDRESS.
