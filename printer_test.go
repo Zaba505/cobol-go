@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -2513,6 +2514,325 @@ func TestPrintConditionValuesAreRoundTrip(t *testing.T) {
 
 	require.Equal(t, withoutPos(first), withoutPos(second))
 	require.Equal(t, withoutPos(want), withoutPos(second))
+}
+
+func TestCheckEntries(t *testing.T) {
+	t.Parallel()
+
+	word := func(v string) *Word { return &Word{Value: v} }
+	str := func(v string) *StringLiteral { return &StringLiteral{Value: v} }
+	num := func(v string) *NumericLiteral { return &NumericLiteral{Value: v} }
+
+	// validFragment is built by hand the way a caller assembling entries would:
+	// no positions, nil rather than empty slices.
+	validFragment := func() []*DataDescriptionEntry {
+		return []*DataDescriptionEntry{
+			{Level: 1, Name: word("STATUS-REC")},
+			{Level: 5, Name: word("STATUS-CODE"), Clauses: []DataClause{&PictureClause{Picture: "X"}}},
+			{Level: 88, Name: word("STATUS-OK"), Clauses: []DataClause{
+				&ValueClause{Values: []ValueSpec{{From: str("'A'")}, {From: str("'B'")}}},
+			}},
+			{Level: 5, Name: word("AMOUNT"), Clauses: []DataClause{
+				&PictureClause{Picture: "S9(5)V99"},
+				&UsageClause{Usage: "COMP-3"},
+				&ValueClause{Values: []ValueSpec{{From: num("0")}}},
+			}},
+			{Level: 5, Name: word("BALANCE"), Clauses: []DataClause{
+				&PictureClause{Picture: "S9(3)"},
+				&SignClause{Position: "LEADING", Separate: true},
+			}},
+			{Level: 5, Filler: true, Clauses: []DataClause{&PictureClause{Picture: "X(4)"}}},
+		}
+	}
+
+	testCases := []struct {
+		name    string
+		entries func() []*DataDescriptionEntry
+		index   int
+		pos     Pos
+		printed string
+		check   func(t *testing.T, err error)
+	}{
+		{
+			name: "88 with a picture clause",
+			entries: func() []*DataDescriptionEntry {
+				return []*DataDescriptionEntry{
+					{Pos: Pos{Line: 1, Column: 1}, Level: 1, Name: word("REC"), Clauses: []DataClause{&PictureClause{Picture: "X"}}},
+					{Pos: Pos{Line: 2, Column: 4}, Level: 88, Name: word("REC-OK"), Clauses: []DataClause{
+						&PictureClause{Picture: "X"},
+						&ValueClause{Values: []ValueSpec{{From: str("'Y'")}}},
+					}},
+				}
+			},
+			index:   1,
+			pos:     Pos{Line: 2, Column: 4},
+			printed: "    88 REC-OK PIC X VALUE 'Y'.\n",
+			check: func(t *testing.T, err error) {
+				var kwErr UnexpectedKeywordError
+				require.ErrorAs(t, err, &kwErr)
+			},
+		},
+		{
+			name: "two value literals on an ordinary item",
+			entries: func() []*DataDescriptionEntry {
+				return []*DataDescriptionEntry{
+					{Pos: Pos{Line: 3, Column: 8}, Level: 1, Name: word("COUNTER"), Clauses: []DataClause{
+						&PictureClause{Picture: "9"},
+						&ValueClause{Values: []ValueSpec{{From: num("1")}, {From: num("2")}}},
+					}},
+				}
+			},
+			index:   0,
+			pos:     Pos{Line: 3, Column: 8},
+			printed: "01 COUNTER PIC 9 VALUE 1 2.\n",
+			check: func(t *testing.T, err error) {
+				var tokErr UnexpectedTokenError
+				require.ErrorAs(t, err, &tokErr)
+			},
+		},
+		{
+			name: "picture string smuggling an occurs clause",
+			entries: func() []*DataDescriptionEntry {
+				return []*DataDescriptionEntry{
+					{Pos: Pos{Line: 1, Column: 1}, Level: 1, Name: word("REC")},
+					{Pos: Pos{Line: 2, Column: 5}, Level: 5, Name: word("SLOT"), Clauses: []DataClause{&PictureClause{Picture: "X(4) OCCURS 4"}}},
+				}
+			},
+			index:   1,
+			pos:     Pos{Line: 2, Column: 5},
+			printed: "    05 SLOT PIC X(4) OCCURS 4.\n",
+			check: func(t *testing.T, err error) {
+				require.ErrorIs(t, err, ErrEntryChanged)
+			},
+		},
+		{
+			name: "sign position not upper-cased",
+			entries: func() []*DataDescriptionEntry {
+				return []*DataDescriptionEntry{
+					{Pos: Pos{Line: 4, Column: 2}, Level: 1, Name: word("AMT"), Clauses: []DataClause{
+						&PictureClause{Picture: "S9(3)"},
+						&SignClause{Position: "leading"},
+					}},
+				}
+			},
+			index: 0,
+			pos:   Pos{Line: 4, Column: 2},
+			check: func(t *testing.T, err error) {
+				var nodeErr UnsupportedNodeError
+				require.ErrorAs(t, err, &nodeErr)
+			},
+		},
+		{
+			name: "usage not upper-cased",
+			entries: func() []*DataDescriptionEntry {
+				return []*DataDescriptionEntry{
+					{Level: 1, Name: word("REC")},
+					{Level: 5, Name: word("N"), Clauses: []DataClause{&PictureClause{Picture: "9(4)"}, &UsageClause{Usage: "comp"}}},
+				}
+			},
+			index:   1,
+			printed: "    05 N PIC 9(4) USAGE comp.\n",
+			check: func(t *testing.T, err error) {
+				require.ErrorIs(t, err, ErrEntryChanged)
+			},
+		},
+		{
+			name: "filler named rather than flagged",
+			entries: func() []*DataDescriptionEntry {
+				return []*DataDescriptionEntry{
+					{Level: 1, Name: word("FILLER"), Clauses: []DataClause{&PictureClause{Picture: "X"}}},
+				}
+			},
+			index:   0,
+			printed: "01 FILLER PIC X.\n",
+			check: func(t *testing.T, err error) {
+				require.ErrorIs(t, err, ErrEntryChanged)
+			},
+		},
+		{
+			name: "nil entry",
+			entries: func() []*DataDescriptionEntry {
+				return []*DataDescriptionEntry{{Level: 1, Name: word("REC")}, nil}
+			},
+			index: 1,
+			check: func(t *testing.T, err error) {
+				var nodeErr UnsupportedNodeError
+				require.ErrorAs(t, err, &nodeErr)
+			},
+		},
+		{
+			name: "first failure is reported, not a later one",
+			entries: func() []*DataDescriptionEntry {
+				entries := validFragment()
+				entries[1].Clauses = []DataClause{&PictureClause{Picture: "X VALUE 'Z'"}}
+				entries[3].Clauses = append(entries[3].Clauses, &SignClause{Position: "trailing"})
+				return entries
+			},
+			index:   1,
+			printed: "    05 STATUS-CODE PIC X VALUE 'Z'.\n",
+			check: func(t *testing.T, err error) {
+				require.ErrorIs(t, err, ErrEntryChanged)
+			},
+		},
+		{
+			name: "parse failure charged to the entry it was reported in",
+			entries: func() []*DataDescriptionEntry {
+				entries := validFragment()
+				entries[4].Level = 50
+				return entries
+			},
+			index:   4,
+			printed: "        50 BALANCE PIC S9(3) SIGN IS LEADING SEPARATE CHARACTER.\n",
+			check: func(t *testing.T, err error) {
+				var lvlErr InvalidLevelNumberError
+				require.ErrorAs(t, err, &lvlErr)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := CheckEntries(tc.entries())
+
+			var checkErr EntryCheckError
+			require.ErrorAs(t, err, &checkErr)
+			require.Equal(t, tc.index, checkErr.Index)
+			require.Equal(t, tc.pos, checkErr.Pos)
+			require.Equal(t, tc.printed, checkErr.Printed)
+
+			var p Positioned
+			require.ErrorAs(t, err, &p)
+			require.Equal(t, tc.pos, p.Position())
+
+			tc.check(t, err)
+		})
+	}
+
+	t.Run("valid hand-built fragment passes", func(t *testing.T) {
+		t.Parallel()
+		require.NoError(t, CheckEntries(validFragment()))
+	})
+
+	t.Run("parsed fragment passes", func(t *testing.T) {
+		t.Parallel()
+		f, err := Parse(strings.NewReader(
+			"*> customer record\n"+
+				"01 CUST-REC.\n"+
+				"   05 CUST-ID PIC 9(6) COMP.\n"+
+				"   05 CUST-TYPE PIC X.\n"+
+				"      88 RETAIL VALUES ARE 'R' 'W'.\n"+
+				"   05 ORDERS OCCURS 1 TO 10 DEPENDING ON CUST-ID INDEXED BY ORD-IX.\n"+
+				"      10 ORDER-NO PIC X(8).\n"+
+				"   66 CUST-ALIAS RENAMES CUST-ID THRU CUST-TYPE.\n",
+		), WithFragment())
+		require.NoError(t, err)
+		require.NoError(t, CheckEntries(f.Fragment.Entries))
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		require.NoError(t, CheckEntries(nil))
+	})
+
+	t.Run("entries are not modified", func(t *testing.T) {
+		t.Parallel()
+		entries := validFragment()
+		require.NoError(t, CheckEntries(entries))
+		require.Equal(t, validFragment(), entries)
+	})
+}
+
+// TestCheckEntriesPrintsAsPrint pins the round trip CheckEntries relies on to
+// the one Print performs: the blocks it re-reads, joined, are exactly what Print
+// writes for a fragment holding the same entries.
+func TestCheckEntriesPrintsAsPrint(t *testing.T) {
+	t.Parallel()
+
+	f, err := Parse(strings.NewReader(
+		"*> header\n"+
+			"01 REC.\n"+
+			"   05 A PIC X.\n"+
+			"      *> about B\n"+
+			"      88 B VALUE 'B'.\n"+
+			"77 C PIC 9.\n",
+	), WithFragment())
+	require.NoError(t, err)
+
+	var want bytes.Buffer
+	require.NoError(t, Print(&want, &File{Fragment: &Fragment{Entries: f.Fragment.Entries}}))
+
+	blocks, err := printEntryBlocks(f.Fragment.Entries)
+	require.NoError(t, err)
+	var got strings.Builder
+	for _, b := range blocks {
+		got.WriteString(b.text)
+	}
+	require.Equal(t, want.String(), got.String())
+	require.Equal(t, []int{1, 3, 4, 6}, []int{blocks[0].line, blocks[1].line, blocks[2].line, blocks[3].line})
+}
+
+func TestEqualIgnoringPos(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		a, b *DataDescriptionEntry
+		want bool
+	}{
+		{
+			name: "positions differ",
+			a:    &DataDescriptionEntry{Pos: Pos{Line: 1, Column: 1}, Level: 1, Name: &Word{Pos: Pos{Line: 1, Column: 4}, Value: "A"}},
+			b:    &DataDescriptionEntry{Pos: Pos{Line: 9, Column: 9}, Level: 1, Name: &Word{Value: "A"}},
+			want: true,
+		},
+		{
+			name: "comments differ",
+			a:    &DataDescriptionEntry{Level: 1, Comments: []*Comment{{Text: "x"}}},
+			b:    &DataDescriptionEntry{Level: 1},
+			want: true,
+		},
+		{
+			name: "nil and empty clauses",
+			a:    &DataDescriptionEntry{Level: 1, Clauses: []DataClause{}},
+			b:    &DataDescriptionEntry{Level: 1},
+			want: true,
+		},
+		{
+			name: "levels differ",
+			a:    &DataDescriptionEntry{Level: 1},
+			b:    &DataDescriptionEntry{Level: 5},
+		},
+		{
+			name: "name against no name",
+			a:    &DataDescriptionEntry{Level: 1, Name: &Word{Value: "A"}},
+			b:    &DataDescriptionEntry{Level: 1},
+		},
+		{
+			name: "clause types differ",
+			a:    &DataDescriptionEntry{Level: 1, Clauses: []DataClause{&GlobalClause{}}},
+			b:    &DataDescriptionEntry{Level: 1, Clauses: []DataClause{&ExternalClause{}}},
+		},
+		{
+			name: "literal kinds differ",
+			a:    &DataDescriptionEntry{Level: 1, Clauses: []DataClause{&ValueClause{Values: []ValueSpec{{From: &NumericLiteral{Value: "1"}}}}}},
+			b:    &DataDescriptionEntry{Level: 1, Clauses: []DataClause{&ValueClause{Values: []ValueSpec{{From: &Word{Value: "1"}}}}}},
+		},
+		{
+			name: "flag differs",
+			a:    &DataDescriptionEntry{Level: 1, Clauses: []DataClause{&SignClause{Position: "LEADING", Separate: true}}},
+			b:    &DataDescriptionEntry{Level: 1, Clauses: []DataClause{&SignClause{Position: "LEADING"}}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, equalIgnoringPos(reflect.ValueOf(tc.a), reflect.ValueOf(tc.b)))
+			require.Equal(t, tc.want, equalIgnoringPos(reflect.ValueOf(tc.b), reflect.ValueOf(tc.a)))
+		})
+	}
 }
 
 // withoutPos zeroes every Pos in f and returns it, so round-trip comparisons
