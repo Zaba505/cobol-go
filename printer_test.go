@@ -4461,3 +4461,81 @@ func TestPrinterErrors(t *testing.T) {
 		})
 	}
 }
+
+// Each kind of literal prints with its canonical prefix directly before its
+// delimited body.
+func TestPrintPrefixedLiterals(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		lit      *StringLiteral
+		expected string
+	}{
+		{name: "alphanumeric", lit: &StringLiteral{Kind: LiteralAlphanumeric, Value: "'AB'"}, expected: "77 F PIC X VALUE 'AB'.\n"},
+		{name: "hexadecimal", lit: &StringLiteral{Kind: LiteralHexadecimal, Value: "'c1'"}, expected: "77 F PIC X VALUE X'c1'.\n"},
+		{name: "hexadecimal numeric", lit: &StringLiteral{Kind: LiteralHexadecimalNumeric, Value: `"FF"`}, expected: "77 F PIC X VALUE H\"FF\".\n"},
+		{name: "octal numeric", lit: &StringLiteral{Kind: LiteralOctalNumeric, Value: "'17'"}, expected: "77 F PIC X VALUE O'17'.\n"},
+		{name: "national", lit: &StringLiteral{Kind: LiteralNational, Value: "'AB'"}, expected: "77 F PIC X VALUE N'AB'.\n"},
+		{name: "null-terminated", lit: &StringLiteral{Kind: LiteralNullTerminated, Value: "'AB'"}, expected: "77 F PIC X VALUE Z'AB'.\n"},
+		{name: "boolean", lit: &StringLiteral{Kind: LiteralBoolean, Value: "'10'"}, expected: "77 F PIC X VALUE B'10'.\n"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{{
+				Level: 77,
+				Name:  &Word{Value: "F"},
+				Clauses: []DataClause{
+					&PictureClause{Picture: "X"},
+					&ValueClause{Values: []ValueSpec{{From: tc.lit}}},
+				},
+			}}}}
+
+			var buf bytes.Buffer
+			require.NoError(t, Print(&buf, f))
+			require.Equal(t, tc.expected, buf.String())
+		})
+	}
+}
+
+// Every prefix survives Parse → Print → Parse in a VALUE clause, in a
+// condition-name's value list, and in procedure statements, with its kind
+// intact.
+func TestPrintPrefixedLiteralsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	literals := []string{"X'C1C2'", "x\"c1\"", "H'FF'", "O'17'", "N'AB'", "Z'AB'", "B'1010'"}
+
+	for _, l := range literals {
+		t.Run(l, func(t *testing.T) {
+			t.Parallel()
+
+			src := "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"DATA DIVISION.\n" +
+				"WORKING-STORAGE SECTION.\n" +
+				"01 F PIC X(4) VALUE " + l + ".\n" +
+				"    88 F-SET VALUE " + l + " THRU " + l + ".\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE " + l + " TO F.\n" +
+				"    DISPLAY " + l + " F.\n" +
+				"    IF F = " + l + " DISPLAY 'Y' END-IF.\n" +
+				"    STOP RUN.\n"
+
+			first, err := Parse(strings.NewReader(src))
+			require.NoError(t, err)
+
+			var buf bytes.Buffer
+			require.NoError(t, Print(&buf, first))
+
+			second, err := Parse(strings.NewReader(buf.String()))
+			require.NoError(t, err, buf.String())
+
+			require.Equal(t, withoutPos(first), withoutPos(second))
+			require.Contains(t, buf.String(), "MOVE "+strings.ToUpper(l[:1])+l[1:]+" TO F")
+		})
+	}
+}

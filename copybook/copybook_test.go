@@ -279,6 +279,53 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
+			// A prefixed literal is one value carrying its kind, never the word
+			// X followed by the text between the quotes.
+			name: "condition names with prefixed literal values",
+			src: `01 REC.
+   05 FLAG PIC X.
+      88 FLAG-LOW VALUE X'00'.
+      88 FLAG-SET VALUE X'01' THRU X'FE' N'A'.
+`,
+			want: func(t *testing.T, e []*cobol.DataDescriptionEntry) []*Field {
+				rec := &Field{Pos: at(1, 1), Level: 1, Name: "REC", Kind: KindGroup, Entry: e[0]}
+				flag := &Field{
+					Pos:     at(2, 4),
+					Level:   5,
+					Name:    "FLAG",
+					Picture: pic(t, "X"),
+					Parent:  rec,
+					Entry:   e[1],
+				}
+				flag.Conditions = []*Condition{
+					{
+						Pos:  at(3, 7),
+						Name: "FLAG-LOW",
+						Values: []cobol.ValueSpec{
+							{From: &cobol.StringLiteral{Pos: at(3, 25), Kind: cobol.LiteralHexadecimal, Value: "'00'"}},
+						},
+						Parent: flag,
+						Entry:  e[2],
+					},
+					{
+						Pos:  at(4, 7),
+						Name: "FLAG-SET",
+						Values: []cobol.ValueSpec{
+							{
+								From:    &cobol.StringLiteral{Pos: at(4, 25), Kind: cobol.LiteralHexadecimal, Value: "'01'"},
+								Through: &cobol.StringLiteral{Pos: at(4, 36), Kind: cobol.LiteralHexadecimal, Value: "'FE'"},
+							},
+							{From: &cobol.StringLiteral{Pos: at(4, 42), Kind: cobol.LiteralNational, Value: "'A'"}},
+						},
+						Parent: flag,
+						Entry:  e[3],
+					},
+				}
+				rec.Children = []*Field{flag}
+				return []*Field{rec}
+			},
+		},
+		{
 			name: "condition names attach to the item they follow",
 			src: `01 REC.
    05 STATUS-CODE PIC X.

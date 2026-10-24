@@ -454,7 +454,7 @@ func specialNamesClauseText(clause SpecialNamesClause) (string, bool) {
 		if c == nil || c.Sign == nil {
 			return "", false
 		}
-		return "CURRENCY SIGN IS " + c.Sign.Value, true
+		return "CURRENCY SIGN IS " + literalText(c.Sign), true
 	default:
 		return "", false
 	}
@@ -2367,7 +2367,7 @@ func printCallStatement(stmt *CallStatement, depth int, next printerAction) prin
 			if t == nil {
 				return failPrint(UnsupportedNodeError{Node: stmt.Target})
 			}
-			target = t.Value
+			target = literalText(t)
 		case *Identifier:
 			text, ok := identifierText(t)
 			if !ok {
@@ -2946,7 +2946,7 @@ func valueText(v Type) (string, bool) {
 		if n == nil {
 			return "", false
 		}
-		return n.Value, true
+		return literalText(n), true
 	case *NumericLiteral:
 		if n == nil {
 			return "", false
@@ -2970,6 +2970,12 @@ func valueText(v Type) (string, bool) {
 	}
 }
 
+// literalText returns the source text of a delimited literal: its kind's
+// canonical prefix, if it has one, directly followed by its delimited body.
+func literalText(l *StringLiteral) string {
+	return l.Kind.Prefix() + l.Value
+}
+
 // exprText returns the canonical source text of an arithmetic expression and
 // whether it could be rendered. Binary operators are surrounded by single spaces,
 // a unary sign is attached to its operand, and parenthesized groups are preserved
@@ -2989,7 +2995,7 @@ func exprText(e Expr) (string, bool) {
 		if n == nil {
 			return "", false
 		}
-		return n.Value, true
+		return literalText(n), true
 	case *BinaryExpr:
 		if n == nil {
 			return "", false

@@ -321,17 +321,60 @@ format-independent alternative.
   [Line Continuation](#line-continuation). In brief: free format joins fragments
   with `&`, while fixed format also allows the column-7 hyphen continuation.
 - The empty literal (`""` / `''`) is valid.
-- **Hexadecimal alphanumeric literal:** `X"4142"` (or `X'…'`, `H"…"`) — an even
+- **Hexadecimal alphanumeric literal:** `X"4142"` (or `X'…'`) — an even
   number of hex digits, each pair one byte; `X"4142"` is `AB`
-  (*GnuCOBOL §2.1.19.2*).
+  (*GnuCOBOL §2.1.19.2*). `X""` is the empty literal, as `""` is.
 - **National literal:** `N"…"` — national (typically UTF-16/multi-byte)
   characters.
 - **Null-terminated literal (GnuCOBOL extension):** `Z"…"` — like an
   alphanumeric literal but with a trailing `0x00` byte.
-- **Boolean literal (extension):** `B"1010"` — a string of `0`/`1` bits.
+- **Boolean literal (extension):** `B"1010"` — one or more `0`/`1` bits.
 
-  > The `X`/`N`/`Z`/`B`/`H` prefix is part of the token; the tokenizer reads the
-  > prefix, then the delimited body. The prefix is case-insensitive.
+  > The `X`/`H`/`O`/`N`/`Z`/`B` prefix is part of the token; the tokenizer reads
+  > the prefix, then the delimited body, and emits one token whose value is the
+  > whole lexeme. The prefix is case-insensitive, and either delimiter may follow
+  > it. It must be *directly* followed by the delimiter: `X 'C1'` is the word `X`
+  > and then an alphanumeric literal. The body is scanned like any alphanumeric
+  > literal — doubled delimiters, and in fixed format the column-72
+  > continuation — and is then checked against its kind's digit rule:
+  >
+  > | prefix | kind | body |
+  > |---|---|---|
+  > | `X` | hexadecimal (alphanumeric) | hex digits, an even number of them (zero allowed) |
+  > | `H` | hexadecimal numeric | one or more hex digits |
+  > | `O` | octal numeric | one or more octal digits |
+  > | `B` | boolean | one or more `0`/`1` digits |
+  > | `N` | national | any characters |
+  > | `Z` | null-terminated | any characters |
+  >
+  > A body that breaks its rule — `X'ABC'`, `X'G0'`, `O'8'`, `B'2'` — is an
+  > `InvalidLiteralError` at the prefix's position.
+
+  > **Resolved (H and B):** an earlier revision listed `H"…"` both here, as a
+  > hexadecimal alphanumeric literal, and below as a hexadecimal numeric one,
+  > and `B"…"` both as a boolean literal and as a binary numeric one. This
+  > package settles each on one reading, the same in every position: **`H` is
+  > the hexadecimal numeric literal** (GnuCOBOL's reading, where `H"FF"` is
+  > 255) and **`B` is the boolean literal**. `X` is the only hexadecimal
+  > alphanumeric prefix. A binary numeric literal has no prefix of its own.
+
+  > **AST:** every delimited literal is a `StringLiteral`. Its `Kind` names the
+  > prefix (`LiteralAlphanumeric` when there is none) and its `Value` is the
+  > raw delimited body, delimiters included and prefix excluded, so a consumer
+  > never re-reads the prefix from text. The printer writes the canonical
+  > upper-case prefix back before the body. The numeric kinds (`H`, `O`) are
+  > `StringLiteral`s too, not `NumericLiteral`s: a grammar position that
+  > requires a `NumericLiteral` (an `OCCURS` count, say) refuses
+  > them with a positioned `UnexpectedTokenError`.
+  >
+  > **Consumers:** `copybook` interprets no literal's value. It hands a
+  > condition-name's values on as the parser built them, so a prefixed value
+  > arrives as one `StringLiteral` carrying its `Kind`, never as a word and the
+  > text between the quotes; it reads a numeric value only for an `OCCURS`
+  > count, which the parser has already restricted to a `NumericLiteral`.
+  > `codec` reads no literal at all. A COPY statement refuses a prefixed
+  > literal as a text-name or library-name with an `InvalidLiteralError`, since
+  > its body is not a name.
 
 **Numeric literal** (`NumericLiteral`)
 
@@ -345,8 +388,11 @@ format-independent alternative.
 - Precision/range per GnuCOBOL: roughly `−1.7×10^308 … +1.7×10^308`, up to ~15
   significant decimal digits in floating form; fixed-point integers up to 18
   (standard) or 31 (extended) digits.
-- Hex/binary/octal numeric variants (`H"…"`, `B"…"`, `O"…"`) exist as
-  extensions; treat as numeric literals.
+- Hex and octal numeric variants (`H"…"`, `O"…"`) exist as extensions. They
+  are read as prefixed literals (see above): one token, a `StringLiteral`
+  whose `Kind` is `LiteralHexadecimalNumeric` or `LiteralOctalNumeric`.
+  `B"…"` is the boolean literal, not a binary numeric one; see "Resolved (H
+  and B)" above.
 
 **Figurative constants** (reserved words that stand for a literal value;
 *GnuCOBOL §2.1.19.3*)

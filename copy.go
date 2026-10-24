@@ -385,7 +385,9 @@ func parseCopyName(c *copyParser, st *copyStatement) (copyAction, error) {
 	if err != nil {
 		return nil, err
 	}
-	st.Name = copyTextName(tok)
+	if st.Name, err = copyTextName(tok); err != nil {
+		return nil, err
+	}
 	return parseCopyLibrary, nil
 }
 
@@ -407,7 +409,9 @@ func parseCopyLibrary(c *copyParser, st *copyStatement) (copyAction, error) {
 	if err != nil {
 		return nil, err
 	}
-	st.Library = copyTextName(name)
+	if st.Library, err = copyTextName(name); err != nil {
+		return nil, err
+	}
 	return parseCopyReplacing, nil
 }
 
@@ -482,11 +486,25 @@ func parseCopyEnd(c *copyParser, _ *copyStatement) (copyAction, error) {
 // COBOL word as written, or the content of an alphanumeric literal with its
 // delimiters removed. The token's type is already one of [copyNameTokens], since
 // every caller reaches it through [copyParser.expect].
-func copyTextName(tok Token) string {
+//
+// A prefixed literal (X"…", N"…", …) names no copybook: its body is digits or
+// national characters, not a library name, and taking the text between its
+// quotes as one would look up a copybook the source never named. It is refused
+// with an [InvalidLiteralError] at its position.
+func copyTextName(tok Token) (string, error) {
 	if tok.Type == TokenString {
-		return trimLiteralDelimiters(string(tok.Value))
+		lit := stringLiteral(tok)
+		if lit.Kind != LiteralAlphanumeric {
+			return "", InvalidLiteralError{
+				Pos:     tok.Pos,
+				Kind:    lit.Kind,
+				Literal: string(tok.Value),
+				Reason:  "a copybook is named by a COBOL word or an alphanumeric literal",
+			}
+		}
+		return trimLiteralDelimiters(lit.Value), nil
 	}
-	return string(tok.Value)
+	return string(tok.Value), nil
 }
 
 // copyOperandText extracts the text a REPLACING operand contributes. A
@@ -739,6 +757,13 @@ func textWords(src string) []textWord {
 			start := i
 			i = endOfLiteralWord(src, i, r)
 			words = append(words, textWord{start: start, end: i, text: src[start:i]})
+		case isPrefixedLiteralStart(src, i):
+			// A literal prefix directly followed by a delimiter is one text word
+			// with the literal it opens, as it is one token: =='00'== must not
+			// match the body of X'00'.
+			start := i
+			i = endOfLiteralWord(src, i+size, rune(src[i+size]))
+			words = append(words, textWord{start: start, end: i, text: src[start:i]})
 		case isSeparatorTextWord(src, i, r):
 			words = append(words, textWord{start: i, end: i + size, text: src[i : i+size]})
 			i += size
@@ -820,12 +845,27 @@ func matchTextWords(words []textWord, i int, pattern []textWord) bool {
 // REPLACING.
 func textWordEqual(a, b string) bool {
 	if isLiteralWord(a) || isLiteralWord(b) {
+		// A prefix is case-insensitive, so x'00' and X'00' are one literal;
+		// the delimited body still compares exactly.
+		if isPrefixedLiteralStart(a, 0) && isPrefixedLiteralStart(b, 0) {
+			return strings.EqualFold(a[:1], b[:1]) && a[1:] == b[1:]
+		}
 		return a == b
 	}
 	return strings.EqualFold(a, b)
 }
 
-// isLiteralWord reports whether a text word is an alphanumeric literal.
+// isPrefixedLiteralStart reports whether src at offset i opens a prefixed
+// literal: a literal prefix letter directly followed by a delimiter, and not the
+// last letter of a longer word (the caller only asks at the start of a word).
+func isPrefixedLiteralStart(src string, i int) bool {
+	return i+1 < len(src) &&
+		literalKindOfPrefix(rune(src[i])) != LiteralAlphanumeric &&
+		(src[i+1] == '"' || src[i+1] == '\'')
+}
+
+// isLiteralWord reports whether a text word is an alphanumeric literal or a
+// prefixed one.
 func isLiteralWord(s string) bool {
-	return len(s) > 0 && (s[0] == '"' || s[0] == '\'')
+	return len(s) > 0 && (s[0] == '"' || s[0] == '\'' || isPrefixedLiteralStart(s, 0))
 }
