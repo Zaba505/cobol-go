@@ -2688,6 +2688,54 @@ func TestCheckEntries(t *testing.T) {
 				require.ErrorAs(t, err, &lvlErr)
 			},
 		},
+		{
+			name: "earlier changed entry is reported ahead of a later parse failure",
+			entries: func() []*DataDescriptionEntry {
+				return []*DataDescriptionEntry{
+					{Level: 1, Name: word("REC")},
+					{Level: 5, Name: word("SLOT"), Clauses: []DataClause{&PictureClause{Picture: "X(4) OCCURS 4"}}},
+					{Level: 5, Name: word("A"), Clauses: []DataClause{&PictureClause{Picture: "X"}}},
+					{Level: 50, Name: word("B"), Clauses: []DataClause{&PictureClause{Picture: "X"}}},
+				}
+			},
+			index:   1,
+			printed: "    05 SLOT PIC X(4) OCCURS 4.\n",
+			check: func(t *testing.T, err error) {
+				require.ErrorIs(t, err, ErrEntryChanged)
+			},
+		},
+		{
+			name: "entry swallowing its own period is charged, not the valid entry after it",
+			entries: func() []*DataDescriptionEntry {
+				return []*DataDescriptionEntry{
+					{Level: 1, Name: word("REC")},
+					{Pos: Pos{Line: 2, Column: 4}, Level: 5, Name: word("A"), Clauses: []DataClause{&PictureClause{Picture: "X *> note"}}},
+					{Pos: Pos{Line: 3, Column: 4}, Level: 5, Name: word("B"), Clauses: []DataClause{&PictureClause{Picture: "X"}}},
+				}
+			},
+			index:   1,
+			pos:     Pos{Line: 2, Column: 4},
+			printed: "    05 A PIC X *> note.\n",
+			check: func(t *testing.T, err error) {
+				var eotErr UnexpectedEndOfTokensError
+				require.ErrorAs(t, err, &eotErr)
+			},
+		},
+		{
+			name: "parse failure without a position is charged to the last entry",
+			entries: func() []*DataDescriptionEntry {
+				return []*DataDescriptionEntry{
+					{Level: 1, Name: word("REC")},
+					{Level: 5, Name: word("A"), Clauses: []DataClause{&PictureClause{Picture: "X *> note"}}},
+				}
+			},
+			index:   1,
+			printed: "    05 A PIC X *> note.\n",
+			check: func(t *testing.T, err error) {
+				var eotErr UnexpectedEndOfTokensError
+				require.ErrorAs(t, err, &eotErr)
+			},
+		},
 	}
 
 	for _, tc := range testCases {

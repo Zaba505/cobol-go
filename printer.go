@@ -3198,9 +3198,12 @@ func (e EntryCheckError) Error() string {
 //
 // The entries are checked together, as one copybook, because that is how Parse
 // reads them: a level-number hierarchy that does not hold is refused as Parse
-// would refuse it. A parse failure is charged to the entry whose printed text it
-// was reported in, or to the last entry when it carries no position. A nil or
-// empty slice passes. CheckEntries does not modify entries.
+// would refuse it. The entry reported is the first one whose failure does not
+// depend on the entries after it: every entry before it passes the check on its
+// own as a copybook, so a parse error Parse reports only at a later entry — after
+// an entry whose text swallowed its own separator period, say — is still charged
+// to the entry that caused it. A nil or empty slice passes. CheckEntries does
+// not modify entries.
 func CheckEntries(entries []*DataDescriptionEntry) error {
 	if len(entries) == 0 {
 		return nil
@@ -3226,6 +3229,13 @@ func CheckEntries(entries []*DataDescriptionEntry) error {
 		var p Positioned
 		if errors.As(err, &p) {
 			i = blockAtLine(blocks, p.Position().Line)
+		}
+		// A parse error can surface after the entry that caused it — an entry
+		// whose text swallows its own separator period is reported at the next
+		// entry's level number — and an earlier entry may re-read as a different
+		// one. Either way the entries before i hold the failure to report.
+		if prefixErr := CheckEntries(entries[:i]); prefixErr != nil {
+			return prefixErr
 		}
 		return entryCheckError(entries, blocks, i, err)
 	}
