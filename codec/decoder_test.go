@@ -5360,3 +5360,617 @@ func TestResetStreamKeepsWhatTheEncodingDerived(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 5678, n)
 }
+
+// byteSpan returns the byte values lo through hi inclusive, ascending.
+func byteSpan(lo, hi byte) []byte {
+	var s []byte
+	for b := int(lo); b <= int(hi); b++ {
+		s = append(s, byte(b))
+	}
+	return s
+}
+
+// byteSet returns the union of sets, ascending and free of duplicates, which is
+// the form every non-nil position of a [Domain] takes.
+func byteSet(sets ...[]byte) []byte {
+	var s []byte
+	for _, set := range sets {
+		s = append(s, set...)
+	}
+	slices.Sort(s)
+	return slices.Compact(s)
+}
+
+// nibblePairs returns every byte whose high nibble is one of hi and whose low
+// nibble is one of lo, ascending.
+func nibblePairs(hi, lo []byte) []byte {
+	var s []byte
+	for _, h := range hi {
+		for _, l := range lo {
+			s = append(s, h<<4|l)
+		}
+	}
+	return byteSet(s)
+}
+
+var (
+	// domainDigitNibbles and domainSignNibbles are the nibbles a packed digit
+	// position and a COMP-3 sign position admit.
+	domainDigitNibbles = byteSpan(0x0, 0x9)
+	domainSignNibbles  = byteSpan(0xA, 0xF)
+	// domainBCD is a byte holding two digit nibbles, domainPadDigit one
+	// holding a zero pad and a digit, and domainDigitSign one holding a digit
+	// and a COMP-3 sign.
+	domainBCD       = nibblePairs(domainDigitNibbles, domainDigitNibbles)
+	domainPadDigit  = byteSpan(0x00, 0x09)
+	domainDigitSign = nibblePairs(domainDigitNibbles, domainSignNibbles)
+)
+
+// domainEncodings is every sign convention and every kind of charset a zoned
+// domain can be derived under: the four bundles, Realia, which no bundle
+// carries, and a caller's own charset whose digits sit where no code page puts
+// them.
+func domainEncodings() []struct {
+	name string
+	enc  Encoding
+} {
+	realia := MicroFocusASCII()
+	realia.Sign = SignRealia
+	oddball := MicroFocusASCII()
+	oddball.Charset = oddballCharset{}
+	return []struct {
+		name string
+		enc  Encoding
+	}{
+		{name: "ibm enterprise", enc: IBMEnterprise()},
+		{name: "micro focus ascii", enc: MicroFocusASCII()},
+		{name: "gnucobol ascii", enc: GnuCOBOLASCII()},
+		{name: "converted from ebcdic", enc: ConvertedFromEBCDIC()},
+		{name: "realia", enc: realia},
+		{name: "a caller's own charset", enc: oddball},
+	}
+}
+
+// domainSignPositions is every valid [SignPosition].
+var domainSignPositions = []SignPosition{
+	SignUnsigned, SignTrailing, SignLeading, SignTrailingSeparate, SignLeadingSeparate,
+}
+
+func TestZonedDomain(t *testing.T) {
+	t.Parallel()
+
+	realia := MicroFocusASCII()
+	realia.Sign = SignRealia
+	oddball := MicroFocusASCII()
+	oddball.Charset = oddballCharset{}
+
+	ebcdicDigits := byteSpan(0xF0, 0xF9)
+	asciiDigits := byteSpan(0x30, 0x39)
+
+	testCases := []struct {
+		name   string
+		enc    Encoding
+		digits int
+		sign   SignPosition
+		want   Domain
+	}{
+		{
+			name:   "unsigned ebcdic is the charset's digits throughout",
+			enc:    IBMEnterprise(),
+			digits: 3,
+			sign:   SignUnsigned,
+			want:   Domain{ebcdicDigits, ebcdicDigits, ebcdicDigits},
+		},
+		{
+			name:   "unsigned ascii is the charset's digits throughout",
+			enc:    MicroFocusASCII(),
+			digits: 2,
+			sign:   SignUnsigned,
+			want:   Domain{asciiDigits, asciiDigits},
+		},
+		{
+			name:   "an ebcdic trailing overpunch admits every zone a reader accepts",
+			enc:    IBMEnterprise(),
+			digits: 2,
+			sign:   SignTrailing,
+			want: Domain{
+				ebcdicDigits,
+				// A, C, E and F read positive, B and D negative.
+				byteSet(byteSpan(0xA0, 0xA9), byteSpan(0xB0, 0xB9), byteSpan(0xC0, 0xC9),
+					byteSpan(0xD0, 0xD9), byteSpan(0xE0, 0xE9), byteSpan(0xF0, 0xF9)),
+			},
+		},
+		{
+			name:   "an ascii zone 3-7 leading overpunch",
+			enc:    MicroFocusASCII(),
+			digits: 2,
+			sign:   SignLeading,
+			want:   Domain{byteSet(byteSpan(0x30, 0x39), byteSpan(0x70, 0x79)), asciiDigits},
+		},
+		{
+			name:   "a translated ebcdic overpunch",
+			enc:    ConvertedFromEBCDIC(),
+			digits: 1,
+			sign:   SignTrailing,
+			want: Domain{
+				byteSet(asciiDigits, []byte{0x7B, 0x7D}, byteSpan(0x41, 0x49), byteSpan(0x4A, 0x52)),
+			},
+		},
+		{
+			name:   "a realia overpunch, whose negative zero is a space",
+			enc:    realia,
+			digits: 1,
+			sign:   SignTrailing,
+			want:   Domain{byteSet(byteSpan(0x20, 0x29), asciiDigits)},
+		},
+		{
+			name:   "an ebcdic trailing separate sign takes a byte of its own",
+			enc:    IBMEnterprise(),
+			digits: 2,
+			sign:   SignTrailingSeparate,
+			want:   Domain{ebcdicDigits, ebcdicDigits, {0x4E, 0x60}},
+		},
+		{
+			name:   "an ascii leading separate sign takes a byte of its own",
+			enc:    MicroFocusASCII(),
+			digits: 1,
+			sign:   SignLeadingSeparate,
+			want:   Domain{{0x2B, 0x2D}, asciiDigits},
+		},
+		{
+			name:   "a caller's own charset supplies the digits and the separate sign",
+			enc:    oddball,
+			digits: 2,
+			sign:   SignLeadingSeparate,
+			want:   Domain{{0x01, 0x02}, byteSpan(0xB0, 0xB9), byteSpan(0xB0, 0xB9)},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := ZonedDomain(tc.enc, tc.digits, tc.sign)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestZonedDomainErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an unset sign position", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := ZonedDomain(IBMEnterprise(), 3, SignPositionUnset)
+		var target SignPositionError
+		require.ErrorAs(t, err, &target)
+		require.Equal(t, SignPositionUnset, target.SignPosition)
+	})
+
+	for _, digits := range []int{0, maxZonedDigits + 1} {
+		t.Run("digit count "+strconv.Itoa(digits), func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ZonedDomain(IBMEnterprise(), digits, SignTrailing)
+			var target ZonedDigitCountError
+			require.ErrorAs(t, err, &target)
+			require.Equal(t, ZonedDigitCountError{Digits: digits, Max: maxZonedDigits}, target)
+		})
+	}
+
+	t.Run("an encoding missing an axis", func(t *testing.T) {
+		t.Parallel()
+
+		enc := IBMEnterprise()
+		enc.Float = FloatUnset
+		_, err := ZonedDomain(enc, 3, SignTrailing)
+		var target EncodingError
+		require.ErrorAs(t, err, &target)
+		require.Equal(t, "Float", target.Field)
+	})
+}
+
+func TestPackedDomain(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		digits int
+		want   Domain
+	}{
+		{name: "one digit is a digit and the sign", digits: 1, want: Domain{domainDigitSign}},
+		{name: "an even count opens with a zero pad", digits: 2, want: Domain{domainPadDigit, domainDigitSign}},
+		{name: "an odd count has no pad", digits: 3, want: Domain{domainBCD, domainDigitSign}},
+		{name: "four digits", digits: 4, want: Domain{domainPadDigit, domainBCD, domainDigitSign}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := PackedDomain(tc.digits)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+
+	for _, digits := range []int{0, maxPackedDigits + 1} {
+		t.Run("digit count "+strconv.Itoa(digits), func(t *testing.T) {
+			t.Parallel()
+
+			_, err := PackedDomain(digits)
+			var target PackedDigitCountError
+			require.ErrorAs(t, err, &target)
+			require.Equal(t, PackedDigitCountError{Digits: digits, Max: maxPackedDigits}, target)
+		})
+	}
+}
+
+func TestComp6Domain(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		digits int
+		want   Domain
+	}{
+		{name: "one digit is a zero pad and a digit", digits: 1, want: Domain{domainPadDigit}},
+		{name: "an even count has no pad", digits: 2, want: Domain{domainBCD}},
+		{name: "an odd count opens with a zero pad", digits: 3, want: Domain{domainPadDigit, domainBCD}},
+		{name: "four digits", digits: 4, want: Domain{domainBCD, domainBCD}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := Comp6Domain(tc.digits)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+
+	for _, digits := range []int{0, maxPackedDigits + 1} {
+		t.Run("digit count "+strconv.Itoa(digits), func(t *testing.T) {
+			t.Parallel()
+
+			_, err := Comp6Domain(digits)
+			var target PackedDigitCountError
+			require.ErrorAs(t, err, &target)
+			require.Equal(t, PackedDigitCountError{Digits: digits, Max: maxPackedDigits}, target)
+		})
+	}
+}
+
+func TestEveryByteDomains(t *testing.T) {
+	t.Parallel()
+
+	binary := func(enc Encoding, digits int) func() (Domain, error) {
+		return func() (Domain, error) { return BinaryDomain(enc, digits) }
+	}
+
+	testCases := []struct {
+		name  string
+		build func() (Domain, error)
+		width int
+	}{
+		{name: "binary under 2-4-8, four digits", build: binary(IBMEnterprise(), 4), width: 2},
+		{name: "binary under 2-4-8, five digits", build: binary(IBMEnterprise(), 5), width: 4},
+		{name: "binary under 2-4-8, eighteen digits", build: binary(IBMEnterprise(), 18), width: 8},
+		{name: "binary under 1-2-4-8, two digits", build: binary(GnuCOBOLASCII(), 2), width: 1},
+		{
+			name:  "alphanumeric",
+			build: func() (Domain, error) { return AlphanumericDomain(5) },
+			width: 5,
+		},
+		{
+			name:  "zero-width alphanumeric",
+			build: func() (Domain, error) { return AlphanumericDomain(0) },
+			width: 0,
+		},
+		{name: "comp-1", build: func() (Domain, error) { return Float32Domain(), nil }, width: 4},
+		{name: "comp-2", build: func() (Domain, error) { return Float64Domain(), nil }, width: 8},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := tc.build()
+			require.NoError(t, err)
+			require.Equal(t, make(Domain, tc.width), got)
+			for i := range got {
+				for b := range 256 {
+					require.True(t, got.Admits(i, byte(b)), "position %d, byte %02X", i, b)
+				}
+			}
+		})
+	}
+
+	t.Run("binary digit count out of range", func(t *testing.T) {
+		t.Parallel()
+
+		for _, digits := range []int{0, maxBinaryDigits + 1} {
+			_, err := BinaryDomain(IBMEnterprise(), digits)
+			var target BinaryDigitCountError
+			require.ErrorAs(t, err, &target)
+			require.Equal(t, BinaryDigitCountError{Digits: digits, Max: maxBinaryDigits}, target)
+		}
+	})
+
+	t.Run("binary under an encoding missing its width staircase", func(t *testing.T) {
+		t.Parallel()
+
+		enc := IBMEnterprise()
+		enc.Binary = BinarySizeUnset
+		_, err := BinaryDomain(enc, 4)
+		var target EncodingError
+		require.ErrorAs(t, err, &target)
+		require.Equal(t, "Binary", target.Field)
+	})
+
+	t.Run("negative alphanumeric width", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := AlphanumericDomain(-1)
+		var target FieldWidthError
+		require.ErrorAs(t, err, &target)
+		require.Equal(t, -1, target.Width)
+	})
+}
+
+func TestDomainAdmits(t *testing.T) {
+	t.Parallel()
+
+	d := Domain{{0x30, 0x31}, nil}
+
+	testCases := []struct {
+		name string
+		i    int
+		b    byte
+		want bool
+	}{
+		{name: "a byte in the set", i: 0, b: 0x31, want: true},
+		{name: "a byte outside the set", i: 0, b: 0x32, want: false},
+		{name: "a nil position admits every byte", i: 1, b: 0xFF, want: true},
+		{name: "a position past the end admits nothing", i: 2, b: 0x30, want: false},
+		{name: "a negative position admits nothing", i: -1, b: 0x30, want: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tc.want, d.Admits(tc.i, tc.b))
+		})
+	}
+}
+
+// TestDomainPositionsShareNoStorage pins that a caller editing one position's
+// set cannot reach another's, even where the two hold the same bytes.
+func TestDomainPositionsShareNoStorage(t *testing.T) {
+	t.Parallel()
+
+	d, err := ZonedDomain(IBMEnterprise(), 3, SignUnsigned)
+	require.NoError(t, err)
+	d[0][0] = 0x00
+	require.Equal(t, byte(0xF0), d[1][0])
+	require.Equal(t, byte(0xF0), d[2][0])
+}
+
+// domainWriter returns a byte-backed Writer under enc, failing the test on a
+// construction error.
+func domainWriter(t *testing.T, enc Encoding) *Writer {
+	t.Helper()
+	w, err := NewBytesWriter(nil, enc)
+	require.NoError(t, err)
+	return w
+}
+
+// requireAdmitted fails unless field is exactly as wide as d and every byte of
+// it is admitted at its own position.
+func requireAdmitted(t *testing.T, d Domain, field []byte, value any) {
+	t.Helper()
+	require.Len(t, field, len(d), "value %v", value)
+	for i, b := range field {
+		if !d.Admits(i, b) {
+			require.Failf(t, "byte outside its domain", "value %v wrote %X; byte %02X at position %d is not in %X",
+				value, field, b, i, d[i])
+		}
+	}
+}
+
+// TestDomainAdmitsEveryByteTheWriterWrites encodes every value of every shape
+// it names and requires each byte written to be admitted at its position: a
+// domain that missed a byte the writer emits would let a caller prove two
+// records exclusive when one well-formed record could be both.
+func TestDomainAdmitsEveryByteTheWriterWrites(t *testing.T) {
+	t.Parallel()
+
+	for _, ec := range domainEncodings() {
+		for _, s := range domainSignPositions {
+			for digits := 1; digits <= 3; digits++ {
+				t.Run("zoned/"+ec.name+"/"+s.String()+"/"+strconv.Itoa(digits), func(t *testing.T) {
+					t.Parallel()
+
+					d, err := ZonedDomain(ec.enc, digits, s)
+					require.NoError(t, err)
+					limit := int32(pow10[digits] - 1)
+					low := -limit
+					if s == SignUnsigned {
+						low = 0
+					}
+					w := domainWriter(t, ec.enc)
+					for v := low; v <= limit; v++ {
+						w.Reset(nil)
+						require.NoError(t, w.WriteZonedInt32(v, digits, s))
+						requireAdmitted(t, d, w.Bytes(), v)
+					}
+				})
+			}
+		}
+	}
+
+	for _, sn := range []Signedness{Signed, Unsigned} {
+		for digits := 1; digits <= 4; digits++ {
+			t.Run("packed/"+sn.String()+"/"+strconv.Itoa(digits), func(t *testing.T) {
+				t.Parallel()
+
+				d, err := PackedDomain(digits)
+				require.NoError(t, err)
+				limit := int32(pow10[digits] - 1)
+				low := -limit
+				if sn == Unsigned {
+					low = 0
+				}
+				w := domainWriter(t, IBMEnterprise())
+				for v := low; v <= limit; v++ {
+					w.Reset(nil)
+					require.NoError(t, w.WritePackedInt32(v, digits, sn))
+					requireAdmitted(t, d, w.Bytes(), v)
+				}
+			})
+		}
+	}
+
+	for digits := 1; digits <= 4; digits++ {
+		t.Run("comp-6/"+strconv.Itoa(digits), func(t *testing.T) {
+			t.Parallel()
+
+			d, err := Comp6Domain(digits)
+			require.NoError(t, err)
+			w := domainWriter(t, GnuCOBOLASCII())
+			for v := int32(0); v <= int32(pow10[digits]-1); v++ {
+				w.Reset(nil)
+				require.NoError(t, w.WriteComp6Int32(v, digits))
+				requireAdmitted(t, d, w.Bytes(), v)
+			}
+		})
+	}
+
+	// A binary or floating point domain admits every byte, so what the writer
+	// can contradict is its width.
+	for _, ec := range domainEncodings() {
+		t.Run("binary/"+ec.name, func(t *testing.T) {
+			t.Parallel()
+
+			w := domainWriter(t, ec.enc)
+			for digits := 1; digits <= maxBinaryInt64Digits; digits++ {
+				d, err := BinaryDomain(ec.enc, digits)
+				require.NoError(t, err)
+				limit := int64(pow10[digits] - 1)
+				for _, v := range []int64{-limit, -1, 0, 1, limit} {
+					w.Reset(nil)
+					require.NoError(t, w.WriteBinaryInt64(v, digits, Signed))
+					requireAdmitted(t, d, w.Bytes(), v)
+					w.Reset(nil)
+					require.NoError(t, w.WriteComp5Int64(v, digits, Signed))
+					requireAdmitted(t, d, w.Bytes(), v)
+				}
+			}
+		})
+
+		t.Run("floating point/"+ec.name, func(t *testing.T) {
+			t.Parallel()
+
+			w := domainWriter(t, ec.enc)
+			for _, v := range []float64{0, 1, -1, 0.5, 1e10} {
+				w.Reset(nil)
+				require.NoError(t, w.WriteFloat32(float32(v)))
+				requireAdmitted(t, Float32Domain(), w.Bytes(), v)
+				w.Reset(nil)
+				require.NoError(t, w.WriteFloat64(v))
+				requireAdmitted(t, Float64Domain(), w.Bytes(), v)
+			}
+		})
+
+		t.Run("alphanumeric/"+ec.name, func(t *testing.T) {
+			t.Parallel()
+
+			d, err := AlphanumericDomain(6)
+			require.NoError(t, err)
+			w := domainWriter(t, ec.enc)
+			// Digits are the one text every charset in the suite spells.
+			require.NoError(t, w.WriteAlphanumeric("1234", 6))
+			requireAdmitted(t, d, w.Bytes(), "1234")
+		})
+	}
+}
+
+// TestDomainIsExactlyWhatTheReaderAccepts holds each numeric domain to the
+// reader from the other side: starting from a field the writer produced, every
+// byte value is put at every position in turn, and the reader must accept the
+// result exactly when the domain admits that byte there. Together with the
+// readers checking each byte of a field independently, that makes the domain
+// the reader's rule rather than an approximation of it — a byte the reader
+// rejects is not admitted, and one it accepts is.
+func TestDomainIsExactlyWhatTheReaderAccepts(t *testing.T) {
+	t.Parallel()
+
+	// exact checks d against read, perturbing one byte of base at a time.
+	exact := func(t *testing.T, d Domain, base []byte, enc Encoding, read func(r *Reader) error) {
+		t.Helper()
+		require.Len(t, base, len(d))
+		field := make([]byte, len(base))
+		for i := range base {
+			for b := range 256 {
+				copy(field, base)
+				field[i] = byte(b)
+				r, err := NewBytesReader(field, enc)
+				require.NoError(t, err)
+				err = read(r)
+				require.Equal(t, d.Admits(i, byte(b)), err == nil,
+					"position %d of %X, byte %02X: reader said %v", i, field, b, err)
+			}
+		}
+	}
+
+	for _, ec := range domainEncodings() {
+		for _, s := range domainSignPositions {
+			for digits := 1; digits <= 3; digits++ {
+				t.Run("zoned/"+ec.name+"/"+s.String()+"/"+strconv.Itoa(digits), func(t *testing.T) {
+					t.Parallel()
+
+					d, err := ZonedDomain(ec.enc, digits, s)
+					require.NoError(t, err)
+					w := domainWriter(t, ec.enc)
+					require.NoError(t, w.WriteZonedInt32(0, digits, s))
+					exact(t, d, w.Bytes(), ec.enc, func(r *Reader) error {
+						_, err := r.ReadZonedInt32(digits, s)
+						return err
+					})
+				})
+			}
+		}
+	}
+
+	for digits := 1; digits <= 5; digits++ {
+		t.Run("packed/"+strconv.Itoa(digits), func(t *testing.T) {
+			t.Parallel()
+
+			d, err := PackedDomain(digits)
+			require.NoError(t, err)
+			w := domainWriter(t, IBMEnterprise())
+			require.NoError(t, w.WritePackedInt32(0, digits, Signed))
+			exact(t, d, w.Bytes(), IBMEnterprise(), func(r *Reader) error {
+				_, err := r.ReadPackedInt32(digits)
+				return err
+			})
+		})
+
+		t.Run("comp-6/"+strconv.Itoa(digits), func(t *testing.T) {
+			t.Parallel()
+
+			d, err := Comp6Domain(digits)
+			require.NoError(t, err)
+			w := domainWriter(t, GnuCOBOLASCII())
+			require.NoError(t, w.WriteComp6Int32(0, digits))
+			exact(t, d, w.Bytes(), GnuCOBOLASCII(), func(r *Reader) error {
+				_, err := r.ReadComp6Int32(digits)
+				return err
+			})
+		})
+	}
+}

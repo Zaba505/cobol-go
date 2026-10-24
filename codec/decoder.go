@@ -893,7 +893,7 @@ func (r *Reader) readPackedField(digits, max int) (b []byte, first int, negative
 	// digits+1 nibbles is then odd and rounds up to a whole byte. It is
 	// nibble zero, the high nibble of the first byte.
 	if digits%2 == 0 {
-		if pad := nibbleOf(b, 0); pad != 0 {
+		if pad := nibbleOf(b, 0); !packedPadValid(pad) {
 			return nil, 0, false, &OffsetError{
 				Offset: nibbleAt(0),
 				Err:    PackedPadError{Nibble: pad},
@@ -905,7 +905,7 @@ func (r *Reader) readPackedField(digits, max int) (b []byte, first int, negative
 	sign := 2*len(b) - 1
 	first = sign - digits
 	for i := 0; i < digits; i++ {
-		if d := nibbleOf(b, first+i); d > 9 {
+		if d := nibbleOf(b, first+i); !packedDigitValid(d) {
 			return nil, 0, false, &OffsetError{
 				Offset: nibbleAt(first + i),
 				Err:    PackedDigitError{Nibble: d},
@@ -1041,7 +1041,7 @@ func (r *Reader) readComp6Field(digits, max int) (b []byte, first int, err error
 	// up, so an odd digit count is what leaves half a byte over. It is the
 	// high nibble of the first byte, as COMP-3's is.
 	if digits%2 == 1 {
-		if pad := nibbleOf(b, 0); pad != 0 {
+		if pad := nibbleOf(b, 0); !packedPadValid(pad) {
 			return nil, 0, &OffsetError{
 				Offset: nibbleAt(0),
 				Err:    PackedPadError{Nibble: pad},
@@ -1052,7 +1052,7 @@ func (r *Reader) readComp6Field(digits, max int) (b []byte, first int, err error
 	// field inclusive.
 	first = 2*len(b) - digits
 	for i := 0; i < digits; i++ {
-		if d := nibbleOf(b, first+i); d > 9 {
+		if d := nibbleOf(b, first+i); !packedDigitValid(d) {
 			return nil, 0, &OffsetError{
 				Offset: nibbleAt(first + i),
 				Err:    PackedDigitError{Nibble: d},
@@ -1442,4 +1442,202 @@ func Unmarshal(enc Encoding, data []byte, v Unmarshaler) error {
 		return ErrNilValue
 	}
 	return v.UnmarshalCOBOL(r)
+}
+
+// ZonedDomain reports the [Domain] of a zoned decimal (USAGE DISPLAY) item of
+// digits digits under sign position s, read under enc: the bytes
+// [Reader.ReadZonedInt32] and its family accept at each of the item's
+// zonedWidth(digits, s) positions.
+//
+// Every plain digit position admits the bytes enc.Charset gives '0'-'9'. The
+// overpunched position of a [SignTrailing] or [SignLeading] item admits every
+// byte enc.Sign reads — positive, negative and the unsigned zone, and under
+// [SignEBCDIC] the lenient A, B and E zones too. The extra byte of a
+// [SignTrailingSeparate] or [SignLeadingSeparate] item admits the charset's '+'
+// and '-'. The positions are independent: a field decodes exactly when each of
+// its bytes is admitted at its own position.
+//
+// Every set is read off the tables the decoder rejects bytes with, so the two
+// cannot disagree. enc is validated as a constructor validates it, and its
+// Float, ByteOrder and Binary axes are required although a zoned item consults
+// none of them — a half-declared [Encoding] is not one a caller should be able
+// to reason about bytes under. digits must be between 1 and 31, the widest
+// item [Reader.ReadZonedBig] reads; anything else is a [ZonedDigitCountError],
+// and an unset or unknown s is a [SignPositionError].
+func ZonedDomain(enc Encoding, digits int, s SignPosition) (Domain, error) {
+	if !s.valid() {
+		return nil, SignPositionError{SignPosition: s}
+	}
+	if digits < 1 || digits > maxZonedDigits {
+		return nil, ZonedDigitCountError{Digits: digits, Max: maxZonedDigits}
+	}
+	c, err := newZonedCodec(enc)
+	if err != nil {
+		return nil, err
+	}
+	plain := func(b byte) bool { return c.bytes.digitOf[b] != noZonedDigit }
+	overpunch := func(b byte) bool { return zonedSignReadings[c.sign][b] != noZonedSignReading }
+	separate := func(b byte) bool {
+		_, err := c.bytes.separateSignValue(b)
+		return err == nil
+	}
+
+	d := make(Domain, zonedWidth(digits, s))
+	first := 0
+	switch s {
+	case SignLeadingSeparate:
+		first = 1
+		d[0] = admittedBytes(separate)
+	case SignTrailingSeparate:
+		d[digits] = admittedBytes(separate)
+	}
+	at := s.overpunchAt(digits)
+	for i := range digits {
+		if i == at {
+			d[first+i] = admittedBytes(overpunch)
+		} else {
+			d[first+i] = admittedBytes(plain)
+		}
+	}
+	return d, nil
+}
+
+// PackedDomain reports the [Domain] of a packed decimal (COMP-3,
+// PACKED-DECIMAL) item of digits digits: the bytes [Reader.ReadPackedInt32] and
+// its family accept at each of its ceil((digits+1)/2) positions.
+//
+// A digit nibble admits 0-9, the sign nibble — the low nibble of the last byte
+// — admits A-F, and at an even digit count the pad nibble that opens the field
+// admits only 0. Each byte's set is every pairing of what its two nibbles
+// admit, so a byte holding a digit and the sign is the sixty bytes 0A-9F whose
+// low nibble is A-F.
+//
+// It takes no [Signedness] because the reader consults none: a sign nibble of
+// C or D in an item whose PICTURE has no S is read, not rejected, and a domain
+// that narrowed it would claim a well-formed record cannot hold what the reader
+// accepts from one. Nor does it take an [Encoding] — packed decimal is
+// charset-invariant. digits must be between 1 and 31, the widest item
+// [Reader.ReadPackedBig] reads; anything else is a [PackedDigitCountError].
+func PackedDomain(digits int) (Domain, error) {
+	if digits < 1 || digits > maxPackedDigits {
+		return nil, PackedDigitCountError{Digits: digits, Max: maxPackedDigits}
+	}
+	width := packedWidth(digits)
+	sign := 2*width - 1
+	first := sign - digits
+	return nibbleDomain(width, func(i int) func(byte) bool {
+		switch {
+		case i < first:
+			return packedPadValid
+		case i < sign:
+			return packedDigitValid
+		}
+		return func(n byte) bool {
+			_, err := packedSignIsNegative(n)
+			return err == nil
+		}
+	}), nil
+}
+
+// Comp6Domain reports the [Domain] of a COMP-6 item of digits digits: the bytes
+// [Reader.ReadComp6Int32] and its family accept at each of its ceil(digits/2)
+// positions.
+//
+// Every nibble is a digit and admits 0-9, except the pad nibble that opens the
+// field at an odd digit count, which admits only 0 — the opposite parity from
+// [PackedDomain], for the reason the widths differ. No position admits a byte
+// with a nibble of A-F. digits must be between 1 and 31; anything else is a
+// [PackedDigitCountError], as it is from the readers.
+func Comp6Domain(digits int) (Domain, error) {
+	if digits < 1 || digits > maxPackedDigits {
+		return nil, PackedDigitCountError{Digits: digits, Max: maxPackedDigits}
+	}
+	width := comp6Width(digits)
+	first := 2*width - digits
+	return nibbleDomain(width, func(i int) func(byte) bool {
+		if i < first {
+			return packedPadValid
+		}
+		return packedDigitValid
+	}), nil
+}
+
+// BinaryDomain reports the [Domain] of a binary (COMP, COMP-4, BINARY, COMP-5)
+// item of digits digits under enc: as many positions as enc.Binary gives that
+// digit count, every one of them nil, because a binary item is a bit pattern
+// and any byte value may appear at any of its positions.
+//
+// That is exact for COMP-5 and for TRUNC(BIN), which admit every pattern the
+// storage holds. Under TRUNC(STD) — [Reader.ReadBinaryInt16] and its family —
+// the PICTURE's decimal range rules some fields out, but that range is a
+// constraint on the whole field rather than on any one of its positions, and a
+// per-position domain does not express it: what is reported is then a
+// superset of what a well-formed record holds, never a subset.
+//
+// enc is validated in full and supplies the width. digits must be between 1
+// and 31; anything else is a [BinaryDigitCountError].
+func BinaryDomain(enc Encoding, digits int) (Domain, error) {
+	if err := enc.Validate(); err != nil {
+		return nil, err
+	}
+	if digits < 1 || digits > maxBinaryDigits {
+		return nil, BinaryDigitCountError{Digits: digits, Max: maxBinaryDigits}
+	}
+	return make(Domain, enc.Binary.width(digits)), nil
+}
+
+// AlphanumericDomain reports the [Domain] of an alphanumeric item n bytes wide
+// — PIC X(n), PIC A(n), a group read whole, or anything read with
+// [Reader.ReadBytes]: n positions, every one of them nil. Any byte value may
+// appear in an alphanumeric field, including bytes with no character in the
+// declared charset, which is why alphanumeric decoding never fails; see
+// codec/SPEC.md, "Alphanumeric and Alphabetic Items".
+//
+// It takes no [Encoding] because no axis narrows it. A negative n is a
+// [FieldWidthError], as it is from the readers.
+func AlphanumericDomain(n int) (Domain, error) {
+	if n < 0 {
+		return nil, FieldWidthError{Width: n}
+	}
+	return make(Domain, n), nil
+}
+
+// Float32Domain reports the [Domain] of a COMP-1 item: four positions, every
+// one of them nil, since every bit pattern is a value under both IEEE and HFP —
+// which is precisely why [Encoding.Float] cannot be detected from the bytes.
+//
+// A COMP-1 whose HFP value no float32 expresses is a [FloatRangeError] from
+// [Reader.ReadFloat32], but that too is a fact about the whole field and not
+// about any one position, so as with [BinaryDomain] under TRUNC(STD) the
+// domain is a superset there.
+func Float32Domain() Domain { return make(Domain, comp1Width) }
+
+// Float64Domain reports the [Domain] of a COMP-2 item: eight positions, every
+// one of them nil, for the reason [Float32Domain] gives.
+func Float64Domain() Domain { return make(Domain, comp2Width) }
+
+// admittedBytes returns, in ascending order, every byte value admit accepts.
+// Each call allocates its own slice, so no two positions of a [Domain] share a
+// backing array and a caller editing one set cannot edit another.
+func admittedBytes(admit func(byte) bool) []byte {
+	var set []byte
+	for b := range 256 {
+		if admit(byte(b)) {
+			set = append(set, byte(b))
+		}
+	}
+	return set
+}
+
+// nibbleDomain builds the [Domain] of a field width bytes wide whose nibble i,
+// counted as [nibbleOf] counts it, admits what roleOf(i) accepts: a byte is
+// admitted at its position exactly when its high nibble satisfies the rule for
+// nibble 2j and its low nibble the rule for nibble 2j+1.
+func nibbleDomain(width int, roleOf func(i int) func(byte) bool) Domain {
+	d := make(Domain, width)
+	for j := range d {
+		hi, lo := roleOf(2*j), roleOf(2*j+1)
+		d[j] = admittedBytes(func(b byte) bool { return hi(b>>4) && lo(b&0x0F) })
+	}
+	return d
 }

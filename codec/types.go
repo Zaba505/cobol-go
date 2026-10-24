@@ -1505,6 +1505,19 @@ func packedSignIsNegative(nibble byte) (bool, error) {
 	return false, PackedSignError{Nibble: nibble}
 }
 
+// packedDigitValid reports whether a nibble in a digit position of a COMP-3 or
+// COMP-6 field is a digit. A-F never is, which is what makes a COMP-3 sign
+// nibble landing where a COMP-6 digit belongs loud.
+//
+// It and [packedPadValid] are predicates rather than inline comparisons so that
+// [PackedDomain] and [Comp6Domain] state the same rule the readers enforce,
+// rather than a copy of it.
+func packedDigitValid(nibble byte) bool { return nibble <= 9 }
+
+// packedPadValid reports whether a pad nibble — the high nibble of the first
+// byte, where the digit count leaves half a byte over — is the zero it must be.
+func packedPadValid(nibble byte) bool { return nibble == 0 }
+
 // Truncation is the range semantics of a binary (COMP, COMP-4, BINARY,
 // COMP-5) item: what the digit count in its PICTURE says about the values the
 // item may hold.
@@ -1845,6 +1858,45 @@ func hfpFromFloat(v float64, width int) (uint64, error) {
 		raw |= 1 << (fracBits + 7)
 	}
 	return raw, nil
+}
+
+// Domain is the byte values each position of one item may hold in a
+// well-formed record: Domain[i] is the set position i admits, sorted ascending
+// and free of duplicates, and a nil Domain[i] means every byte value may appear
+// there. Its length is always the item's width in bytes.
+//
+// A domain is the [Reader]'s, not the [Writer]'s. It is derived from the very
+// tables and predicates the decoder rejects bytes with, so it admits every byte
+// a reader accepts — the lenient EBCDIC zones, the A, B, E and F packed sign
+// nibbles, an unsigned zone in a signed item's sign position — including the
+// ones this package never writes, because a well-formed record from another
+// writer may hold them. What the [Writer] emits is a subset of it.
+//
+// It is a claim about well-formed records and not a validation of bytes in
+// hand. A record whose bytes all sit inside their domains can still be the
+// wrong record, read at slipped offsets or under the wrong copybook, and a byte
+// outside one is a decoding error the [Reader] reports with its offset — read
+// the record to validate it. What a domain is for is reasoning about an item's
+// bytes without a record at all: that a byte asked for by one record's
+// discriminator can never appear where another record keeps a PIC 9(5) item,
+// say. See codec/SPEC.md, "Byte Domains".
+//
+// [ZonedDomain], [PackedDomain], [Comp6Domain], [BinaryDomain],
+// [AlphanumericDomain], [Float32Domain] and [Float64Domain] build one.
+type Domain [][]byte
+
+// Admits reports whether byte value b may appear at position i. A position the
+// item does not have admits nothing, so an out-of-range i is false rather than
+// a panic.
+func (d Domain) Admits(i int, b byte) bool {
+	if i < 0 || i >= len(d) {
+		return false
+	}
+	if d[i] == nil {
+		return true
+	}
+	_, found := slices.BinarySearch(d[i], b)
+	return found
 }
 
 // Marshaler is implemented by a value that can write itself to a data file.

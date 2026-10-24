@@ -205,6 +205,18 @@
 // float32 expresses, is a [FloatRangeError] rather than an infinity or a zero
 // that would read back as an ordinary number.
 //
+// # Byte domains: what an item's bytes can be, without a record
+//
+// The rules a [Reader] rejects bytes by also say which byte values each
+// position of an item may hold in a well-formed record. [ZonedDomain],
+// [PackedDomain], [Comp6Domain], [BinaryDomain], [AlphanumericDomain],
+// [Float32Domain] and [Float64Domain] export that as a [Domain], derived from
+// the decoder's own tables: a PIC 9(5) DISPLAY item under [IBMEnterprise] can
+// only hold F0-F9 at each of its five bytes, so a record test asking for C8
+// there can never match it. A domain is a claim about well-formed records, not
+// a validation of bytes in hand — read the record for that. See codec/SPEC.md,
+// "Byte Domains".
+//
 // # Numeric items carry digits, not scale
 //
 // Every fixed-point numeric accessor takes the item's digit count and returns

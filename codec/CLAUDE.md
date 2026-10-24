@@ -676,6 +676,37 @@ failure of deriving it is held in `zonedErr` and reported by the first zoned
 accessor. Deriving it cannot fail the constructor: a charset with no `'+'`
 cannot spell a numeric field but reads `PIC X` ones perfectly well.
 
+## Byte domains: the reader's rule, exported (#134)
+
+`ZonedDomain`, `PackedDomain`, `Comp6Domain`, `BinaryDomain`,
+`AlphanumericDomain`, `Float32Domain` and `Float64Domain` report a `Domain` —
+`[][]byte`, one sorted set per byte position, nil meaning every byte value may
+appear there — for a caller reasoning about an item's bytes without a record
+(`cpybkc` proving two discriminators exclusive). Four things to keep:
+
+- **Derived from the decoder's own tables, never transcribed.** The zoned sets
+  are read off `zonedBytes.digitOf`, `zonedSignReadings` and
+  `separateSignValue`; the packed ones off `packedDigitValid`, `packedPadValid`
+  and `packedSignIsNegative`, which `readPackedField`/`readComp6Field` call for
+  exactly that reason. A rule changed in one place changes in both, and
+  `TestDomainIsExactlyWhatTheReaderAccepts` puts every byte value at every
+  position and requires the reader to accept it exactly when the domain admits
+  it. Do not inline those predicates back into the readers.
+- **It is the reader's domain, a superset of the writer's.** Lenient EBCDIC
+  zones and the `A`/`B`/`E`/`F` packed sign nibbles are admitted because a
+  well-formed record from another writer may hold them; narrowing to what this
+  package emits would make an exclusivity proof unsound.
+  `TestDomainAdmitsEveryByteTheWriterWrites` pins the subset relation.
+- **Shapes are spelled the way the accessors spell them**, not by a usage enum:
+  this package imports only `std`, so `picture`/`copybook` stay on the
+  caller's side and the arguments are the accessors' own — `digits`, a
+  `SignPosition`, an `Encoding` where an axis changes the answer. `PackedDomain`
+  takes no `Signedness` because the reader consults none.
+- **Whole-field rules are not expressible per position.** `TRUNC(STD)` range
+  and an HFP `COMP-1` out of float32 range answer nil at every position, a
+  superset; `SPEC.md`'s "Byte Domains" states that a superset is the only safe
+  direction for the trade.
+
 ## Testing style
 
 Table-driven, `t.Parallel()` at both the function and each subtest, `require`
