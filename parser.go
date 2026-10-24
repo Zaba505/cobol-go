@@ -2403,19 +2403,19 @@ func parseAllLiteral(p *parser, all Token) (*AllLiteral, error) {
 	case tok.Type == TokenString:
 		lit := stringLiteral(tok)
 		if lit.Kind.Numeric() {
-			return nil, AllLiteralError{Pos: all.Pos, Reason: fmt.Sprintf("it is followed by the %s literal %s, and ALL repeats only a nonnumeric literal", lit.Kind, tok.Value)}
+			return nil, AllLiteralError{Pos: all.Pos, Actual: &tok, Reason: fmt.Sprintf("it is followed by the %s literal %s, and ALL repeats only a nonnumeric literal", lit.Kind, tok.Value)}
 		}
 		p.consume()
 		return &AllLiteral{Pos: all.Pos, Literal: lit}, nil
 	case tok.Type == TokenNumber:
-		return nil, AllLiteralError{Pos: all.Pos, Reason: fmt.Sprintf("it is followed by the numeric literal %s, and ALL repeats only a nonnumeric literal", tok.Value)}
+		return nil, AllLiteralError{Pos: all.Pos, Actual: &tok, Reason: fmt.Sprintf("it is followed by the numeric literal %s, and ALL repeats only a nonnumeric literal", tok.Value)}
 	case keywordIs(tok, "ALL"):
-		return nil, AllLiteralError{Pos: all.Pos, Reason: fmt.Sprintf("it is followed by ALL at line %d, column %d, and ALL may not repeat an ALL literal", tok.Pos.Line, tok.Pos.Column)}
+		return nil, AllLiteralError{Pos: all.Pos, Actual: &tok, Reason: fmt.Sprintf("it is followed by ALL at line %d, column %d, and ALL may not repeat an ALL literal", tok.Pos.Line, tok.Pos.Column)}
 	case tok.Type == TokenIdentifier && isFigurativeConstant(string(tok.Value)):
 		p.consume()
 		return &AllLiteral{Pos: all.Pos, Literal: &Word{Pos: tok.Pos, Value: string(tok.Value)}}, nil
 	default:
-		return nil, AllLiteralError{Pos: all.Pos, Reason: fmt.Sprintf("it is followed by %s, which is neither a nonnumeric literal nor a figurative constant", tok)}
+		return nil, AllLiteralError{Pos: all.Pos, Actual: &tok, Reason: fmt.Sprintf("it is followed by %s, which is neither a nonnumeric literal nor a figurative constant (a symbolic character is not read here)", tok)}
 	}
 }
 
@@ -8715,9 +8715,16 @@ func (e InvalidWordError) Error() string {
 // a literal it may repeat: a nonnumeric literal, or a figurative constant other
 // than ALL (SPEC §Literals). A numeric literal, a second ALL, any other word or
 // symbol, and the end of input are all refused. Pos is the position of the ALL
-// keyword; Reason says what followed it.
+// keyword; Reason says what followed it, in words.
+//
+// Actual is the token that followed ALL, or nil when the input ended there, so a
+// caller can tell the refusals apart without matching on Reason: a nil Actual is
+// truncated source; a [TokenNumber], or a [TokenString] whose prefix names a
+// numeric kind, is a numeric literal; an identifier spelling ALL is ALL ALL; and
+// anything else is a token that is neither a literal nor a figurative constant.
 type AllLiteralError struct {
 	Pos    Pos
+	Actual *Token
 	Reason string
 }
 

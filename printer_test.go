@@ -4799,15 +4799,28 @@ func TestPrintAllLiteral(t *testing.T) {
 			Source:  &AllLiteral{Literal: &StringLiteral{Value: "'*'"}},
 			Targets: []*Identifier{{Name: &Word{Value: "F"}}},
 		}
-		text, ok := statementText(t, stmt)
-		require.True(t, ok)
+		text, err := printOnlyStatement(t, stmt)
+		require.NoError(t, err)
 		require.Equal(t, "MOVE ALL '*' TO F", text)
+	})
+
+	t.Run("display", func(t *testing.T) {
+		t.Parallel()
+
+		stmt := &DisplayStatement{Operands: []Type{
+			&AllLiteral{Literal: &StringLiteral{Value: "'-'"}},
+			&AllLiteral{Literal: &Word{Value: "SPACES"}},
+		}}
+		text, err := printOnlyStatement(t, stmt)
+		require.NoError(t, err)
+		require.Equal(t, "DISPLAY ALL '-' ALL SPACES", text)
 	})
 }
 
-// statementText prints a program whose only statement is stmt and returns the
-// statement's line, trimmed, reporting whether Print succeeded.
-func statementText(t *testing.T, stmt Statement) (string, bool) {
+// printOnlyStatement prints a program whose only statement is stmt and returns the
+// statement's text — the last line printed, trimmed of its indentation and its
+// sentence-terminating period — or the error Print returned.
+func printOnlyStatement(t *testing.T, stmt Statement) (string, error) {
 	t.Helper()
 
 	f := &File{Programs: []*Program{{Divisions: []Division{
@@ -4816,14 +4829,10 @@ func statementText(t *testing.T, stmt Statement) (string, bool) {
 	}}}}
 	var buf bytes.Buffer
 	if err := Print(&buf, f); err != nil {
-		return "", false
+		return "", err
 	}
-	for _, line := range strings.Split(buf.String(), "\n") {
-		if strings.Contains(line, "MOVE") {
-			return strings.TrimSuffix(strings.TrimSpace(line), "."), true
-		}
-	}
-	return "", false
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	return strings.TrimSuffix(strings.TrimSpace(lines[len(lines)-1]), "."), nil
 }
 
 // An ALL literal survives Parse → Print → Parse in a data item's VALUE clause,
@@ -4858,12 +4867,13 @@ func TestPrintAllLiteralRoundTrip(t *testing.T) {
 				"    88 F-SET VALUE 'A' " + l + " THRU " + l + ".\n" +
 				"PROCEDURE DIVISION.\n" +
 				"    MOVE " + l + " TO F.\n" +
+				"    DISPLAY " + l + " F.\n" +
 				"    IF F = " + l + " DISPLAY F END-IF.\n" +
 				"    STOP RUN.\n"
 
 			first, err := Parse(strings.NewReader(src))
 			require.NoError(t, err)
-			require.Len(t, collectAllLiterals(first), 6)
+			require.Len(t, collectAllLiterals(first), 7)
 
 			var buf bytes.Buffer
 			require.NoError(t, Print(&buf, first))
@@ -4875,6 +4885,32 @@ func TestPrintAllLiteralRoundTrip(t *testing.T) {
 			require.Equal(t, withoutPos(first), withoutPos(second))
 		})
 	}
+
+	// A fixed-format program round-trips the same way, procedure statement
+	// included.
+	t.Run("program in fixed format", func(t *testing.T) {
+		t.Parallel()
+
+		src := "000100 IDENTIFICATION DIVISION.\n" +
+			"000200 PROGRAM-ID. P.\n" +
+			"000300 DATA DIVISION.\n" +
+			"000400 WORKING-STORAGE SECTION.\n" +
+			"000500 01  F PIC X(5) VALUE ALL '*'.\n" +
+			"000600     88  F-STARS VALUE ALL '*'.\n" +
+			"000700 PROCEDURE DIVISION.\n" +
+			"000800     MOVE ALL SPACES TO F.\n"
+
+		first, err := Parse(strings.NewReader(src), WithSourceFormat(FixedFormat))
+		require.NoError(t, err)
+		require.Len(t, collectAllLiterals(first), 3)
+
+		var buf bytes.Buffer
+		require.NoError(t, Print(&buf, first))
+
+		second, err := Parse(&buf)
+		require.NoError(t, err)
+		require.Equal(t, withoutPos(first), withoutPos(second))
+	})
 
 	// A copybook fragment round-trips the same way, in fixed format as well.
 	t.Run("fragment in fixed format", func(t *testing.T) {
@@ -4972,8 +5008,8 @@ func TestPrintRefusesUnprintableAllLiterals(t *testing.T) {
 			var target UnsupportedNodeError
 			require.ErrorAs(t, Print(io.Discard, f), &target)
 
-			_, ok := statementText(t, &MoveStatement{Source: tc.value, Targets: []*Identifier{{Name: &Word{Value: "F"}}}})
-			require.False(t, ok)
+			_, err := printOnlyStatement(t, &MoveStatement{Source: tc.value, Targets: []*Identifier{{Name: &Word{Value: "F"}}}})
+			require.ErrorAs(t, err, &target)
 		})
 	}
 }

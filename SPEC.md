@@ -448,6 +448,14 @@ argument (*GnuCOBOL §2.1.19.3*). See Semantics.
 > with no defined fill to compute. `ALL ALL '*'`, `ALL` before a data-name, and
 > `ALL` with nothing after it are refused too.
 >
+> A *symbolic character* — a name declared in `SPECIAL-NAMES. SYMBOLIC
+> CHARACTERS` — is a figurative constant in COBOL 85, and `ALL` may precede it
+> there. This package does not read `SYMBOLIC CHARACTERS` anywhere, and a
+> copybook parsed as a fragment cannot see the program's `SPECIAL-NAMES` at
+> all, so such a name is indistinguishable from a data-name; `ALL` before one
+> is refused like `ALL` before any other user-defined word. Admitting it waits
+> on `SYMBOLIC CHARACTERS` itself.
+>
 > The parser reads the form as an `AllLiteral` node whose `Literal` is the
 > `StringLiteral` or figurative-constant `Word` it repeats, wherever `literal`
 > is admitted: a data item's `VALUE`, a condition-name's `VALUE` list, and any

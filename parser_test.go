@@ -5895,26 +5895,34 @@ func TestParserAllLiteralErrors(t *testing.T) {
 
 	const programHead = "IDENTIFICATION DIVISION.\nPROGRAM-ID. P.\nPROCEDURE DIVISION.\n"
 
+	// actual is the token an error's Actual is expected to hold: its type and
+	// spelling, or nil when the input ended after ALL.
+	type actual struct {
+		typ   TokenType
+		value string
+	}
+
 	testCases := []struct {
 		name     string
 		src      string
 		fragment bool
 		pos      Pos
+		actual   *actual
 	}{
-		{name: "all all on a data item", src: "77 F PIC X(5) VALUE ALL ALL '*'.\n", fragment: true, pos: Pos{Line: 1, Column: 21}},
-		{name: "all all on a condition-name", src: "77 F PIC X(5).\n88 F-STARS VALUE ALL ALL '*'.\n", fragment: true, pos: Pos{Line: 2, Column: 18}},
-		{name: "all all in a move", src: programHead + "    MOVE ALL ALL '*' TO F.\n", pos: Pos{Line: 4, Column: 10}},
-		{name: "all before a period", src: "77 F PIC X(5) VALUE ALL.\n", fragment: true, pos: Pos{Line: 1, Column: 21}},
+		{name: "all all on a data item", src: "77 F PIC X(5) VALUE ALL ALL '*'.\n", fragment: true, pos: Pos{Line: 1, Column: 21}, actual: &actual{TokenIdentifier, "ALL"}},
+		{name: "all all on a condition-name", src: "77 F PIC X(5).\n88 F-STARS VALUE ALL ALL '*'.\n", fragment: true, pos: Pos{Line: 2, Column: 18}, actual: &actual{TokenIdentifier, "ALL"}},
+		{name: "all all in a move", src: programHead + "    MOVE ALL all '*' TO F.\n", pos: Pos{Line: 4, Column: 10}, actual: &actual{TokenIdentifier, "all"}},
+		{name: "all before a period", src: "77 F PIC X(5) VALUE ALL.\n", fragment: true, pos: Pos{Line: 1, Column: 21}, actual: &actual{TokenSymbol, "."}},
 		{name: "all at end of input", src: "77 F PIC X(5) VALUE ALL", fragment: true, pos: Pos{Line: 1, Column: 21}},
 		{name: "all on a condition-name at end of input", src: "77 F PIC X(5).\n88 F-STARS VALUE ALL", fragment: true, pos: Pos{Line: 2, Column: 18}},
 		{name: "all in a move with nothing after it", src: programHead + "    MOVE ALL", pos: Pos{Line: 4, Column: 10}},
-		{name: "all before a numeric literal", src: "77 F PIC 9(5) VALUE ALL 5.\n", fragment: true, pos: Pos{Line: 1, Column: 21}},
-		{name: "all before a signed numeric literal", src: "77 F PIC S9(5) VALUE ALL -1.\n", fragment: true, pos: Pos{Line: 1, Column: 22}},
-		{name: "all before a hexadecimal numeric literal", src: "77 F PIC X(5) VALUE ALL H'FF'.\n", fragment: true, pos: Pos{Line: 1, Column: 21}},
-		{name: "all before an octal numeric literal", src: "77 F PIC X(5) VALUE ALL O'17'.\n", fragment: true, pos: Pos{Line: 1, Column: 21}},
-		{name: "all before a numeric literal in a move", src: programHead + "    MOVE ALL 5 TO F.\n", pos: Pos{Line: 4, Column: 10}},
-		{name: "all before a data-name in a move", src: programHead + "    MOVE ALL G TO F.\n", pos: Pos{Line: 4, Column: 10}},
-		{name: "all before a data-name in a condition", src: programHead + "    IF F = ALL G DISPLAY F END-IF.\n", pos: Pos{Line: 4, Column: 12}},
+		{name: "all before a numeric literal", src: "77 F PIC 9(5) VALUE ALL 5.\n", fragment: true, pos: Pos{Line: 1, Column: 21}, actual: &actual{TokenNumber, "5"}},
+		{name: "all before a signed numeric literal", src: "77 F PIC S9(5) VALUE ALL -1.\n", fragment: true, pos: Pos{Line: 1, Column: 22}, actual: &actual{TokenNumber, "-1"}},
+		{name: "all before a hexadecimal numeric literal", src: "77 F PIC X(5) VALUE ALL H'FF'.\n", fragment: true, pos: Pos{Line: 1, Column: 21}, actual: &actual{TokenString, "H'FF'"}},
+		{name: "all before an octal numeric literal", src: "77 F PIC X(5) VALUE ALL O'17'.\n", fragment: true, pos: Pos{Line: 1, Column: 21}, actual: &actual{TokenString, "O'17'"}},
+		{name: "all before a numeric literal in a move", src: programHead + "    MOVE ALL 5 TO F.\n", pos: Pos{Line: 4, Column: 10}, actual: &actual{TokenNumber, "5"}},
+		{name: "all before a data-name in a move", src: programHead + "    MOVE ALL G TO F.\n", pos: Pos{Line: 4, Column: 10}, actual: &actual{TokenIdentifier, "G"}},
+		{name: "all before a data-name in a condition", src: programHead + "    IF F = ALL G DISPLAY F END-IF.\n", pos: Pos{Line: 4, Column: 12}, actual: &actual{TokenIdentifier, "G"}},
 	}
 
 	for _, tc := range testCases {
@@ -5930,6 +5938,13 @@ func TestParserAllLiteralErrors(t *testing.T) {
 			var target AllLiteralError
 			require.ErrorAs(t, err, &target)
 			require.Equal(t, tc.pos, target.Position())
+			if tc.actual == nil {
+				require.Nil(t, target.Actual)
+				return
+			}
+			require.NotNil(t, target.Actual)
+			require.Equal(t, tc.actual.typ, target.Actual.Type)
+			require.Equal(t, tc.actual.value, string(target.Actual.Value))
 		})
 	}
 }
