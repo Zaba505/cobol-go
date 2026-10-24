@@ -1547,8 +1547,10 @@ parse).
 
   **`Print` always writes free format.** Having no format to reproduce, the
   printer emits the one layout that needs none: no sequence area, no indicator
-  column, no Area A / Area B placement, no column-72 limit — and every comment,
-  including a fixed-format `*` or `/` comment line, as a free-format `*>` line.
+  column, no Area A / Area B placement, no column-72 limit and no line-length
+  limit of any kind (an entry's clauses share one line, and a continued literal
+  is rejoined into one) — and every comment, including a fixed-format `*` or
+  `/` comment line, as a free-format `*>` line.
   So the round-trip property is stated against free format whatever the source
   was written in: `Parse` a source in either format, `Print` it, and `Parse` the
   output **in free format** (the default; with `WithFragment()` kept when the

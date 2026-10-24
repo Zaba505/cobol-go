@@ -1863,7 +1863,7 @@ func TestPrintWritesFreeFormat(t *testing.T) {
 				"002000 66  CUST-KEY RENAMES CUST-ID THROUGH CUST-NAME.\n" +
 				"002100 77  CUST-SHARED           PIC X GLOBAL.\n" +
 				"002200 77  CUST-EXT              PIC X EXTERNAL.\n" +
-				"002300* End of CUSTREC.\n",
+				"002300* End of CUSTREC.                                                 CUSTREC1\n",
 			// No sequence or identification area, no indicator column, the
 			// continued literal joined, and both comment kinds as "*>" lines.
 			printed: "" +
@@ -1905,7 +1905,14 @@ func TestPrintWritesFreeFormat(t *testing.T) {
 			second, err := Parse(&buf, WithFragment())
 			require.NoError(t, err)
 
-			require.Equal(t, withoutComments(withoutPos(first)), withoutComments(withoutPos(second)))
+			// Comments survive the trip too: the "*" and "/" lines come back as
+			// "*>" lines carrying the same normalized text, attached to the same
+			// entries. Compare that first, since clearing comments mutates the ASTs.
+			require.Equal(t, withoutPos(first), withoutPos(second))
+
+			// And the comparison the contract states, positions and comments
+			// cleared.
+			require.Equal(t, withoutComments(t, first), withoutComments(t, second))
 		})
 	}
 }
@@ -2313,12 +2320,13 @@ func withoutPos(f *File) *File {
 
 // withoutComments drops every comment from a fragment — each entry's leading
 // comments and the fragment's trailing ones — and returns f, so a round trip can
-// be compared the way a caller that ignores comments compares it. Only fragments
-// are handled; a File holding programs is returned unchanged.
-func withoutComments(f *File) *File {
-	if f.Fragment == nil {
-		return f
-	}
+// be compared the way a caller that ignores comments compares it. Fragment
+// entries are a flat list (level numbers, not nesting, carry the hierarchy), so
+// one pass reaches every comment. Only fragments are handled: a File holding
+// programs fails the test rather than being compared with its comments intact.
+func withoutComments(t *testing.T, f *File) *File {
+	t.Helper()
+	require.NotNil(t, f.Fragment, "withoutComments handles fragments only")
 	for _, entry := range f.Fragment.Entries {
 		entry.Comments = nil
 	}
