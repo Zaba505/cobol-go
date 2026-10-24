@@ -12,6 +12,7 @@ import (
 	"iter"
 	"path"
 	"slices"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -550,11 +551,13 @@ func trimLiteralDelimiters(s string) string {
 // case-insensitively; a text-name already on it is a cycle and is reported as a
 // [CopyBookCycleError] rather than expanded forever.
 //
-// Positions in copied tokens are positions within the copybook — after
-// replacement — not within the source that copied it. There is nowhere in a
-// [Pos] to record which file a line belongs to, and a position naming the COPY
-// statement for every copied token would collapse a whole record layout onto one
-// point.
+// Positions in copied tokens are positions within the copybook, not within the
+// source that copied it, and each one's Text names that copybook and, through
+// [LibraryText.Copy], the COPY statement that brought it in — so a nested
+// copybook's tokens carry the whole chain. They are positions in the copybook as
+// written: [relocateTokens] maps each one back through the REPLACING
+// substitution, so a substitution that changed a word's length does not shift
+// the columns after it.
 func expandCopy(src iter.Seq2[Token, error], cfg copyConfig, stack []string) iter.Seq2[Token, error] {
 	return func(yield func(Token, error) bool) {
 		pull, stop := iter.Pull2(src)
@@ -651,9 +654,19 @@ func expandOne(c *copyParser, pos Pos, cfg copyConfig, stack []string, yield fun
 	// token's position is a position within the copybook, so one filter spanning
 	// the seam would read the copybook's line 1 as a continuation of the line the
 	// COPY statement sat on.
-	replaced := applyReplacing(string(text), st.Replacing)
+	//
+	// Relocation runs after that pass, so directive recognition sees the lines of
+	// the text it actually reads, and before the nested expansion, so it touches
+	// only this copybook's own tokens: a nested copybook's are relocated by the
+	// expansion that reads them, against that copybook's own text and REPLACING.
+	written := string(text)
+	replaced, spans := applyReplacing(written, st.Replacing)
+	origin := &LibraryText{Name: st.Name, Library: st.Library, Copy: pos}
 	inner := expandCopy(
-		skipListingDirectives(Tokenize(strings.NewReader(replaced), cfg.tokenizeOptions...)),
+		relocateTokens(
+			skipListingDirectives(Tokenize(strings.NewReader(replaced), cfg.tokenizeOptions...)),
+			asWritten(written, replaced, spans, origin),
+		),
 		cfg,
 		append(append([]string{}, stack...), key),
 	)
@@ -680,7 +693,9 @@ type copyConfig struct {
 }
 
 // applyReplacing performs a COPY statement's REPLACING substitution on a
-// copybook's text.
+// copybook's text, returning the substituted text and the spans it substituted,
+// in order, so a position in the result can be mapped back to the text as
+// written (see [asWritten]).
 //
 // Both sides of a replacement are text, but the match is made over *text words*
 // — COBOL's lexical unit for text manipulation — so a pattern can never match
@@ -694,9 +709,9 @@ type copyConfig struct {
 // forever. Where several replacements could match at one position the first one
 // written wins, and a replacement with an empty pattern is skipped, since it
 // could only ever match nothing.
-func applyReplacing(src string, replacements []copyReplacement) string {
+func applyReplacing(src string, replacements []copyReplacement) (string, []replacedSpan) {
 	if len(replacements) == 0 {
-		return src
+		return src, nil
 	}
 	patterns := make([][]textWord, len(replacements))
 	for i, r := range replacements {
@@ -705,6 +720,7 @@ func applyReplacing(src string, replacements []copyReplacement) string {
 
 	words := textWords(src)
 	var b strings.Builder
+	var spans []replacedSpan
 	copied := 0
 	for i := 0; i < len(words); {
 		matched := false
@@ -713,8 +729,11 @@ func applyReplacing(src string, replacements []copyReplacement) string {
 				continue
 			}
 			b.WriteString(src[copied:words[i].start])
+			span := replacedSpan{writtenStart: words[i].start, replacedStart: b.Len()}
 			b.WriteString(replacements[p].To)
 			copied = words[i+len(pattern)-1].end
+			span.writtenEnd, span.replacedEnd = copied, b.Len()
+			spans = append(spans, span)
 			i += len(pattern)
 			matched = true
 			break
@@ -724,7 +743,118 @@ func applyReplacing(src string, replacements []copyReplacement) string {
 		}
 	}
 	b.WriteString(src[copied:])
-	return b.String()
+	return b.String(), spans
+}
+
+// replacedSpan records one substitution [applyReplacing] made: the byte span
+// [writtenStart, writtenEnd) of the matched text words in the text as written,
+// and the byte span [replacedStart, replacedEnd) the replacement occupies in the
+// substituted text. Outside the spans the two texts are byte-for-byte the same.
+type replacedSpan struct {
+	writtenStart, writtenEnd   int
+	replacedStart, replacedEnd int
+}
+
+// relocatable is implemented by the tokenizer's positioned errors, so a pass
+// that moves the positions of the tokens it passes on can move an error's with
+// them. relocate returns the error with its position replaced by m of it.
+type relocatable interface {
+	Positioned
+	relocate(m func(Pos) Pos) error
+}
+
+// relocateTokens returns src with every token's position, and every relocatable
+// error's, replaced by m of it. It is how a copybook's tokens, read from the
+// text REPLACING left, come to carry positions in the copybook as written and the
+// [LibraryText] that names it.
+func relocateTokens(src iter.Seq2[Token, error], m func(Pos) Pos) iter.Seq2[Token, error] {
+	return func(yield func(Token, error) bool) {
+		for tok, err := range src {
+			if err != nil {
+				if r, ok := err.(relocatable); ok {
+					err = r.relocate(m)
+				}
+				if !yield(Token{}, err) {
+					return
+				}
+				continue
+			}
+			tok.Pos = m(tok.Pos)
+			if !yield(tok, nil) {
+				return
+			}
+		}
+	}
+}
+
+// asWritten returns the mapping [relocateTokens] applies to a copybook's tokens:
+// a position in replaced — the copybook's text after its REPLACING phrase,
+// which spans describes — becomes the position in written, the text as the
+// resolver returned it, with Text set to origin.
+//
+// Between substitutions the two texts are identical, so a position after the
+// end of a substitution is the same distance past the end of the text it
+// replaced — the same column offset on the substitution's last line, the same
+// line offset and column after it. A position inside a substitution was produced
+// by it and has no counterpart as written; it is given the start of the replaced
+// text words, the rule [LibraryText] documents.
+func asWritten(written, replaced string, spans []replacedSpan, origin *LibraryText) func(Pos) Pos {
+	type posSpan struct {
+		writtenStart, writtenEnd   Pos
+		replacedStart, replacedEnd Pos
+	}
+	ps := make([]posSpan, len(spans))
+	writtenAt, replacedAt := positionsIn(written), positionsIn(replaced)
+	for i, s := range spans {
+		ps[i] = posSpan{
+			writtenStart:  writtenAt(s.writtenStart),
+			writtenEnd:    writtenAt(s.writtenEnd),
+			replacedStart: replacedAt(s.replacedStart),
+			replacedEnd:   replacedAt(s.replacedEnd),
+		}
+	}
+	return func(p Pos) Pos {
+		// The last substitution starting at or before p decides; before the
+		// first one the texts have not yet differed.
+		i := sort.Search(len(ps), func(i int) bool { return posBefore(p, ps[i].replacedStart) }) - 1
+		switch {
+		case i < 0:
+			// unchanged
+		case posBefore(p, ps[i].replacedEnd):
+			p.Line, p.Column = ps[i].writtenStart.Line, ps[i].writtenStart.Column
+		case p.Line == ps[i].replacedEnd.Line:
+			p.Line, p.Column = ps[i].writtenEnd.Line, ps[i].writtenEnd.Column+p.Column-ps[i].replacedEnd.Column
+		default:
+			p.Line += ps[i].writtenEnd.Line - ps[i].replacedEnd.Line
+		}
+		p.Text = origin
+		return p
+	}
+}
+
+// positionsIn returns a function giving the [Pos] of a byte offset in src, as
+// the tokenizer counts it: lines from 1, split at each '\n', and columns from 1,
+// counted in runes from the start of the line.
+func positionsIn(src string) func(offset int) Pos {
+	lineStarts := []int{0}
+	for i := range len(src) {
+		if src[i] == '\n' {
+			lineStarts = append(lineStarts, i+1)
+		}
+	}
+	return func(offset int) Pos {
+		line := sort.Search(len(lineStarts), func(i int) bool { return lineStarts[i] > offset }) - 1
+		return Pos{Line: line + 1, Column: 1 + utf8.RuneCountInString(src[lineStarts[line]:offset])}
+	}
+}
+
+// posBefore reports whether a precedes b in reading order, by line and then by
+// column. It ignores Text: it is only asked about positions in one text.
+func posBefore(a, b Pos) bool {
+	if a.Line != b.Line {
+		return a.Line < b.Line
+	}
+	return a.Column < b.Column
 }
 
 // textWord is one COBOL text word within a source text: the byte span it

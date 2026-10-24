@@ -190,8 +190,16 @@ copied text and needs to know nothing about copybooks.
 - Copied text is re-tokenized in the same reference format and run through
   `expandCopy` again, so copybooks nest; a stack of case-folded, library-
   qualified names turns a loop into a `CopyBookCycleError`.
-- Positions on copied nodes are positions *within the copybook*. `Pos` has no
-  field naming a file, so this is a documented trade rather than an oversight.
+- Positions on copied nodes are positions *within the copybook as written*:
+  `relocateTokens` maps each copied token back through the `REPLACING`
+  substitution (`asWritten`) and sets `Pos.Text` to a `*LibraryText` naming the
+  copybook (the text-name and library the resolver was asked for) and the `COPY`
+  keyword's own `Pos` — so the chain of nested `COPY` statements follows from
+  `Pos.Text.Copy.Text`, innermost first. `Text` is nil in the source given to
+  `Parse`. A token a substitution produced is positioned at the first character
+  of the text words it replaced. Tokenizer errors are relocated with the tokens
+  (the unexported `relocatable` interface), so a new positioned tokenizer error
+  needs a `relocate` method too.
 
 ## Listing directives (`directive.go`)
 

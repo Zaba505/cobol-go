@@ -17,10 +17,89 @@ import (
 	"unicode/utf8"
 )
 
-// Pos represents the position of a token in the input.
+// Pos represents the position of a token in the input: a line and a column,
+// both counted from 1, the column in runes, and — for text a COPY statement
+// brought in — the library text the line and column are in.
+//
+// Text is nil for a position in the source given to [Parse] or [Tokenize], so
+// a source that copies nothing reports exactly the positions it always has, and
+// a caller that reads only Line and Column is unaffected by COPY entirely.
+//
+// For a position inside copied text, Text names the library text by the
+// text-name and library the [CopyBookResolver] was asked for, and Line and
+// Column are a position in that text as written: as the resolver returned it,
+// not as a REPLACING phrase left it. See [LibraryText] for how the chain of COPY
+// statements that reached the text is recorded, and for the position a word
+// produced by a REPLACING substitution is given.
+//
+// A Pos is comparable. Two positions in the same expansion of one COPY
+// statement share a *LibraryText, so == compares them as a line, a column and a
+// text; positions from two expansions — the same copybook copied twice, or the
+// same source parsed twice — compare unequal under == even at the same line and
+// column, and are equal under reflect.DeepEqual when the chains match.
 type Pos struct {
 	Line   int
 	Column int
+	Text   *LibraryText
+}
+
+// LibraryText identifies the library text — the copybook — a [Pos] is in, and
+// the COPY statement that brought it into the source.
+//
+// Name and Library are exactly what the [CopyBookResolver] was asked for:
+// Name is the text-name with a literal's delimiters removed, Library is the
+// library-name of an OF or IN phrase, or "" when the COPY statement gave none.
+// Neither is case-folded, so they spell the copybook as the COPY statement did.
+//
+// Copy is the position of the COPY keyword that brought the text in, and it is
+// itself a position like any other: its Text is the text the COPY statement
+// was written in, nil when that is the source given to [Parse]. Following
+// Copy.Text outward therefore walks the chain of COPY statements that reached a
+// position, innermost first, ending at a COPY written in the source itself;
+// [Pos.CopyChain] returns that walk as a slice.
+//
+// # REPLACING
+//
+// A REPLACING phrase is applied to a copybook's text before that text is read,
+// but the positions reported for it are positions in the text as written: a
+// column after a substitution that changed a word's length is the column the
+// word after it has in the copybook, not in the substituted text.
+//
+// A token that a substitution produced, in whole or in part, has no single
+// as-written spot. It is given the position of the first character of the text
+// words the substitution replaced — the place the word that became it begins in
+// the copybook. So with REPLACING ==:TAG:== BY ==CUST==, the word
+// CUST-CUSTOMER-ID that :TAG:-CUSTOMER-ID becomes is positioned at the first
+// colon, and when one substitution produces several tokens, every one of them is
+// positioned there.
+//
+// # Errors and printing
+//
+// Every error carrying a Pos carries its Text, so a [Positioned] error raised
+// inside a copybook — or by a later pass, such as the copybook package's, over
+// entries that came from one — names that copybook and its chain. Error strings
+// do not: they report a line and a column, as they always have, so a caller
+// matching them is unaffected, and a caller that reports positions reads Text
+// from [Positioned.Position]. [Print] writes no provenance either: it prints the
+// expanded entries as canonical source, in which no COPY statement survives.
+type LibraryText struct {
+	Name    string
+	Library string
+	Copy    Pos
+}
+
+// CopyChain returns the positions of the COPY statements that reached the text
+// p is in, innermost first: the COPY keyword that brought in p's own text, then
+// the one that brought in the text that COPY was written in, and so on out to a
+// COPY written in the source given to [Parse]. Each element's Text names the
+// text that COPY statement was written in. It returns nil for a position in the
+// source itself.
+func (p Pos) CopyChain() []Pos {
+	var chain []Pos
+	for t := p.Text; t != nil; t = t.Copy.Text {
+		chain = append(chain, t.Copy)
+	}
+	return chain
 }
 
 // Positioned is implemented by every error this module returns that carries a
@@ -36,10 +115,10 @@ type Pos struct {
 //		report(p.Position(), p.Error())
 //	}
 //
-// A position is a line and column and names no file. A fault inside text a
-// COPY statement brought in is positioned within that copybook, as the nodes
-// built from it are, so a caller printing it against the source it handed to
-// [Parse] must allow that it may belong to a copybook instead.
+// A fault inside text a COPY statement brought in is positioned within that
+// copybook, as the nodes built from it are, and the position's Text names the
+// copybook and the chain of COPY statements that reached it (see [Pos] and
+// [LibraryText]); Text is nil for a fault in the source handed to [Parse].
 //
 // Errors that carry no source position do not implement it — a byte offset
 // within a PICTURE character-string, or within a record, is not a position in
@@ -1498,6 +1577,12 @@ type UnexpectedCharacterError struct {
 // Position implements [Positioned], returning Pos.
 func (e UnexpectedCharacterError) Position() Pos { return e.Pos }
 
+// relocate implements [relocatable].
+func (e UnexpectedCharacterError) relocate(m func(Pos) Pos) error {
+	e.Pos = m(e.Pos)
+	return e
+}
+
 // Error implements the [error] interface.
 func (e UnexpectedCharacterError) Error() string {
 	return fmt.Sprintf("unexpected character '%c' at line %d, column %d", e.R, e.Pos.Line, e.Pos.Column)
@@ -1511,6 +1596,12 @@ type UnterminatedStringError struct {
 
 // Position implements [Positioned], returning Pos.
 func (e UnterminatedStringError) Position() Pos { return e.Pos }
+
+// relocate implements [relocatable].
+func (e UnterminatedStringError) relocate(m func(Pos) Pos) error {
+	e.Pos = m(e.Pos)
+	return e
+}
 
 // Error implements the [error] interface.
 func (e UnterminatedStringError) Error() string {
@@ -1527,6 +1618,12 @@ type UnterminatedPseudoTextError struct {
 
 // Position implements [Positioned], returning Pos.
 func (e UnterminatedPseudoTextError) Position() Pos { return e.Pos }
+
+// relocate implements [relocatable].
+func (e UnterminatedPseudoTextError) relocate(m func(Pos) Pos) error {
+	e.Pos = m(e.Pos)
+	return e
+}
 
 // Error implements the [error] interface.
 func (e UnterminatedPseudoTextError) Error() string {
@@ -1547,6 +1644,12 @@ type InvalidLiteralError struct {
 
 // Position implements [Positioned], returning Pos.
 func (e InvalidLiteralError) Position() Pos { return e.Pos }
+
+// relocate implements [relocatable].
+func (e InvalidLiteralError) relocate(m func(Pos) Pos) error {
+	e.Pos = m(e.Pos)
+	return e
+}
 
 // Error implements the [error] interface.
 func (e InvalidLiteralError) Error() string {

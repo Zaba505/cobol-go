@@ -3606,14 +3606,14 @@ func TestParserListingDirectivesInFragment(t *testing.T) {
 			src: "01 A.\n" +
 				"SKIP1\n" +
 				"05 B PIC X(2).\n",
-			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{3, 1}, Pos{3, 4}, Pos{3, 6}),
+			expected: copybook(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 3, Column: 1}, Pos{Line: 3, Column: 4}, Pos{Line: 3, Column: 6}),
 		},
 		{
 			name: "directive before the first entry",
 			src: "EJECT\n" +
 				"01 A.\n" +
 				"05 B PIC X(2).\n",
-			expected: copybook(Pos{2, 1}, Pos{2, 4}, Pos{3, 1}, Pos{3, 4}, Pos{3, 6}),
+			expected: copybook(Pos{Line: 2, Column: 1}, Pos{Line: 2, Column: 4}, Pos{Line: 3, Column: 1}, Pos{Line: 3, Column: 4}, Pos{Line: 3, Column: 6}),
 		},
 		{
 			// Nothing follows the directive, so ending the stream inside one must
@@ -3622,21 +3622,21 @@ func TestParserListingDirectivesInFragment(t *testing.T) {
 			src: "01 A.\n" +
 				"05 B PIC X(2).\n" +
 				"EJECT\n",
-			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{2, 1}, Pos{2, 4}, Pos{2, 6}),
+			expected: copybook(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 2, Column: 1}, Pos{Line: 2, Column: 4}, Pos{Line: 2, Column: 6}),
 		},
 		{
 			name: "directive after the last entry with a separator period",
 			src: "01 A.\n" +
 				"05 B PIC X(2).\n" +
 				"EJECT.\n",
-			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{2, 1}, Pos{2, 4}, Pos{2, 6}),
+			expected: copybook(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 2, Column: 1}, Pos{Line: 2, Column: 4}, Pos{Line: 2, Column: 6}),
 		},
 		{
 			name: "directives with separator periods",
 			src: "01 A.\n" +
 				"SKIP1.\n" +
 				"05 B PIC X(2).\n",
-			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{3, 1}, Pos{3, 4}, Pos{3, 6}),
+			expected: copybook(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 3, Column: 1}, Pos{Line: 3, Column: 4}, Pos{Line: 3, Column: 6}),
 		},
 		{
 			// COBOL reserved words are case-insensitive, so the directives are too.
@@ -3645,7 +3645,7 @@ func TestParserListingDirectivesInFragment(t *testing.T) {
 				"eject\n" +
 				"skip2.\n" +
 				"05 B PIC X(2).\n",
-			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{4, 1}, Pos{4, 4}, Pos{4, 6}),
+			expected: copybook(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 4, Column: 1}, Pos{Line: 4, Column: 4}, Pos{Line: 4, Column: 6}),
 		},
 		{
 			// TITLE is the one form with an operand; the literal goes with it.
@@ -3653,7 +3653,7 @@ func TestParserListingDirectivesInFragment(t *testing.T) {
 			src: "TITLE 'CUSTOMER RECORD'\n" +
 				"01 A.\n" +
 				"05 B PIC X(2).\n",
-			expected: copybook(Pos{2, 1}, Pos{2, 4}, Pos{3, 1}, Pos{3, 4}, Pos{3, 6}),
+			expected: copybook(Pos{Line: 2, Column: 1}, Pos{Line: 2, Column: 4}, Pos{Line: 3, Column: 1}, Pos{Line: 3, Column: 4}, Pos{Line: 3, Column: 6}),
 		},
 		{
 			name: "every form in one copybook",
@@ -3664,7 +3664,7 @@ func TestParserListingDirectivesInFragment(t *testing.T) {
 				"SKIP3\n" +
 				"TITLE 'X'.\n" +
 				"05 B PIC X(2).\n",
-			expected: copybook(Pos{2, 1}, Pos{2, 4}, Pos{7, 1}, Pos{7, 4}, Pos{7, 6}),
+			expected: copybook(Pos{Line: 2, Column: 1}, Pos{Line: 2, Column: 4}, Pos{Line: 7, Column: 1}, Pos{Line: 7, Column: 4}, Pos{Line: 7, Column: 6}),
 		},
 		{
 			// IBM permits a listing-control statement in Area A or Area B alike, so
@@ -3674,7 +3674,7 @@ func TestParserListingDirectivesInFragment(t *testing.T) {
 				"       SKIP1\n" +
 				"           05  B PIC X(2).\n",
 			format:   FixedFormat,
-			expected: copybook(Pos{1, 8}, Pos{1, 12}, Pos{3, 12}, Pos{3, 16}, Pos{3, 18}),
+			expected: copybook(Pos{Line: 1, Column: 8}, Pos{Line: 1, Column: 12}, Pos{Line: 3, Column: 12}, Pos{Line: 3, Column: 16}, Pos{Line: 3, Column: 18}),
 		},
 		{
 			name: "fixed format directive in Area B",
@@ -3682,7 +3682,7 @@ func TestParserListingDirectivesInFragment(t *testing.T) {
 				"           SKIP1\n" +
 				"           05  B PIC X(2).\n",
 			format:   FixedFormat,
-			expected: copybook(Pos{1, 8}, Pos{1, 12}, Pos{3, 12}, Pos{3, 16}, Pos{3, 18}),
+			expected: copybook(Pos{Line: 1, Column: 8}, Pos{Line: 1, Column: 12}, Pos{Line: 3, Column: 12}, Pos{Line: 3, Column: 16}, Pos{Line: 3, Column: 18}),
 		},
 		{
 			name: "fixed format title with a literal operand and a period",
@@ -3690,7 +3690,7 @@ func TestParserListingDirectivesInFragment(t *testing.T) {
 				"       01  A.\n" +
 				"           05  B PIC X(2).\n",
 			format:   FixedFormat,
-			expected: copybook(Pos{2, 8}, Pos{2, 12}, Pos{3, 12}, Pos{3, 16}, Pos{3, 18}),
+			expected: copybook(Pos{Line: 2, Column: 8}, Pos{Line: 2, Column: 12}, Pos{Line: 3, Column: 12}, Pos{Line: 3, Column: 16}, Pos{Line: 3, Column: 18}),
 		},
 		{
 			// The separator period is the directive's only when it is on the
@@ -3702,7 +3702,7 @@ func TestParserListingDirectivesInFragment(t *testing.T) {
 				"05 B PIC X(2)\n" +
 				"SKIP1\n" +
 				".\n",
-			expected: copybook(Pos{1, 1}, Pos{1, 4}, Pos{2, 1}, Pos{2, 4}, Pos{2, 6}),
+			expected: copybook(Pos{Line: 1, Column: 1}, Pos{Line: 1, Column: 4}, Pos{Line: 2, Column: 1}, Pos{Line: 2, Column: 4}, Pos{Line: 2, Column: 6}),
 		},
 		{
 			// A directive word is one only when it opens its line. Second on the
@@ -3714,16 +3714,16 @@ func TestParserListingDirectivesInFragment(t *testing.T) {
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:   Pos{1, 1},
+							Pos:   Pos{Line: 1, Column: 1},
 							Level: 1,
-							Name:  &Word{Pos: Pos{1, 4}, Value: "EJECT"},
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "EJECT"},
 						},
 						{
-							Pos:   Pos{2, 1},
+							Pos:   Pos{Line: 2, Column: 1},
 							Level: 5,
-							Name:  &Word{Pos: Pos{2, 4}, Value: "TITLE"},
+							Name:  &Word{Pos: Pos{Line: 2, Column: 4}, Value: "TITLE"},
 							Clauses: []DataClause{
-								&PictureClause{Pos: Pos{2, 10}, Picture: "X(2)"},
+								&PictureClause{Pos: Pos{Line: 2, Column: 10}, Picture: "X(2)"},
 							},
 						},
 					},
@@ -3742,17 +3742,17 @@ func TestParserListingDirectivesInFragment(t *testing.T) {
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:   Pos{1, 1},
+							Pos:   Pos{Line: 1, Column: 1},
 							Level: 1,
-							Name:  &Word{Pos: Pos{1, 4}, Value: "A"},
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "A"},
 						},
 						{
-							Pos:      Pos{4, 1},
-							Comments: []*Comment{{Pos: Pos{2, 1}, Text: "the identifier"}},
+							Pos:      Pos{Line: 4, Column: 1},
+							Comments: []*Comment{{Pos: Pos{Line: 2, Column: 1}, Text: "the identifier"}},
 							Level:    5,
-							Name:     &Word{Pos: Pos{4, 4}, Value: "B"},
+							Name:     &Word{Pos: Pos{Line: 4, Column: 4}, Value: "B"},
 							Clauses: []DataClause{
-								&PictureClause{Pos: Pos{4, 6}, Picture: "X(2)"},
+								&PictureClause{Pos: Pos{Line: 4, Column: 6}, Picture: "X(2)"},
 							},
 						},
 					},

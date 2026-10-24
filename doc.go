@@ -22,9 +22,14 @@
 //	}
 //
 // Positions on errors raised inside copied text are positions within the
-// copybook, as they are on the nodes built from it, and [Pos] names no file: a
-// caller reporting a position against the source it parsed must allow that the
-// fault may lie in a copybook instead. Errors with no source
+// copybook as written, as they are on the nodes built from it, and the
+// position's Text names that copybook — by the text-name and library the
+// [CopyBookResolver] was asked for — along with the chain of COPY statements
+// that reached it ([Pos.CopyChain], innermost first). Text is nil for a position
+// in the source given to [Parse], so a source that copies nothing reports
+// exactly the lines and columns it always has. Error strings name only the line
+// and column; see [LibraryText] for why, and for the position given to a word a
+// REPLACING substitution produced. Errors with no source
 // position — the codec package's, a PICTURE character-string's byte offsets in
 // the picture package, [UnexpectedEndOfTokensError], [UnsupportedNodeError] —
 // do not implement [Positioned].
