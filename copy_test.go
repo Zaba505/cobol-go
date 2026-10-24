@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -21,11 +22,57 @@ import (
 //go:embed testdata
 var testdataFS embed.FS
 
+// copiedFrom returns the [LibraryText] a position carries inside the copybook
+// the resolver was asked for as name and library, brought in by the COPY keyword
+// at copyAt.
+func copiedFrom(name, library string, copyAt Pos) *LibraryText {
+	return &LibraryText{Name: name, Library: library, Copy: copyAt}
+}
+
+// inText sets the Text of every [Pos] reachable from v — a pointer into an AST
+// — to text, so an AST parsed from a copybook directly can be compared with the
+// same copybook copied into a source.
+func inText(t *testing.T, v any, text *LibraryText) {
+	t.Helper()
+	seen := map[uintptr]bool{}
+	var walk func(rv reflect.Value)
+	walk = func(rv reflect.Value) {
+		switch rv.Kind() {
+		case reflect.Pointer:
+			if rv.IsNil() || seen[rv.Pointer()] {
+				return
+			}
+			seen[rv.Pointer()] = true
+			walk(rv.Elem())
+		case reflect.Interface:
+			if !rv.IsNil() {
+				walk(rv.Elem())
+			}
+		case reflect.Struct:
+			if rv.Type() == reflect.TypeFor[Pos]() {
+				require.True(t, rv.CanSet(), "a Pos inText cannot set")
+				rv.FieldByName("Text").Set(reflect.ValueOf(text))
+				return
+			}
+			for i := range rv.NumField() {
+				walk(rv.Field(i))
+			}
+		case reflect.Slice, reflect.Array:
+			for i := range rv.Len() {
+				walk(rv.Index(i))
+			}
+		default:
+		}
+	}
+	walk(reflect.ValueOf(v))
+}
+
 // A COPY statement is replaced by the library text it names before the parser
 // runs, so the AST holds the copied entries and nothing of the statement. Each
 // case asserts the whole resulting fragment, positions included: a copied entry's
-// position is its position within the copybook, which is the one thing about
-// this pass a caller can observe and be surprised by.
+// position is its position within the copybook as written, in a text naming the
+// copybook, which is the one thing about this pass a caller can observe and be
+// surprised by.
 func TestParserCopy(t *testing.T) {
 	t.Parallel()
 
@@ -38,6 +85,16 @@ func TestParserCopy(t *testing.T) {
 		"lower.cpy":      "01 LOWER-RECORD.\n",
 		"FLAGS":          "77 F PIC X.\n88 F-NUL VALUE X'00'.\n",
 	}
+
+	// Each copied position names the copybook the resolver was asked for and
+	// the COPY keyword that brought it in.
+	flags := copiedFrom("FLAGS", "", Pos{Line: 1, Column: 1})
+	custrec := copiedFrom("CUSTREC", "", Pos{Line: 1, Column: 1})
+	custrecLower := copiedFrom("custrec", "", Pos{Line: 1, Column: 1})
+	payrec := copiedFrom("CUSTREC", "PAYLIB", Pos{Line: 1, Column: 1})
+	lower := copiedFrom("lower.cpy", "", Pos{Line: 1, Column: 1})
+	taggedOnLine2 := copiedFrom("TAGGED", "", Pos{Line: 2, Column: 1})
+	tagged := copiedFrom("TAGGED", "", Pos{Line: 1, Column: 1})
 
 	testCases := []struct {
 		name     string
@@ -53,17 +110,17 @@ func TestParserCopy(t *testing.T) {
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:     Pos{Line: 1, Column: 1},
+							Pos:     Pos{Line: 1, Column: 1, Text: flags},
 							Level:   77,
-							Name:    &Word{Pos: Pos{Line: 1, Column: 4}, Value: "F"},
-							Clauses: []DataClause{&PictureClause{Pos: Pos{Line: 1, Column: 6}, Picture: "X"}},
+							Name:    &Word{Pos: Pos{Line: 1, Column: 4, Text: flags}, Value: "F"},
+							Clauses: []DataClause{&PictureClause{Pos: Pos{Line: 1, Column: 6, Text: flags}, Picture: "X"}},
 						},
 						{
-							Pos:   Pos{Line: 2, Column: 1},
+							Pos:   Pos{Line: 2, Column: 1, Text: flags},
 							Level: 88,
-							Name:  &Word{Pos: Pos{Line: 2, Column: 4}, Value: "F-NUL"},
-							Clauses: []DataClause{&ValueClause{Pos: Pos{Line: 2, Column: 10}, Values: []ValueSpec{
-								{From: &StringLiteral{Pos: Pos{Line: 2, Column: 16}, Kind: LiteralHexadecimal, Value: "'FF'"}},
+							Name:  &Word{Pos: Pos{Line: 2, Column: 4, Text: flags}, Value: "F-NUL"},
+							Clauses: []DataClause{&ValueClause{Pos: Pos{Line: 2, Column: 10, Text: flags}, Values: []ValueSpec{
+								{From: &StringLiteral{Pos: Pos{Line: 2, Column: 16, Text: flags}, Kind: LiteralHexadecimal, Value: "'FF'"}},
 							}}},
 						},
 					},
@@ -77,16 +134,16 @@ func TestParserCopy(t *testing.T) {
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:   Pos{Line: 1, Column: 1},
+							Pos:   Pos{Line: 1, Column: 1, Text: custrec},
 							Level: 1,
-							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUSTOMER-RECORD"},
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4, Text: custrec}, Value: "CUSTOMER-RECORD"},
 						},
 						{
-							Pos:   Pos{Line: 2, Column: 4},
+							Pos:   Pos{Line: 2, Column: 4, Text: custrec},
 							Level: 5,
-							Name:  &Word{Pos: Pos{Line: 2, Column: 7}, Value: "CUST-ID"},
+							Name:  &Word{Pos: Pos{Line: 2, Column: 7, Text: custrec}, Value: "CUST-ID"},
 							Clauses: []DataClause{
-								&PictureClause{Pos: Pos{Line: 2, Column: 15}, Picture: "9(6)"},
+								&PictureClause{Pos: Pos{Line: 2, Column: 15, Text: custrec}, Picture: "9(6)"},
 							},
 						},
 					},
@@ -102,16 +159,16 @@ func TestParserCopy(t *testing.T) {
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:   Pos{Line: 1, Column: 1},
+							Pos:   Pos{Line: 1, Column: 1, Text: custrecLower},
 							Level: 1,
-							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUSTOMER-RECORD"},
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4, Text: custrecLower}, Value: "CUSTOMER-RECORD"},
 						},
 						{
-							Pos:   Pos{Line: 2, Column: 4},
+							Pos:   Pos{Line: 2, Column: 4, Text: custrecLower},
 							Level: 5,
-							Name:  &Word{Pos: Pos{Line: 2, Column: 7}, Value: "CUST-ID"},
+							Name:  &Word{Pos: Pos{Line: 2, Column: 7, Text: custrecLower}, Value: "CUST-ID"},
 							Clauses: []DataClause{
-								&PictureClause{Pos: Pos{Line: 2, Column: 15}, Picture: "9(6)"},
+								&PictureClause{Pos: Pos{Line: 2, Column: 15, Text: custrecLower}, Picture: "9(6)"},
 							},
 						},
 					},
@@ -127,9 +184,9 @@ func TestParserCopy(t *testing.T) {
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:   Pos{Line: 1, Column: 1},
+							Pos:   Pos{Line: 1, Column: 1, Text: payrec},
 							Level: 1,
-							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "PAY-RECORD"},
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4, Text: payrec}, Value: "PAY-RECORD"},
 						},
 					},
 				},
@@ -142,9 +199,9 @@ func TestParserCopy(t *testing.T) {
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:   Pos{Line: 1, Column: 1},
+							Pos:   Pos{Line: 1, Column: 1, Text: payrec},
 							Level: 1,
-							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "PAY-RECORD"},
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4, Text: payrec}, Value: "PAY-RECORD"},
 						},
 					},
 				},
@@ -158,9 +215,9 @@ func TestParserCopy(t *testing.T) {
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:   Pos{Line: 1, Column: 1},
+							Pos:   Pos{Line: 1, Column: 1, Text: lower},
 							Level: 1,
-							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "LOWER-RECORD"},
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4, Text: lower}, Value: "LOWER-RECORD"},
 						},
 					},
 				},
@@ -169,7 +226,10 @@ func TestParserCopy(t *testing.T) {
 		{
 			// The pervasive idiom the story exists for: :TAG: is three text
 			// words, the replacement covers exactly their span, and the
-			// -ID that follows is left welded to what went in.
+			// -ID that follows is left welded to what went in. Positions are
+			// as written: CUST-ID sits where :TAG:-ID begins, and PIC keeps the
+			// column 15 it has in the copybook, though the substitution
+			// shortened the word before it by one.
 			name: "replacing a pseudo-text tag",
 			src: "01 CUSTOMER-RECORD.\n" +
 				"COPY TAGGED REPLACING ==:TAG:== BY ==CUST==.\n",
@@ -182,19 +242,19 @@ func TestParserCopy(t *testing.T) {
 							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUSTOMER-RECORD"},
 						},
 						{
-							Pos:   Pos{Line: 1, Column: 1},
+							Pos:   Pos{Line: 1, Column: 1, Text: taggedOnLine2},
 							Level: 5,
-							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUST-ID"},
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4, Text: taggedOnLine2}, Value: "CUST-ID"},
 							Clauses: []DataClause{
-								&PictureClause{Pos: Pos{Line: 1, Column: 14}, Picture: "9(6)"},
+								&PictureClause{Pos: Pos{Line: 1, Column: 15, Text: taggedOnLine2}, Picture: "9(6)"},
 							},
 						},
 						{
-							Pos:   Pos{Line: 2, Column: 1},
+							Pos:   Pos{Line: 2, Column: 1, Text: taggedOnLine2},
 							Level: 5,
-							Name:  &Word{Pos: Pos{Line: 2, Column: 4}, Value: "CUST-NAME"},
+							Name:  &Word{Pos: Pos{Line: 2, Column: 4, Text: taggedOnLine2}, Value: "CUST-NAME"},
 							Clauses: []DataClause{
-								&PictureClause{Pos: Pos{Line: 2, Column: 14}, Picture: "X(20)"},
+								&PictureClause{Pos: Pos{Line: 2, Column: 15, Text: taggedOnLine2}, Picture: "X(20)"},
 							},
 						},
 					},
@@ -203,26 +263,28 @@ func TestParserCopy(t *testing.T) {
 		},
 		{
 			// A REPLACING phrase is a list with no separator; it ends at the
-			// first token that cannot begin an operand.
+			// first token that cannot begin an operand. The PIC 9(9) the second
+			// substitution produced is positioned where the PIC 9(6) it
+			// replaced begins.
 			name: "two replacements in one phrase",
 			src:  "COPY TAGGED REPLACING ==:TAG:== BY ==CUST== ==PIC 9(6)== BY ==PIC 9(9)==.\n",
 			expected: &File{
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:   Pos{Line: 1, Column: 1},
+							Pos:   Pos{Line: 1, Column: 1, Text: tagged},
 							Level: 5,
-							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUST-ID"},
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4, Text: tagged}, Value: "CUST-ID"},
 							Clauses: []DataClause{
-								&PictureClause{Pos: Pos{Line: 1, Column: 14}, Picture: "9(9)"},
+								&PictureClause{Pos: Pos{Line: 1, Column: 15, Text: tagged}, Picture: "9(9)"},
 							},
 						},
 						{
-							Pos:   Pos{Line: 2, Column: 1},
+							Pos:   Pos{Line: 2, Column: 1, Text: tagged},
 							Level: 5,
-							Name:  &Word{Pos: Pos{Line: 2, Column: 4}, Value: "CUST-NAME"},
+							Name:  &Word{Pos: Pos{Line: 2, Column: 4, Text: tagged}, Value: "CUST-NAME"},
 							Clauses: []DataClause{
-								&PictureClause{Pos: Pos{Line: 2, Column: 14}, Picture: "X(20)"},
+								&PictureClause{Pos: Pos{Line: 2, Column: 15, Text: tagged}, Picture: "X(20)"},
 							},
 						},
 					},
@@ -231,23 +293,24 @@ func TestParserCopy(t *testing.T) {
 		},
 		{
 			// The operands need not be pseudo-text: a bare word replaces a
-			// single text word.
+			// single text word. CUST-KEY is one longer than the CUST-ID it
+			// replaced, and PIC keeps its column as written.
 			name: "word operands",
 			src:  "COPY CUSTREC REPLACING CUST-ID BY CUST-KEY.\n",
 			expected: &File{
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:   Pos{Line: 1, Column: 1},
+							Pos:   Pos{Line: 1, Column: 1, Text: custrec},
 							Level: 1,
-							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUSTOMER-RECORD"},
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4, Text: custrec}, Value: "CUSTOMER-RECORD"},
 						},
 						{
-							Pos:   Pos{Line: 2, Column: 4},
+							Pos:   Pos{Line: 2, Column: 4, Text: custrec},
 							Level: 5,
-							Name:  &Word{Pos: Pos{Line: 2, Column: 7}, Value: "CUST-KEY"},
+							Name:  &Word{Pos: Pos{Line: 2, Column: 7, Text: custrec}, Value: "CUST-KEY"},
 							Clauses: []DataClause{
-								&PictureClause{Pos: Pos{Line: 2, Column: 16}, Picture: "9(6)"},
+								&PictureClause{Pos: Pos{Line: 2, Column: 15, Text: custrec}, Picture: "9(6)"},
 							},
 						},
 					},
@@ -262,14 +325,14 @@ func TestParserCopy(t *testing.T) {
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:   Pos{Line: 1, Column: 1},
+							Pos:   Pos{Line: 1, Column: 1, Text: custrec},
 							Level: 1,
-							Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUSTOMER-RECORD"},
+							Name:  &Word{Pos: Pos{Line: 1, Column: 4, Text: custrec}, Value: "CUSTOMER-RECORD"},
 						},
 						{
-							Pos:   Pos{Line: 2, Column: 4},
+							Pos:   Pos{Line: 2, Column: 4, Text: custrec},
 							Level: 5,
-							Name:  &Word{Pos: Pos{Line: 2, Column: 7}, Value: "CUST-ID"},
+							Name:  &Word{Pos: Pos{Line: 2, Column: 7, Text: custrec}, Value: "CUST-ID"},
 						},
 					},
 				},
@@ -284,17 +347,17 @@ func TestParserCopy(t *testing.T) {
 				Fragment: &Fragment{
 					Entries: []*DataDescriptionEntry{
 						{
-							Pos:      Pos{Line: 1, Column: 1},
+							Pos:      Pos{Line: 1, Column: 1, Text: custrec},
 							Comments: []*Comment{{Pos: Pos{Line: 1, Column: 14}, Text: "from the shared library"}},
 							Level:    1,
-							Name:     &Word{Pos: Pos{Line: 1, Column: 4}, Value: "CUSTOMER-RECORD"},
+							Name:     &Word{Pos: Pos{Line: 1, Column: 4, Text: custrec}, Value: "CUSTOMER-RECORD"},
 						},
 						{
-							Pos:   Pos{Line: 2, Column: 4},
+							Pos:   Pos{Line: 2, Column: 4, Text: custrec},
 							Level: 5,
-							Name:  &Word{Pos: Pos{Line: 2, Column: 7}, Value: "CUST-ID"},
+							Name:  &Word{Pos: Pos{Line: 2, Column: 7, Text: custrec}, Value: "CUST-ID"},
 							Clauses: []DataClause{
-								&PictureClause{Pos: Pos{Line: 2, Column: 15}, Picture: "9(6)"},
+								&PictureClause{Pos: Pos{Line: 2, Column: 15, Text: custrec}, Picture: "9(6)"},
 							},
 						},
 					},
@@ -505,6 +568,9 @@ func TestParserCopyFixedFormat(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	// The copied positions are positions in the copybook as written: PIC is
+	// at column 27 there, though ==CUST== made the word before it one shorter.
+	custrec := copiedFrom("CUSTREC", "", Pos{Line: 3, Column: 12})
 	require.Equal(t, &File{
 		Fragment: &Fragment{
 			Entries: []*DataDescriptionEntry{
@@ -515,19 +581,19 @@ func TestParserCopyFixedFormat(t *testing.T) {
 					Name:     &Word{Pos: Pos{Line: 2, Column: 12}, Value: "CUSTOMER-RECORD"},
 				},
 				{
-					Pos:   Pos{Line: 1, Column: 12},
+					Pos:   Pos{Line: 1, Column: 12, Text: custrec},
 					Level: 5,
-					Name:  &Word{Pos: Pos{Line: 1, Column: 16}, Value: "CUST-ID"},
+					Name:  &Word{Pos: Pos{Line: 1, Column: 16, Text: custrec}, Value: "CUST-ID"},
 					Clauses: []DataClause{
-						&PictureClause{Pos: Pos{Line: 1, Column: 26}, Picture: "9(6)"},
+						&PictureClause{Pos: Pos{Line: 1, Column: 27, Text: custrec}, Picture: "9(6)"},
 					},
 				},
 				{
-					Pos:   Pos{Line: 2, Column: 12},
+					Pos:   Pos{Line: 2, Column: 12, Text: custrec},
 					Level: 5,
-					Name:  &Word{Pos: Pos{Line: 2, Column: 16}, Value: "CUST-NAME"},
+					Name:  &Word{Pos: Pos{Line: 2, Column: 16, Text: custrec}, Value: "CUST-NAME"},
 					Clauses: []DataClause{
-						&PictureClause{Pos: Pos{Line: 2, Column: 26}, Picture: "X(20)"},
+						&PictureClause{Pos: Pos{Line: 2, Column: 27, Text: custrec}, Picture: "X(20)"},
 					},
 				},
 			},
@@ -832,7 +898,8 @@ func TestApplyReplacing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			require.Equal(t, tc.expected, applyReplacing(tc.src, tc.replacements))
+			got, _ := applyReplacing(tc.src, tc.replacements)
+			require.Equal(t, tc.expected, got)
 		})
 	}
 }
@@ -1097,6 +1164,9 @@ func TestParserCopyFromEmbedFS(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	// Copied, every position is the one the copybook read directly has, in a
+	// text naming the copybook and the COPY keyword at column 12.
+	inText(t, direct, copiedFrom("customer_copybook.cpy", "", Pos{Line: 1, Column: 12}))
 	require.Equal(t, direct, copied)
 	require.NotEmpty(t, copied.Fragment.Entries)
 }

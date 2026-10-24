@@ -1852,7 +1852,9 @@ func WithFragment() ParseOption {
 //
 // Nothing of the COPY statement survives into the [File]: the AST holds the
 // copied entries themselves, and their positions are positions within the
-// copybook. Without this option a COPY statement in the source is a
+// copybook as written, each naming the copybook and the chain of COPY
+// statements that reached it through its Text (see [Pos] and [LibraryText]).
+// Without this option a COPY statement in the source is a
 // [MissingCopyBookResolverError].
 func WithCopyBooks(r CopyBookResolver) ParseOption {
 	return func(c *parseConfig) { c.copyBooks = r }

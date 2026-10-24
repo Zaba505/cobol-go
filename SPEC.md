@@ -768,7 +768,13 @@ expansion that never terminates.
 > serves an in-memory map. Replacement is applied to the copybook's **text**
 > before that text is tokenized, and the copied text is read in the same
 > reference format as the source that copied it. Positions on copied nodes are
-> positions *within the copybook*, since `Pos` has no field naming a file. The
+> positions *within the copybook as written* — mapped back through any
+> `REPLACING` substitution — and `Pos.Text` names the copybook by the text-name
+> and library the resolver was asked for, with the `COPY` statement that brought
+> it in (itself a `Pos`, so the chain of nested `COPY` statements follows,
+> innermost first, through `Pos.CopyChain`). `Text` is nil in the source given
+> to `Parse`. A word a substitution produced is positioned at the first
+> character of the text words it replaced (#143). The
 > `REPLACE` **statement** (which manipulates the source unit's own text rather
 > than library text) and the COBOL 2002 `REPLACING LEADING`/`TRAILING` phrases
 > remain deferred.
