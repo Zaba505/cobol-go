@@ -7,6 +7,7 @@ package cobol
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2105,6 +2106,200 @@ func TestPrintFragment(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, Print(&buf, f))
 	require.Equal(t, expected, buf.String())
+}
+
+// TestEntryDepths pins each case of the depth rule EntryDepths states: 01–49 by
+// open groups, an 88 one under the nearest non-88 entry before it, 66 and 77 at
+// the record level, and a nil entry at depth 0 without disturbing the rest.
+func TestEntryDepths(t *testing.T) {
+	t.Parallel()
+
+	entry := func(level int) *DataDescriptionEntry {
+		return &DataDescriptionEntry{Level: level}
+	}
+
+	testCases := []struct {
+		name     string
+		entries  []*DataDescriptionEntry
+		expected []int
+	}{
+		{
+			name:     "nil list",
+			entries:  nil,
+			expected: []int{},
+		},
+		{
+			name:     "single record",
+			entries:  []*DataDescriptionEntry{entry(1)},
+			expected: []int{0},
+		},
+		{
+			name:     "nested groups",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(10), entry(15)},
+			expected: []int{0, 1, 2, 3},
+		},
+		{
+			name:     "siblings at the same level",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(5), entry(5)},
+			expected: []int{0, 1, 1, 1},
+		},
+		{
+			name:     "a lower level closes the deeper groups",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(10), entry(15), entry(5)},
+			expected: []int{0, 1, 2, 3, 1},
+		},
+		{
+			name:     "a level between two open groups closes only the deeper one",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(10), entry(7), entry(10)},
+			expected: []int{0, 1, 2, 2, 3},
+		},
+		{
+			name:     "a later 01 closes the open groups",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(10), entry(1), entry(5)},
+			expected: []int{0, 1, 2, 0, 1},
+		},
+		{
+			name:     "88 under an elementary item",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(10), entry(88)},
+			expected: []int{0, 1, 2, 3},
+		},
+		{
+			name:     "consecutive 88s share the nearest non-88 entry",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(88), entry(88), entry(88)},
+			expected: []int{0, 1, 2, 2, 2},
+		},
+		{
+			name:     "88 under a 01",
+			entries:  []*DataDescriptionEntry{entry(1), entry(88)},
+			expected: []int{0, 1},
+		},
+		{
+			name:     "88 under a 77",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(10), entry(77), entry(88)},
+			expected: []int{0, 1, 2, 0, 1},
+		},
+		{
+			name:     "88 under a 66",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(66), entry(88)},
+			expected: []int{0, 1, 0, 1},
+		},
+		{
+			name:     "88 with no entry before it",
+			entries:  []*DataDescriptionEntry{entry(88), entry(1)},
+			expected: []int{1, 0},
+		},
+		{
+			name:     "66 after a nested group",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(10), entry(15), entry(66)},
+			expected: []int{0, 1, 2, 3, 0},
+		},
+		{
+			name:     "77 records at depth 0",
+			entries:  []*DataDescriptionEntry{entry(77), entry(77), entry(1), entry(77)},
+			expected: []int{0, 0, 0, 0},
+		},
+		{
+			name:     "66 and 77 leave the open groups open",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(66), entry(77), entry(10)},
+			expected: []int{0, 1, 0, 0, 2},
+		},
+		{
+			name:     "a nil entry is at depth 0",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), nil, entry(10)},
+			expected: []int{0, 1, 0, 2},
+		},
+		{
+			name:     "a nil entry does not become the parent of an 88",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), nil, entry(88)},
+			expected: []int{0, 1, 0, 2},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tc.expected, EntryDepths(tc.entries))
+		})
+	}
+}
+
+// TestPrintIndentsToEntryDepths ties EntryDepths to Print: every entry line
+// Print writes is indented by exactly the depth EntryDepths reports for it, in
+// a fragment, a WORKING-STORAGE section and an FD's records alike.
+func TestPrintIndentsToEntryDepths(t *testing.T) {
+	t.Parallel()
+
+	entries := func() []*DataDescriptionEntry {
+		levels := []int{1, 5, 10, 88, 15, 88, 88, 5, 7, 10, 66, 77, 88, 10, 1, 5, 88}
+		out := make([]*DataDescriptionEntry, len(levels))
+		for i, level := range levels {
+			out[i] = &DataDescriptionEntry{Level: level, Name: &Word{Value: fmt.Sprintf("ITEM-%d", i)}}
+		}
+		return out
+	}
+
+	testCases := []struct {
+		name    string
+		entries []*DataDescriptionEntry
+		file    func([]*DataDescriptionEntry) *File
+	}{
+		{
+			name:    "fragment",
+			entries: entries(),
+			file: func(es []*DataDescriptionEntry) *File {
+				return &File{Fragment: &Fragment{Entries: es}}
+			},
+		},
+		{
+			name:    "working-storage section",
+			entries: entries(),
+			file: func(es []*DataDescriptionEntry) *File {
+				return &File{Programs: []*Program{{Divisions: []Division{
+					&IdentificationDivision{ProgramID: &ProgramID{Name: &Word{Value: "DEPTHS"}}},
+					&DataDivision{WorkingStorage: &DataSection{Entries: es}},
+				}}}}
+			},
+		},
+		{
+			name:    "file description records",
+			entries: entries(),
+			file: func(es []*DataDescriptionEntry) *File {
+				return &File{Programs: []*Program{{Divisions: []Division{
+					&IdentificationDivision{ProgramID: &ProgramID{Name: &Word{Value: "DEPTHS"}}},
+					&DataDivision{File: &FileSection{Entries: []*FileDescriptionEntry{
+						{Kind: "FD", Name: &Word{Value: "IN-FILE"}, Records: es},
+					}}},
+				}}}}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			require.NoError(t, Print(&buf, tc.file(tc.entries)))
+
+			depths := EntryDepths(tc.entries)
+			got := make(map[string]int, len(tc.entries))
+			for _, line := range strings.Split(buf.String(), "\n") {
+				trimmed := strings.TrimLeft(line, " ")
+				fields := strings.Fields(trimmed)
+				if len(fields) < 2 || !strings.HasPrefix(fields[1], "ITEM-") {
+					continue
+				}
+				indentWidth := len(line) - len(trimmed)
+				require.Zero(t, indentWidth%len(indentUnit), "line %q", line)
+				got[strings.TrimSuffix(fields[1], ".")] = indentWidth / len(indentUnit)
+			}
+			require.Len(t, got, len(tc.entries))
+			for i, e := range tc.entries {
+				require.Equal(t, depths[i], got[e.Name.Value], "entry %s (level %02d)", e.Name.Value, e.Level)
+			}
+		})
+	}
 }
 
 // TestPrintFragmentDropsListingDirectives is the direct half of the discard
