@@ -1444,3 +1444,212 @@ func TestTokenizerFixedFormatUnterminatedContinuation(t *testing.T) {
 	require.ErrorAs(t, got, &unterminated)
 	require.Equal(t, Pos{Line: 1, Column: 8}, unterminated.Pos)
 }
+
+// A literal prefix directly followed by a delimiter is part of the literal's
+// token (SPEC §Literals): one TokenString whose value is the whole lexeme,
+// prefix as written. Every prefix SPEC.md admits is pinned, in both letter cases
+// and with both delimiters, in free and fixed format.
+func TestTokenizerPrefixedLiterals(t *testing.T) {
+	t.Parallel()
+
+	collect := func(seq iter.Seq2[Token, error]) ([]Token, error) {
+		var tokens []Token
+		for tok, err := range seq {
+			if err != nil {
+				return tokens, err
+			}
+			tokens = append(tokens, tok)
+		}
+		return tokens, nil
+	}
+	str := func(line, col int, v string) Token {
+		return Token{Pos: Pos{Line: line, Column: col}, Type: TokenString, Value: []byte(v)}
+	}
+	word := func(line, col int, v string) Token {
+		return Token{Pos: Pos{Line: line, Column: col}, Type: TokenIdentifier, Value: []byte(v)}
+	}
+
+	testCases := []struct {
+		name     string
+		src      string
+		opts     []TokenizeOption
+		expected []Token
+	}{
+		{name: "hexadecimal", src: "X'C1C2'", expected: []Token{str(1, 1, "X'C1C2'")}},
+		{name: "hexadecimal lower case", src: "x'c1c2'", expected: []Token{str(1, 1, "x'c1c2'")}},
+		{name: "hexadecimal double quotes", src: `X"C1C2"`, expected: []Token{str(1, 1, `X"C1C2"`)}},
+		{name: "hexadecimal empty", src: "X''", expected: []Token{str(1, 1, "X''")}},
+		{name: "hexadecimal numeric", src: "H'FF'", expected: []Token{str(1, 1, "H'FF'")}},
+		{name: "hexadecimal numeric odd digit count", src: `h"f"`, expected: []Token{str(1, 1, `h"f"`)}},
+		{name: "octal numeric", src: "O'17'", expected: []Token{str(1, 1, "O'17'")}},
+		{name: "octal numeric lower case", src: `o"17"`, expected: []Token{str(1, 1, `o"17"`)}},
+		{name: "national", src: "N'AB'", expected: []Token{str(1, 1, "N'AB'")}},
+		{name: "national lower case double quotes", src: `n"ab"`, expected: []Token{str(1, 1, `n"ab"`)}},
+		{name: "national with doubled delimiter", src: "N'IT''S'", expected: []Token{str(1, 1, "N'IT''S'")}},
+		{name: "null-terminated", src: "Z'AB'", expected: []Token{str(1, 1, "Z'AB'")}},
+		{name: "null-terminated lower case", src: `z"ab"`, expected: []Token{str(1, 1, `z"ab"`)}},
+		{name: "boolean", src: "B'1010'", expected: []Token{str(1, 1, "B'1010'")}},
+		{name: "boolean lower case double quotes", src: `b"01"`, expected: []Token{str(1, 1, `b"01"`)}},
+		{
+			name: "in a value clause",
+			src:  "05 F PIC X(2) VALUE X'C1C2'.",
+			expected: []Token{
+				{Pos: Pos{Line: 1, Column: 1}, Type: TokenNumber, Value: []byte("05")},
+				word(1, 4, "F"),
+				word(1, 6, "PIC"),
+				{Pos: Pos{Line: 1, Column: 10}, Type: TokenPicture, Value: []byte("X(2)")},
+				word(1, 15, "VALUE"),
+				str(1, 21, "X'C1C2'"),
+				{Pos: Pos{Line: 1, Column: 28}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// With a space between them the prefix is an ordinary word and the
+			// literal an ordinary alphanumeric one.
+			name:     "prefix separated by a space stays a word",
+			src:      "X 'C1'",
+			expected: []Token{word(1, 1, "X"), str(1, 3, "'C1'")},
+		},
+		{
+			// Only a word that is the prefix letter alone opens a prefixed
+			// literal; a longer word ending in a prefix letter does not.
+			name:     "word ending in a prefix letter",
+			src:      "AX'C1'",
+			expected: []Token{word(1, 1, "AX"), str(1, 3, "'C1'")},
+		},
+		{
+			name:     "a letter that is not a prefix",
+			src:      "Q'C1'",
+			expected: []Token{word(1, 1, "Q"), str(1, 2, "'C1'")},
+		},
+		{
+			// Free format continues a literal with the & operator, which joins
+			// whole literal tokens; each prefixed fragment stays one token, prefix
+			// and all, whatever the line break between them.
+			name: "free format concatenation",
+			src:  "X'C1' &\n  X'C2' & 'A'",
+			expected: []Token{
+				str(1, 1, "X'C1'"),
+				{Pos: Pos{Line: 1, Column: 7}, Type: TokenSymbol, Value: []byte("&")},
+				str(2, 3, "X'C2'"),
+				{Pos: Pos{Line: 2, Column: 9}, Type: TokenSymbol, Value: []byte("&")},
+				str(2, 11, "'A'"),
+			},
+		},
+		{
+			name:     "fixed format",
+			src:      "000100     MOVE X'C1C2' TO F.\n",
+			opts:     []TokenizeOption{WithFixedFormat()},
+			expected: []Token{word(1, 12, "MOVE"), str(1, 17, "X'C1C2'"), word(1, 25, "TO"), word(1, 28, "F"), {Pos: Pos{Line: 1, Column: 29}, Type: TokenSymbol, Value: []byte(".")}},
+		},
+		{
+			// A hexadecimal literal filled exactly to column 72 continues on a
+			// '-' line like any alphanumeric literal, and is still one token.
+			name: "fixed format continuation",
+			src: "        X'" + strings.Repeat("C1", 31) + "\n" +
+				"      -    'C2C3'.\n",
+			opts: []TokenizeOption{WithFixedFormat()},
+			expected: []Token{
+				str(1, 9, "X'"+strings.Repeat("C1", 31)+"C2C3'"),
+				{Pos: Pos{Line: 2, Column: 18}, Type: TokenSymbol, Value: []byte(".")},
+			},
+		},
+		{
+			// A prefix at column 72 is followed by an ignored column-73
+			// character, not by a delimiter: it is a word.
+			name: "fixed format prefix at column 72",
+			src:  "       " + strings.Repeat(" ", 64) + "X'C1'\n",
+			opts: []TokenizeOption{WithFixedFormat()},
+			expected: []Token{
+				word(1, 72, "X"),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tokens, err := collect(Tokenize(strings.NewReader(tc.src), tc.opts...))
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, tokens)
+		})
+	}
+}
+
+// A prefixed literal whose body breaks its kind's digit rule is an
+// InvalidLiteralError at the prefix's position (SPEC §Literals).
+func TestTokenizerInvalidPrefixedLiterals(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		src  string
+		opts []TokenizeOption
+		want InvalidLiteralError
+	}{
+		{
+			name: "hexadecimal with an odd number of digits",
+			src:  "VALUE X'C1C'",
+			want: InvalidLiteralError{Pos: Pos{Line: 1, Column: 7}, Kind: LiteralHexadecimal, Literal: "X'C1C'", Reason: "an odd number of hexadecimal digits (3); each pair is one byte"},
+		},
+		{
+			name: "hexadecimal with a non-hex digit",
+			src:  "\n  x\"G0\"",
+			want: InvalidLiteralError{Pos: Pos{Line: 2, Column: 3}, Kind: LiteralHexadecimal, Literal: `x"G0"`, Reason: "'G' is not one of its digits (0-9, A-F)"},
+		},
+		{
+			name: "hexadecimal numeric with a non-hex digit",
+			src:  "H'FZ'",
+			want: InvalidLiteralError{Pos: Pos{Line: 1, Column: 1}, Kind: LiteralHexadecimalNumeric, Literal: "H'FZ'", Reason: "'Z' is not one of its digits (0-9, A-F)"},
+		},
+		{
+			name: "hexadecimal numeric with no digits",
+			src:  "H''",
+			want: InvalidLiteralError{Pos: Pos{Line: 1, Column: 1}, Kind: LiteralHexadecimalNumeric, Literal: "H''", Reason: "no digits"},
+		},
+		{
+			name: "octal numeric with a non-octal digit",
+			src:  "O'18'",
+			want: InvalidLiteralError{Pos: Pos{Line: 1, Column: 1}, Kind: LiteralOctalNumeric, Literal: "O'18'", Reason: "'8' is not one of its digits (0-7)"},
+		},
+		{
+			name: "boolean with a non-bit digit",
+			src:  "B'102'",
+			want: InvalidLiteralError{Pos: Pos{Line: 1, Column: 1}, Kind: LiteralBoolean, Literal: "B'102'", Reason: "'2' is not one of its digits (0 or 1)"},
+		},
+		{
+			name: "boolean with no digits",
+			src:  `B""`,
+			want: InvalidLiteralError{Pos: Pos{Line: 1, Column: 1}, Kind: LiteralBoolean, Literal: `B""`, Reason: "no digits"},
+		},
+		{
+			// The padding spaces a short continued line contributes are part of
+			// the literal, so they are not hexadecimal digits.
+			name: "fixed format hexadecimal continued from a short line",
+			src: "       X'C1\n" +
+				"      -    'C2'.\n",
+			opts: []TokenizeOption{WithFixedFormat()},
+			want: InvalidLiteralError{Pos: Pos{Line: 1, Column: 8}, Kind: LiteralHexadecimal, Literal: "X'C1" + strings.Repeat(" ", 61) + "C2'", Reason: "' ' is not one of its digits (0-9, A-F)"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var err error
+			for _, e := range Tokenize(strings.NewReader(tc.src), tc.opts...) {
+				if e != nil {
+					err = e
+					break
+				}
+			}
+
+			var target InvalidLiteralError
+			require.ErrorAs(t, err, &target)
+			require.Equal(t, tc.want, target)
+		})
+	}
+}

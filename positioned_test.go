@@ -34,6 +34,7 @@ func TestPositioned(t *testing.T) {
 		{name: "unexpected character", err: UnexpectedCharacterError{Pos: pos, R: '~'}},
 		{name: "unterminated string", err: UnterminatedStringError{Pos: pos}},
 		{name: "unterminated pseudo-text", err: UnterminatedPseudoTextError{Pos: pos}},
+		{name: "invalid literal", err: InvalidLiteralError{Pos: pos, Kind: LiteralHexadecimal, Literal: "X'C'", Reason: "odd"}},
 		{name: "copybook not found", err: CopyBookNotFoundError{Pos: pos, Name: "CUST", Err: fs.ErrNotExist}},
 		{name: "copybook cycle", err: CopyBookCycleError{Pos: pos, Name: "CUST", Stack: []string{"CUST", "CUST"}}},
 		{name: "missing copybook resolver", err: MissingCopyBookResolverError{Pos: pos, Name: "CUST"}},
@@ -73,6 +74,11 @@ func TestPositionedFromParse(t *testing.T) {
 			name: "invalid level number",
 			src:  "01 REC.\n   50 CUST-ID PIC X.\n",
 			pos:  Pos{Line: 2, Column: 4},
+		},
+		{
+			name: "invalid literal",
+			src:  "01 REC PIC X.\n   88 REC-NUL VALUE X'0'.\n",
+			pos:  Pos{Line: 2, Column: 21},
 		},
 		{
 			name: "trailing token",

@@ -454,7 +454,11 @@ func specialNamesClauseText(clause SpecialNamesClause) (string, bool) {
 		if c == nil || c.Sign == nil {
 			return "", false
 		}
-		return "CURRENCY SIGN IS " + c.Sign.Value, true
+		sign, ok := literalText(c.Sign)
+		if !ok {
+			return "", false
+		}
+		return "CURRENCY SIGN IS " + sign, true
 	default:
 		return "", false
 	}
@@ -2367,7 +2371,11 @@ func printCallStatement(stmt *CallStatement, depth int, next printerAction) prin
 			if t == nil {
 				return failPrint(UnsupportedNodeError{Node: stmt.Target})
 			}
-			target = t.Value
+			text, ok := literalText(t)
+			if !ok {
+				return failPrint(UnsupportedNodeError{Node: stmt.Target})
+			}
+			target = text
 		case *Identifier:
 			text, ok := identifierText(t)
 			if !ok {
@@ -2946,7 +2954,7 @@ func valueText(v Type) (string, bool) {
 		if n == nil {
 			return "", false
 		}
-		return n.Value, true
+		return literalText(n)
 	case *NumericLiteral:
 		if n == nil {
 			return "", false
@@ -2970,6 +2978,28 @@ func valueText(v Type) (string, bool) {
 	}
 }
 
+// literalText returns the source text of a delimited literal — its kind's
+// canonical prefix, if it has one, directly followed by its delimited body — and
+// whether it can be printed. A kind that is not one of the declared
+// [LiteralKind]s, or a prefixed literal whose body breaks its kind's digit rule
+// (a hand-built X'0', say), cannot: the first would lose its kind and the second
+// would print source [Parse] refuses, so the caller reports an
+// [UnsupportedNodeError] instead.
+func literalText(l *StringLiteral) (string, bool) {
+	if !l.Kind.valid() {
+		return "", false
+	}
+	if l.Kind != LiteralAlphanumeric {
+		if len(l.Value) < 2 || (l.Value[0] != '"' && l.Value[0] != '\'') || l.Value[len(l.Value)-1] != l.Value[0] {
+			return "", false
+		}
+		if checkLiteralBody(l.Kind, literalBody([]byte(l.Value))) != "" {
+			return "", false
+		}
+	}
+	return l.Kind.Prefix() + l.Value, true
+}
+
 // exprText returns the canonical source text of an arithmetic expression and
 // whether it could be rendered. Binary operators are surrounded by single spaces,
 // a unary sign is attached to its operand, and parenthesized groups are preserved
@@ -2989,7 +3019,7 @@ func exprText(e Expr) (string, bool) {
 		if n == nil {
 			return "", false
 		}
-		return n.Value, true
+		return literalText(n)
 	case *BinaryExpr:
 		if n == nil {
 			return "", false

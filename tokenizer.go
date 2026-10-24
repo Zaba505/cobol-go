@@ -67,7 +67,7 @@ const (
 	TokenComment    TokenType = iota // e.g. *> inline or full-line comment
 	TokenIdentifier                  // e.g. IDENTIFICATION, DIVISION, a data name
 	TokenSymbol                      // e.g. ".", "(", ")"
-	TokenString                      // e.g. "literal"
+	TokenString                      // e.g. "literal", or X'C1' with its prefix (see [StringLiteral])
 	TokenNumber                      // e.g. 123, 45.67
 	TokenPicture                     // e.g. S9(4)V99, X(10) (the SPEC's PictureString)
 	TokenDebug                       // a fixed-format column-7 'D'/'d' debugging line
@@ -235,6 +235,13 @@ func (t *tokenizer) peekIsDigit() bool {
 	return ok && '0' <= b && b <= '9'
 }
 
+// peekIsQuote reports whether the next unread byte is an alphanumeric-literal
+// delimiter (a double or single quote) still within Area B.
+func (t *tokenizer) peekIsQuote() bool {
+	b, ok := t.peekByte()
+	return ok && (b == '"' || b == '\'')
+}
+
 // peekDecimalPointDigit reports whether an unconsumed decimal point (the next
 // byte) is followed by a digit — i.e. it is a decimal point and not a trailing
 // separator period.
@@ -381,8 +388,10 @@ func tokenizeCOBOL(t *tokenizer, yield func(Token, error) bool) tokenizerAction 
 // column areas. A rune that begins no known token class yields an
 // [UnexpectedCharacterError].
 //
-// This recognizes COBOL words, alphanumeric literals, numeric literals, the
-// separator period, the readability separators comma and semicolon, the
+// This recognizes COBOL words, alphanumeric literals, prefixed literals (a
+// literal prefix — X, H, O, N, Z or B, either case — directly followed by a
+// delimiter; see [tokenizePrefixedString]), numeric literals, the separator
+// period, the readability separators comma and semicolon, the
 // parenthesis and colon separators, the special-character operators
 // (+ - * / ** = < > <= >= <>), the pseudo-text delimiter == (SPEC
 // §"COPY and Pseudo-Text"), the concatenation operator & (the free-format
@@ -408,6 +417,12 @@ func dispatchRune(t *tokenizer, yield func(Token, error) bool, pos Pos, r rune) 
 		return tokenizeSeparatorPunct(pos, r)
 	case r == '"' || r == '\'':
 		return tokenizeString(pos, r)
+	case literalKindOfPrefix(r) != LiteralAlphanumeric && t.peekIsQuote():
+		// A literal prefix directly followed by a delimiter opens a prefixed
+		// literal (SPEC §Literals): the prefix is part of the token. With a
+		// space between them the prefix is an ordinary word, handled below.
+		delim, _ := t.next()
+		return tokenizePrefixedString(pos, r, delim)
 	case isDigit(r):
 		return tokenizeNumber(pos, utf8.AppendRune(nil, r))
 	case (r == '+' || r == '-') && t.peekIsDigit():
@@ -1067,8 +1082,33 @@ func tokenizeNumber(start Pos, value []byte) tokenizerAction {
 // literal were written on one line. Missing the continuation is an
 // [UnterminatedStringError].
 func tokenizeString(start Pos, delim rune) tokenizerAction {
+	return tokenizeDelimitedLiteral(start, utf8.AppendRune(nil, delim), delim, LiteralAlphanumeric)
+}
+
+// tokenizePrefixedString accumulates a prefixed literal — X"…", H"…", O"…",
+// N"…", Z"…" or B"…" (SPEC §Literals) — whose prefix rune and opening delimiter
+// have both been consumed, the prefix at start. It emits one [TokenString] whose
+// value is the raw lexeme with the prefix as written (letter case preserved), so
+// X'C1C2' and x'c1c2' are each one token; the parser reads the prefix back into
+// [StringLiteral.Kind]. A [TokenString] value therefore opens with either a
+// delimiter or one of the six prefix letters, and with nothing else.
+//
+// The body is scanned exactly as [tokenizeString] scans an unprefixed literal —
+// doubled delimiters, the fixed-format column-72 continuation and all — and is
+// then checked against its kind's digit rule; a body that breaks it is an
+// [InvalidLiteralError] at the prefix.
+func tokenizePrefixedString(start Pos, prefix, delim rune) tokenizerAction {
+	value := utf8.AppendRune(utf8.AppendRune(nil, prefix), delim)
+	return tokenizeDelimitedLiteral(start, value, delim, literalKindOfPrefix(prefix))
+}
+
+// tokenizeDelimitedLiteral is the shared scanner behind [tokenizeString] and
+// [tokenizePrefixedString]. value already holds everything consumed — the
+// prefix, if any, and the opening delimiter — and the scan accumulates through
+// the matching close. A kind other than [LiteralAlphanumeric] has its body
+// checked by [checkLiteralBody] before the token is emitted.
+func tokenizeDelimitedLiteral(start Pos, value []byte, delim rune, kind LiteralKind) tokenizerAction {
 	return func(t *tokenizer, yield func(Token, error) bool) tokenizerAction {
-		value := utf8.AppendRune(nil, delim)
 		for {
 			if t.fixed && (t.pos.Column > fixedAreaBEndColumn || t.peekIsLineEnd()) {
 				if !t.fixedContinueLiteral(&value, delim) {
@@ -1097,11 +1137,76 @@ func tokenizeString(start Pos, delim rune) tokenizerAction {
 					value = utf8.AppendRune(value, escaped)
 					continue
 				}
+				if kind != LiteralAlphanumeric {
+					// A malformed literal ends the stream, as an unterminated
+					// one does: every tokenizer error here is terminal, and
+					// the parser stops at the first one in any case.
+					if reason := checkLiteralBody(kind, literalBody(value)); reason != "" {
+						yield(Token{}, InvalidLiteralError{Pos: start, Kind: kind, Literal: string(value), Reason: reason})
+						return nil
+					}
+				}
 				tok := Token{Pos: start, Type: TokenString, Value: value}
 				return yieldTokenThen(tok, tokenizeCOBOL)
 			}
 		}
 	}
+}
+
+// literalBody returns the content of a delimited literal's lexeme — the text
+// between its delimiters, with any prefix dropped and each doubled delimiter
+// undoubled to one.
+func literalBody(lexeme []byte) string {
+	s := string(lexeme)
+	if len(s) > 0 && s[0] != '"' && s[0] != '\'' {
+		s = s[1:]
+	}
+	if len(s) < 2 {
+		return ""
+	}
+	delim := s[:1]
+	return strings.ReplaceAll(s[1:len(s)-1], delim+delim, delim)
+}
+
+// checkLiteralBody checks the body of a prefixed literal against the digit rule
+// of its kind (SPEC §Literals), returning why it fails or "" when it holds:
+//
+//   - hexadecimal (X): hexadecimal digits, an even number of them, each pair one
+//     byte; the empty literal X"" is allowed, as "" is;
+//   - hexadecimal numeric (H): one or more hexadecimal digits;
+//   - octal numeric (O): one or more octal digits;
+//   - boolean (B): one or more of the digits 0 and 1;
+//   - national (N) and null-terminated (Z): any characters, as an unprefixed
+//     alphanumeric literal.
+func checkLiteralBody(kind LiteralKind, body string) string {
+	var digit func(r rune) bool
+	switch kind {
+	case LiteralHexadecimal, LiteralHexadecimalNumeric:
+		digit = isHexDigit
+	case LiteralOctalNumeric:
+		digit = func(r rune) bool { return '0' <= r && r <= '7' }
+	case LiteralBoolean:
+		digit = func(r rune) bool { return r == '0' || r == '1' }
+	default:
+		return ""
+	}
+	for _, r := range body {
+		if !digit(r) {
+			return fmt.Sprintf("%q is not one of its digits (%s)", r, kind.digitName())
+		}
+	}
+	switch {
+	case kind == LiteralHexadecimal && len(body)%2 != 0:
+		return fmt.Sprintf("an odd number of hexadecimal digits (%d); each pair is one byte", len(body))
+	case kind != LiteralHexadecimal && body == "":
+		return "no digits"
+	}
+	return ""
+}
+
+// isHexDigit reports whether r is a hexadecimal digit, in either letter case.
+func isHexDigit(r rune) bool {
+	return isDigit(r) || ('A' <= r && r <= 'F') || ('a' <= r && r <= 'f')
 }
 
 // tokenizePseudoText accumulates a pseudo-text literal — the == … == form that
@@ -1323,4 +1428,24 @@ func (e UnterminatedPseudoTextError) Position() Pos { return e.Pos }
 // Error implements the [error] interface.
 func (e UnterminatedPseudoTextError) Error() string {
 	return fmt.Sprintf("unterminated pseudo-text starting at line %d, column %d", e.Pos.Line, e.Pos.Column)
+}
+
+// InvalidLiteralError is returned when a prefixed literal (SPEC §Literals) is
+// not one its kind admits: by the tokenizer, when the body breaks the kind's
+// digit rule — a hexadecimal literal with an odd number of digits, or a digit its
+// kind does not use — and by the COPY statement, when a prefixed literal stands
+// where only a word or an unprefixed alphanumeric literal can name a copybook.
+type InvalidLiteralError struct {
+	Pos     Pos         // position of the literal's prefix
+	Kind    LiteralKind // the kind its prefix names
+	Literal string      // the literal as written, prefix and delimiters included
+	Reason  string      // why the literal is refused
+}
+
+// Position implements [Positioned], returning Pos.
+func (e InvalidLiteralError) Position() Pos { return e.Pos }
+
+// Error implements the [error] interface.
+func (e InvalidLiteralError) Error() string {
+	return fmt.Sprintf("invalid %s literal %s at line %d, column %d: %s", e.Kind, e.Literal, e.Pos.Line, e.Pos.Column, e.Reason)
 }

@@ -1030,16 +1030,151 @@ type Word struct {
 
 func (*Word) cobol() {}
 
-// StringLiteral is an alphanumeric literal. Pos is the position of the opening
-// delimiter; Value is the raw lexeme including both delimiters. Decoding the
-// content is deferred to a later story.
+// StringLiteral is a delimited literal: an alphanumeric literal, or one of the
+// prefixed literals SPEC §Literals admits — X"…", H"…", O"…", N"…", Z"…", B"…".
+//
+// Kind says which, so a consumer never re-reads the prefix from text: it is
+// [LiteralAlphanumeric] (the zero value) for an unprefixed literal and names the
+// prefix otherwise. Value is the raw lexeme of the delimited body — both
+// delimiters and any doubled-delimiter escapes included, the prefix not — so
+// X'C1C2' is Kind [LiteralHexadecimal] with Value 'C1C2', and the body of every
+// kind reads the same way. Pos is the position of the literal's first character:
+// the prefix when there is one, the opening delimiter otherwise.
+//
+// Value is never decoded here. In particular the body of a hexadecimal, numeric
+// or boolean literal is its digits, not its value: a consumer that takes Value as
+// the literal's text without consulting Kind reads X'00' as the two characters
+// 00. The tokenizer has already checked each body against its kind's digit rule.
 type StringLiteral struct {
 	Pos   Pos
+	Kind  LiteralKind
 	Value string
 }
 
 func (*StringLiteral) cobol() {}
 func (*StringLiteral) expr()  {}
+
+// LiteralKind is the kind of a [StringLiteral], as its prefix spelled it (SPEC
+// §Literals). A prefix is case-insensitive, so x'00' and X'00' are the same kind.
+//
+// SPEC.md lists H and B twice — H"…" as both a hexadecimal alphanumeric and a
+// hexadecimal numeric literal, B"…" as both a boolean and a binary numeric one —
+// and settles each on one reading, the same in every position: X is the
+// hexadecimal alphanumeric literal, H the hexadecimal numeric literal, and B the
+// boolean literal. O, the octal numeric literal, has only the one reading.
+type LiteralKind int
+
+const (
+	LiteralAlphanumeric       LiteralKind = iota // "…": no prefix
+	LiteralHexadecimal                           // X"…": an even number of hex digits, each pair one byte
+	LiteralHexadecimalNumeric                    // H"…": an integer written in hex digits
+	LiteralOctalNumeric                          // O"…": an integer written in octal digits
+	LiteralNational                              // N"…": national characters
+	LiteralNullTerminated                        // Z"…": alphanumeric, with a trailing 0x00 byte
+	LiteralBoolean                               // B"…": a string of 0/1 bits
+)
+
+// literalKindOfPrefix returns the kind a literal prefix names, in either letter
+// case, or [LiteralAlphanumeric] when r is not a literal prefix.
+func literalKindOfPrefix(r rune) LiteralKind {
+	switch r {
+	case 'X', 'x':
+		return LiteralHexadecimal
+	case 'H', 'h':
+		return LiteralHexadecimalNumeric
+	case 'O', 'o':
+		return LiteralOctalNumeric
+	case 'N', 'n':
+		return LiteralNational
+	case 'Z', 'z':
+		return LiteralNullTerminated
+	case 'B', 'b':
+		return LiteralBoolean
+	default:
+		return LiteralAlphanumeric
+	}
+}
+
+// Prefix returns the prefix that spells k in canonical (upper) case: "" for
+// [LiteralAlphanumeric], "X" for [LiteralHexadecimal], and so on. The printer
+// writes it before the literal's Value.
+func (k LiteralKind) Prefix() string {
+	switch k {
+	case LiteralHexadecimal:
+		return "X"
+	case LiteralHexadecimalNumeric:
+		return "H"
+	case LiteralOctalNumeric:
+		return "O"
+	case LiteralNational:
+		return "N"
+	case LiteralNullTerminated:
+		return "Z"
+	case LiteralBoolean:
+		return "B"
+	default:
+		return ""
+	}
+}
+
+// valid reports whether k is one of the declared kinds.
+func (k LiteralKind) valid() bool {
+	return LiteralAlphanumeric <= k && k <= LiteralBoolean
+}
+
+// Numeric reports whether k denotes a numeric value rather than a string of
+// characters or bits: true for [LiteralHexadecimalNumeric] and
+// [LiteralOctalNumeric] only.
+func (k LiteralKind) Numeric() bool {
+	return k == LiteralHexadecimalNumeric || k == LiteralOctalNumeric
+}
+
+func (k LiteralKind) String() string {
+	switch k {
+	case LiteralAlphanumeric:
+		return "alphanumeric"
+	case LiteralHexadecimal:
+		return "hexadecimal"
+	case LiteralHexadecimalNumeric:
+		return "hexadecimal numeric"
+	case LiteralOctalNumeric:
+		return "octal numeric"
+	case LiteralNational:
+		return "national"
+	case LiteralNullTerminated:
+		return "null-terminated"
+	case LiteralBoolean:
+		return "boolean"
+	default:
+		return fmt.Sprintf("LiteralKind(%d)", int(k))
+	}
+}
+
+// digitName names the digits a kind's body is written in, for error messages.
+func (k LiteralKind) digitName() string {
+	switch k {
+	case LiteralOctalNumeric:
+		return "0-7"
+	case LiteralBoolean:
+		return "0 or 1"
+	default:
+		return "0-9, A-F"
+	}
+}
+
+// stringLiteral builds the [StringLiteral] a [TokenString] token denotes,
+// reading a prefix, if the lexeme opens with one, into Kind.
+func stringLiteral(tok Token) *StringLiteral {
+	value := string(tok.Value)
+	kind := LiteralAlphanumeric
+	if value != "" {
+		kind = literalKindOfPrefix(rune(value[0]))
+	}
+	if kind != LiteralAlphanumeric {
+		value = value[1:]
+	}
+	return &StringLiteral{Pos: tok.Pos, Kind: kind, Value: value}
+}
 
 // NumericLiteral is a numeric literal used as a value, e.g. a VALUE or OCCURS
 // operand. Pos is the position of the literal; Value is its raw lexeme (sign,
@@ -2144,7 +2279,7 @@ func unexpectedKeyword(tok Token, expected ...string) error {
 func valueNode(tok Token) Type {
 	switch tok.Type {
 	case TokenString:
-		return &StringLiteral{Pos: tok.Pos, Value: string(tok.Value)}
+		return stringLiteral(tok)
 	case TokenNumber:
 		return &NumericLiteral{Pos: tok.Pos, Value: string(tok.Value)}
 	default:
@@ -2638,7 +2773,7 @@ func parseSpecialNamesClause(p *parser, para *SpecialNamesParagraph) (parserActi
 		}
 		para.Clauses = append(para.Clauses, &CurrencySignClause{
 			Pos:  tok.Pos,
-			Sign: &StringLiteral{Pos: lit.Pos, Value: string(lit.Value)},
+			Sign: stringLiteral(lit),
 		})
 		return parseSpecialNamesClause, nil
 	case tok.Type == TokenSymbol:
@@ -6510,7 +6645,7 @@ func parseCallStatement(p *parser, kw Token) (Statement, error) {
 		return nil, err
 	}
 	if tok.Type == TokenString {
-		stmt.Target = &StringLiteral{Pos: tok.Pos, Value: string(tok.Value)}
+		stmt.Target = stringLiteral(tok)
 	} else {
 		id, err := parseIdentifier(p, tok)
 		if err != nil {
@@ -7625,7 +7760,7 @@ func parseOperand(p *parser) (Type, error) {
 	}
 	switch tok.Type {
 	case TokenString:
-		return &StringLiteral{Pos: tok.Pos, Value: string(tok.Value)}, nil
+		return stringLiteral(tok), nil
 	case TokenNumber:
 		return &NumericLiteral{Pos: tok.Pos, Value: string(tok.Value)}, nil
 	default:
@@ -7941,7 +8076,7 @@ func parsePrimary(p *parser) (Expr, error) {
 	}
 	switch tok.Type {
 	case TokenString:
-		return &StringLiteral{Pos: tok.Pos, Value: string(tok.Value)}, nil
+		return stringLiteral(tok), nil
 	case TokenNumber:
 		return &NumericLiteral{Pos: tok.Pos, Value: string(tok.Value)}, nil
 	default:

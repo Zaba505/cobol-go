@@ -36,6 +36,7 @@ func TestParserCopy(t *testing.T) {
 			"05 :TAG:-NAME PIC X(20).\n",
 		"PAYLIB.CUSTREC": "01 PAY-RECORD.\n",
 		"lower.cpy":      "01 LOWER-RECORD.\n",
+		"FLAGS":          "77 F PIC X.\n88 F-NUL VALUE X'00'.\n",
 	}
 
 	testCases := []struct {
@@ -43,6 +44,32 @@ func TestParserCopy(t *testing.T) {
 		src      string
 		expected *File
 	}{
+		{
+			// A prefixed literal is one REPLACING operand and one text word of
+			// the copybook, so it is replaced whole, prefix and all.
+			name: "replacing a prefixed literal",
+			src:  "COPY FLAGS REPLACING X'00' BY x'FF'.\n",
+			expected: &File{
+				Fragment: &Fragment{
+					Entries: []*DataDescriptionEntry{
+						{
+							Pos:     Pos{Line: 1, Column: 1},
+							Level:   77,
+							Name:    &Word{Pos: Pos{Line: 1, Column: 4}, Value: "F"},
+							Clauses: []DataClause{&PictureClause{Pos: Pos{Line: 1, Column: 6}, Picture: "X"}},
+						},
+						{
+							Pos:   Pos{Line: 2, Column: 1},
+							Level: 88,
+							Name:  &Word{Pos: Pos{Line: 2, Column: 4}, Value: "F-NUL"},
+							Clauses: []DataClause{&ValueClause{Pos: Pos{Line: 2, Column: 10}, Values: []ValueSpec{
+								{From: &StringLiteral{Pos: Pos{Line: 2, Column: 16}, Kind: LiteralHexadecimal, Value: "'FF'"}},
+							}}},
+						},
+					},
+				},
+			},
+		},
 		{
 			name: "copy a whole record",
 			src:  "COPY CUSTREC.\n",
@@ -552,6 +579,32 @@ func TestParserCopyErrors(t *testing.T) {
 			},
 		},
 		{
+			name:     "a prefixed literal as text-name",
+			src:      "COPY X'C1'.\n",
+			resolver: books,
+			assert: func(t *testing.T, err error) {
+				var target InvalidLiteralError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, InvalidLiteralError{
+					Pos:     Pos{Line: 1, Column: 6},
+					Kind:    LiteralHexadecimal,
+					Literal: "X'C1'",
+					Reason:  "a copybook is named by a COBOL word or an alphanumeric literal",
+				}, target)
+			},
+		},
+		{
+			name:     "a prefixed literal as library-name",
+			src:      "COPY CUSTREC OF N'LIB'.\n",
+			resolver: books,
+			assert: func(t *testing.T, err error) {
+				var target InvalidLiteralError
+				require.ErrorAs(t, err, &target)
+				require.Equal(t, LiteralNational, target.Kind)
+				require.Equal(t, Pos{Line: 1, Column: 17}, target.Pos)
+			},
+		},
+		{
 			name:     "no text-name",
 			src:      "COPY.\n",
 			resolver: books,
@@ -684,6 +737,24 @@ func TestApplyReplacing(t *testing.T) {
 			expected:     "05 CUST-ID PIC X(8).\n05 CUST-NAME PIC X(20).",
 		},
 		{
+			name:         "an unprefixed literal never matches the body of a prefixed one",
+			src:          "88 F-NUL VALUE X'00'.",
+			replacements: []copyReplacement{{From: "'00'", To: "'FF'"}},
+			expected:     "88 F-NUL VALUE X'00'.",
+		},
+		{
+			name:         "a prefixed literal matches with its prefix in either case",
+			src:          "88 F-NUL VALUE x'00'.",
+			replacements: []copyReplacement{{From: "X'00'", To: "X'FF'"}},
+			expected:     "88 F-NUL VALUE X'FF'.",
+		},
+		{
+			name:         "a prefixed literal's body still compares exactly",
+			src:          "88 F-NUL VALUE X'ff'.",
+			replacements: []copyReplacement{{From: "X'FF'", To: "X'00'"}},
+			expected:     "88 F-NUL VALUE X'ff'.",
+		},
+		{
 			name:         "a pattern never matches part of a word",
 			src:          "05 CUSTOMER-ID PIC X(8).",
 			replacements: []copyReplacement{{From: "CUST", To: "XX"}},
@@ -793,6 +864,21 @@ func TestTextWords(t *testing.T) {
 			name:     "an alphanumeric literal is one word, spacing included",
 			src:      `VALUE "A  B" .`,
 			expected: []string{"VALUE", `"A  B"`, "."},
+		},
+		{
+			name:     "a prefixed literal is one word with its prefix",
+			src:      `VALUE X'00' N"A B" x'FF'.`,
+			expected: []string{"VALUE", "X'00'", `N"A B"`, "x'FF'", "."},
+		},
+		{
+			name:     "a prefix separated by a space is its own word",
+			src:      `VALUE X '00'`,
+			expected: []string{"VALUE", "X", "'00'"},
+		},
+		{
+			name:     "a word ending in a prefix letter is not a prefix",
+			src:      `AX'00'`,
+			expected: []string{"AX", "'00'"},
 		},
 		{
 			name:     "a doubled delimiter does not close a literal",

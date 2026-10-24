@@ -5116,3 +5116,190 @@ func TestParserErrors(t *testing.T) {
 		})
 	}
 }
+
+// A prefixed literal reads as one StringLiteral whose Kind names the prefix and
+// whose Value is the delimited body (SPEC §Literals), in a VALUE clause, in a
+// condition-name's value list, and in a procedure statement.
+func TestParserPrefixedLiterals(t *testing.T) {
+	t.Parallel()
+
+	// item is "77 F PIC X VALUE <literal>." with the literal at column 18.
+	item := func(lit *StringLiteral) *File {
+		return &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{{
+			Pos:   Pos{Line: 1, Column: 1},
+			Level: 77,
+			Name:  &Word{Pos: Pos{Line: 1, Column: 4}, Value: "F"},
+			Clauses: []DataClause{
+				&PictureClause{Pos: Pos{Line: 1, Column: 6}, Picture: "X"},
+				&ValueClause{Pos: Pos{Line: 1, Column: 12}, Values: []ValueSpec{{From: lit}}},
+			},
+		}}}}
+	}
+	lit := func(line, col int, kind LiteralKind, v string) *StringLiteral {
+		return &StringLiteral{Pos: Pos{Line: line, Column: col}, Kind: kind, Value: v}
+	}
+
+	testCases := []struct {
+		name     string
+		src      string
+		opts     []ParseOption
+		expected *File
+	}{
+		{name: "hexadecimal", src: "77 F PIC X VALUE X'C1'.\n", expected: item(lit(1, 18, LiteralHexadecimal, "'C1'"))},
+		{name: "hexadecimal lower case", src: "77 F PIC X VALUE x\"c1\".\n", expected: item(lit(1, 18, LiteralHexadecimal, `"c1"`))},
+		{name: "hexadecimal numeric", src: "77 F PIC X VALUE H'FF'.\n", expected: item(lit(1, 18, LiteralHexadecimalNumeric, "'FF'"))},
+		{name: "octal numeric", src: "77 F PIC X VALUE o'17'.\n", expected: item(lit(1, 18, LiteralOctalNumeric, "'17'"))},
+		{name: "national", src: "77 F PIC X VALUE N'AB'.\n", expected: item(lit(1, 18, LiteralNational, "'AB'"))},
+		{name: "null-terminated", src: "77 F PIC X VALUE Z\"AB\".\n", expected: item(lit(1, 18, LiteralNullTerminated, `"AB"`))},
+		{name: "boolean", src: "77 F PIC X VALUE b'1010'.\n", expected: item(lit(1, 18, LiteralBoolean, "'1010'"))},
+		{name: "unprefixed", src: "77 F PIC X VALUE 'AB'.\n", expected: item(lit(1, 18, LiteralAlphanumeric, "'AB'"))},
+		{
+			// The issue's regression: before prefixed literals were one token
+			// this read as two values, the word X and the text '00'.
+			name: "condition-name with a hexadecimal value",
+			src:  "77 F PIC X.\n88 F-NUL VALUE X'00'.\n",
+			expected: &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{
+				{
+					Pos:     Pos{Line: 1, Column: 1},
+					Level:   77,
+					Name:    &Word{Pos: Pos{Line: 1, Column: 4}, Value: "F"},
+					Clauses: []DataClause{&PictureClause{Pos: Pos{Line: 1, Column: 6}, Picture: "X"}},
+				},
+				{
+					Pos:   Pos{Line: 2, Column: 1},
+					Level: 88,
+					Name:  &Word{Pos: Pos{Line: 2, Column: 4}, Value: "F-NUL"},
+					Clauses: []DataClause{&ValueClause{Pos: Pos{Line: 2, Column: 10}, Values: []ValueSpec{
+						{From: lit(2, 16, LiteralHexadecimal, "'00'")},
+					}}},
+				},
+			}}},
+		},
+		{
+			name: "condition-name with a hexadecimal range",
+			src:  "77 F PIC X.\n88 F-ANY VALUE X'00' THRU X'FF'.\n",
+			expected: &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{
+				{
+					Pos:     Pos{Line: 1, Column: 1},
+					Level:   77,
+					Name:    &Word{Pos: Pos{Line: 1, Column: 4}, Value: "F"},
+					Clauses: []DataClause{&PictureClause{Pos: Pos{Line: 1, Column: 6}, Picture: "X"}},
+				},
+				{
+					Pos:   Pos{Line: 2, Column: 1},
+					Level: 88,
+					Name:  &Word{Pos: Pos{Line: 2, Column: 4}, Value: "F-ANY"},
+					Clauses: []DataClause{&ValueClause{Pos: Pos{Line: 2, Column: 10}, Values: []ValueSpec{
+						{From: lit(2, 16, LiteralHexadecimal, "'00'"), Through: lit(2, 27, LiteralHexadecimal, "'FF'")},
+					}}},
+				},
+			}}},
+		},
+		{
+			name: "fixed format",
+			src:  "000100 77  F PIC X VALUE X'C1'.\n",
+			opts: []ParseOption{WithSourceFormat(FixedFormat)},
+			expected: &File{Fragment: &Fragment{Entries: []*DataDescriptionEntry{{
+				Pos:   Pos{Line: 1, Column: 8},
+				Level: 77,
+				Name:  &Word{Pos: Pos{Line: 1, Column: 12}, Value: "F"},
+				Clauses: []DataClause{
+					&PictureClause{Pos: Pos{Line: 1, Column: 14}, Picture: "X"},
+					&ValueClause{Pos: Pos{Line: 1, Column: 20}, Values: []ValueSpec{{From: lit(1, 26, LiteralHexadecimal, "'C1'")}}},
+				},
+			}}}},
+		},
+		{
+			name: "procedure statement",
+			src: "IDENTIFICATION DIVISION.\n" +
+				"PROGRAM-ID. P.\n" +
+				"PROCEDURE DIVISION.\n" +
+				"    MOVE X'C1C2' TO F.\n",
+			expected: &File{Programs: []*Program{{
+				Pos: Pos{Line: 1, Column: 1},
+				Divisions: []Division{
+					&IdentificationDivision{
+						Pos: Pos{Line: 1, Column: 1},
+						ProgramID: &ProgramID{
+							Pos:  Pos{Line: 2, Column: 1},
+							Name: &Word{Pos: Pos{Line: 2, Column: 13}, Value: "P"},
+						},
+					},
+					&ProcedureDivision{
+						Pos: Pos{Line: 3, Column: 1},
+						Paragraphs: []*Paragraph{{
+							Pos: Pos{Line: 4, Column: 5},
+							Sentences: []*Sentence{{
+								Pos: Pos{Line: 4, Column: 5},
+								Statements: []Statement{&MoveStatement{
+									Pos:    Pos{Line: 4, Column: 5},
+									Source: lit(4, 10, LiteralHexadecimal, "'C1C2'"),
+									Targets: []*Identifier{
+										{Pos: Pos{Line: 4, Column: 21}, Name: &Word{Pos: Pos{Line: 4, Column: 21}, Value: "F"}},
+									},
+								}},
+							}},
+						}},
+					},
+				},
+			}}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := tc.opts
+			if tc.expected.Fragment != nil {
+				opts = append([]ParseOption{WithFragment()}, opts...)
+			}
+			f, err := Parse(strings.NewReader(tc.src), opts...)
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, f)
+		})
+	}
+}
+
+// A prefixed literal where the grammar requires a numeric literal is refused
+// with a positioned error, never read as the digits between its quotes.
+func TestParserPrefixedLiteralWhereNumericRequired(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse(strings.NewReader("01 R.\n 05 F PIC X OCCURS H'10' TIMES.\n"), WithFragment())
+
+	var target UnexpectedTokenError
+	require.ErrorAs(t, err, &target)
+	require.Equal(t, Pos{Line: 2, Column: 20}, target.Position())
+}
+
+func TestLiteralKind(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		kind    LiteralKind
+		prefix  string
+		name    string
+		numeric bool
+	}{
+		{kind: LiteralAlphanumeric, prefix: "", name: "alphanumeric"},
+		{kind: LiteralHexadecimal, prefix: "X", name: "hexadecimal"},
+		{kind: LiteralHexadecimalNumeric, prefix: "H", name: "hexadecimal numeric", numeric: true},
+		{kind: LiteralOctalNumeric, prefix: "O", name: "octal numeric", numeric: true},
+		{kind: LiteralNational, prefix: "N", name: "national"},
+		{kind: LiteralNullTerminated, prefix: "Z", name: "null-terminated"},
+		{kind: LiteralBoolean, prefix: "B", name: "boolean"},
+		{kind: LiteralKind(99), prefix: "", name: "LiteralKind(99)"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tc.prefix, tc.kind.Prefix())
+			require.Equal(t, tc.name, tc.kind.String())
+			require.Equal(t, tc.numeric, tc.kind.Numeric())
+		})
+	}
+}

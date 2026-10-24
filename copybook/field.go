@@ -191,6 +191,12 @@ type Field struct {
 // value, not a field — so it is held here rather than among [Field.Children].
 // Values is the entry's VALUE list, one [cobol.ValueSpec] per value or
 // THROUGH range, in source order.
+//
+// The values are handed on as the parser built them and are never interpreted
+// here. A prefixed literal — X'00', N'A', H'FF' — is one [cobol.StringLiteral]
+// whose Kind names the prefix and whose Value is its delimited body, so a
+// caller comparing a value against data must consult Kind: X'00' is one byte
+// 0x00, not the two characters 00.
 type Condition struct {
 	// Pos is the position of the entry's level-number.
 	Pos cobol.Pos
