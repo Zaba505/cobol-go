@@ -172,7 +172,7 @@ func printFragment(frag *Fragment, next printerAction) printerAction {
 			return next
 		}
 		tail := printComments(frag.Trailing, 0, next)
-		return printDataEntryAt(frag.Entries, dataEntryDepths(frag.Entries), 0, tail)
+		return printDataEntryAt(frag.Entries, EntryDepths(frag.Entries), 0, tail)
 	}
 }
 
@@ -564,7 +564,7 @@ func printFileDescriptionEntry(entry *FileDescriptionEntry, next printerAction) 
 			return failPrint(UnsupportedNodeError{Node: entry})
 		}
 		pr.writef("%s %s.\n", entry.Kind, entry.Name.Value)
-		return printDataEntryAt(entry.Records, dataEntryDepths(entry.Records), 0, next)
+		return printDataEntryAt(entry.Records, EntryDepths(entry.Records), 0, next)
 	}
 }
 
@@ -577,35 +577,51 @@ func printDataSection(header string, sec *DataSection, next printerAction) print
 			return next
 		}
 		pr.writef("%s SECTION.\n", header)
-		return printDataEntryAt(sec.Entries, dataEntryDepths(sec.Entries), 0, next)
+		return printDataEntryAt(sec.Entries, EntryDepths(sec.Entries), 0, next)
 	}
 }
 
-// dataEntryDepths maps each entry in a record to its nesting depth from the level
-// numbers, which carry the subordination an entry list flattens: a group item's
-// subordinates have higher level numbers than it. Levels 01–49 nest via a stack of
-// open group levels; an 88 condition-name sits one level under the entry it
-// qualifies; 66 (RENAMES) and 77 (independent item) sit at the record level. The
-// printer uses these depths to indent each entry under its parent (free-format
-// columns are insignificant — SPEC.md "Reference format independence").
-func dataEntryDepths(entries []*DataDescriptionEntry) []int {
+// EntryDepths reports, for each entry of a data description entry list — a
+// section's, a file description's records, or a copybook [Fragment]'s — the
+// nesting depth [Print] indents it to: depths[i] belongs to entries[i], and Print
+// writes an entry at depth d behind d indentation units of four spaces each. Print
+// derives its own indentation from this function, so the two cannot disagree.
+//
+// The depth comes from level numbers alone, which carry the subordination an
+// entry list flattens:
+//
+//   - An entry at levels 01–49 is as deep as the number of group items still
+//     open above it. A group stays open until an entry at its own level number
+//     or a lower one closes it, so a later 01 closes every open group and sits
+//     at depth 0.
+//   - An 88 condition-name is one deeper than the nearest non-nil entry before
+//     it that is not an 88 — the item it qualifies, which may be a 66 or 77 as
+//     well as an 01–49 item. An 88 with no such entry before it is at depth 1.
+//   - A 66 (RENAMES) or 77 (independent item) sits at the record level, depth 0.
+//     Neither closes the open 01–49 groups: an 01–49 entry after one nests as
+//     though the 66 or 77 were not there.
+//   - A nil entry is at depth 0 and changes nothing for the entries after it.
+//     (Print rejects one with an [UnsupportedNodeError].)
+//
+// Any other level number is nested by the 01–49 rule, so a level 0 closes every
+// open group as an 01 does and a level 50 nests under them. EntryDepths does not
+// validate the list: depths are reported for entries the parser would reject.
+// The result has the length of entries and is never nil.
+func EntryDepths(entries []*DataDescriptionEntry) []int {
 	depths := make([]int, len(entries))
 	var stack []int  // levels of the currently-open group items (01–49)
 	parentDepth := 0 // depth of the most recent non-88 entry — the parent of any 88
 	for i, e := range entries {
 		if e == nil {
-			// A nil entry has no level to subordinate; printDataEntry rejects it.
 			continue
 		}
 		switch e.Level {
 		case 88:
 			depths[i] = parentDepth + 1
 		case 66, 77:
-			// RENAMES (66) and independent items (77) sit at the record level
-			// (depth 0). They don't disturb the 01–49 nesting stack — the
-			// hierarchy is defined by 01–49 level numbers alone, and a later 01
-			// pops the stack on its own — but they do become the parent of any
-			// subordinate 88 (a 77 may carry condition-names).
+			// The hierarchy is defined by 01–49 level numbers alone, and a later
+			// 01 pops the stack on its own, so the stack is left untouched; but a
+			// 66 or 77 does become the parent of any subordinate 88.
 			depths[i] = 0
 			parentDepth = 0
 		default: // 01–49
