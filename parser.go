@@ -1974,7 +1974,7 @@ func (p *parser) peekKeyword(kw ...string) (bool, error) {
 }
 
 // skipOptionalKeyword consumes the next token iff it is an identifier matching
-// one of kw, used for the optional noise words IS / TO / MODE / KEY.
+// one of kw, used for the optional noise words IS / ARE / TO / MODE / KEY.
 func (p *parser) skipOptionalKeyword(kw ...string) error {
 	is, err := p.peekKeyword(kw...)
 	if err != nil {
@@ -3445,16 +3445,21 @@ func parseExternalClause(p *parser, entry *DataDescriptionEntry) (parserAction[*
 }
 
 // parseConditionValueClause parses the VALUE clause of a level-88 condition-name:
-// ( "VALUE" | "VALUES" ) [ "IS" ] value-spec { value-spec } "." where
+// ( "VALUE" | "VALUES" ) [ "IS" | "ARE" ] value-spec { value-spec } "." where
 // value-spec = literal [ ( "THROUGH" | "THRU" ) literal ]. It is the only clause
 // of a condition-name entry, so it consumes the entry-terminating period and ends
 // the entry (returns nil).
+//
+// The standard pairs VALUE with IS and VALUES with ARE, but either noise word is
+// accepted after either keyword (SPEC.md condition-name-entry): IS and ARE are
+// reserved words, so neither can be a value, and reading one as a value is the
+// silent failure this rule exists to prevent.
 func parseConditionValueClause(p *parser, entry *DataDescriptionEntry) (parserAction[*DataDescriptionEntry], error) {
 	hdr, err := p.expectKeyword("VALUE", "VALUES")
 	if err != nil {
 		return nil, err
 	}
-	if err := p.skipOptionalKeyword("IS"); err != nil {
+	if err := p.skipOptionalKeyword("IS", "ARE"); err != nil {
 		return nil, err
 	}
 

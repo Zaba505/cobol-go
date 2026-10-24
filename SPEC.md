@@ -864,7 +864,8 @@ renames-entry =
         [ ( "THROUGH" | "THRU" ) data-name ] "."
 
 condition-name-entry =
-        NumericLiteral « 88 » condition-name "VALUE" [ "IS" ]
+        NumericLiteral « 88 » condition-name
+        ( "VALUE" | "VALUES" ) [ "IS" | "ARE" ]
         value-spec { value-spec } "."
 
 value-spec = literal [ ( "THROUGH" | "THRU" ) literal ]
@@ -903,6 +904,13 @@ occurs-clause =
   fields; `88` defines a condition-name on the preceding item. The numbers are
   read **relatively**, not absolutely, so siblings need not share one number —
   see Semantics, *Level numbers are relative*.
+- **`VALUE IS` / `VALUES ARE`** on a condition-name: the standard pairs the
+  singular keyword with `IS` and the plural with `ARE`. The parser also accepts
+  the crossed pairings `VALUE ARE` and `VALUES IS` (as GnuCOBOL does): both noise
+  words are reserved, so neither can be a value, and rejecting the crossed form
+  would only refuse a copybook whose meaning is unambiguous. The noise word is
+  consumed, not recorded — every spelling yields the same `ValueClause`, which
+  the printer writes back as `VALUE`.
 - **`COMP-6`** is a dialect extension (GnuCOBOL, Micro Focus): packed decimal
   with no sign nibble. It is admitted here as a *spelling* only — the parser
   records the usage-type it was written with and assigns no storage width to

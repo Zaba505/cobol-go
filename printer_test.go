@@ -2104,6 +2104,16 @@ func TestPrintFragmentRoundTrip(t *testing.T) {
 				"77 CUST-COUNT PIC 9(4) VALUE ZERO.\n",
 		},
 		{
+			// VALUES ARE reads as VALUE: the noise word is consumed, so the
+			// printer writes the canonical keyword back. The defect this pins —
+			// ARE read as a value — survives a round trip unnoticed, so the
+			// printed text is pinned by TestPrintConditionValuesAreRoundTrip.
+			name: "condition name with values are",
+			src: "01 STATUS-REC.\n" +
+				"   05 STATUS-CODE PIC X.\n" +
+				"      88 STATUS-OK VALUES ARE 'A' THRU 'C'.\n",
+		},
+		{
 			name: "comments",
 			src: "*> customer copybook\n" +
 				"01 CUSTOMER-RECORD.\n" +
@@ -2158,6 +2168,44 @@ func TestPrintFragmentRoundTrip(t *testing.T) {
 			require.Equal(t, withoutPos(first), withoutPos(second))
 		})
 	}
+}
+
+// TestPrintConditionValuesAreRoundTrip runs the issue's reproduction — a
+// condition-name written with VALUES ARE — through Parse → Print → Parse. The
+// round trip alone could not catch the defect: a spurious ARE value printed back
+// as "VALUE ARE …" re-parsed as the same spurious value, so the two ASTs agreed.
+// So this test also pins the printed text, and requires the re-parsed AST to
+// equal that of the canonical VALUE spelling, which has no ARE to lose.
+func TestPrintConditionValuesAreRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	const (
+		src = "01 STATUS-REC.\n" +
+			"   05 STATUS-CODE PIC X.\n" +
+			"      88 STATUS-OK VALUES ARE 'A' THRU 'C'.\n"
+		canonical = "01 STATUS-REC.\n" +
+			"   05 STATUS-CODE PIC X.\n" +
+			"      88 STATUS-OK VALUE 'A' THRU 'C'.\n"
+		printed = "01 STATUS-REC.\n" +
+			"    05 STATUS-CODE PIC X.\n" +
+			"        88 STATUS-OK VALUE 'A' THROUGH 'C'.\n"
+	)
+
+	first, err := Parse(strings.NewReader(src), WithFragment())
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	require.NoError(t, Print(&buf, first))
+	require.Equal(t, printed, buf.String())
+
+	second, err := Parse(&buf, WithFragment())
+	require.NoError(t, err)
+
+	want, err := Parse(strings.NewReader(canonical), WithFragment())
+	require.NoError(t, err)
+
+	require.Equal(t, withoutPos(first), withoutPos(second))
+	require.Equal(t, withoutPos(want), withoutPos(second))
 }
 
 // withoutPos zeroes every Pos in f and returns it, so round-trip comparisons
