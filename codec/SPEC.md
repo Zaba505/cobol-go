@@ -948,6 +948,70 @@ bad record rather than at the end of a quarter.**
 
 ---
 
+## Byte Domains
+
+The validation above has a second use, one that needs no record at all. The
+rules a reader rejects bytes by also say, for every position of an item, which
+byte values a well-formed record can hold there — its **byte domain**. A caller
+reasoning about records without decoding one needs exactly that: a record
+discriminator testing for EBCDIC `H` (`C8`) at a byte another record describes
+as `PIC 9(5)` DISPLAY can never match that record, because the byte can only be
+`F0`–`F9`, so the two tests are provably exclusive.
+
+> **Normative.** `codec` **MUST** export a byte-domain query over every shape it
+> decodes, and **MUST** derive it from the same tables and predicates its
+> reader rejects bytes with, never from a second transcription of them. The
+> domain **MUST** be per byte position, because the shapes that have one are not
+> uniform along their bytes. (#134)
+
+### What a domain is a claim about
+
+A domain is a claim about **well-formed records**: a record a reader decodes
+under the same `Encoding` and the same item shape holds, at each position, only
+bytes that position's domain admits. Three consequences follow, and each is
+part of the contract:
+
+1. **It is the reader's domain, not the writer's.** It admits every byte a
+   reader *accepts*, including bytes a conforming writer never emits — the
+   lenient EBCDIC zones `A`, `B`, `E`, the packed sign nibbles `A`, `B`, `E`,
+   `F` in a signed item, the unsigned zone in a signed item's sign position —
+   because a well-formed record written by something else may hold them. What a
+   writer emits is a subset. A domain that narrowed to the writer's output would
+   let a caller prove two records exclusive when one real record is both.
+2. **It is not a validation of bytes already in hand.** A record whose every byte
+   sits inside its domain can still be the wrong record, read at slipped offsets
+   or under the wrong copybook; a byte outside one is a decoding error the reader
+   reports with its offset. Validating a record is the reader's job. A domain
+   answers a different question — what *could* be there — and answers it
+   without any bytes at all.
+3. **It is exact where the reader checks bytes independently, and a superset
+   where it does not.** For zoned, packed and `COMP-6` items the reader checks
+   each byte (each nibble) on its own, so a field decodes exactly when each of
+   its bytes is admitted at its own position. Where the reader's rule spans the
+   whole field — the `TRUNC(STD)` decimal range of a binary item, a `COMP-1`
+   whose HFP value no single-precision float expresses — a per-position domain
+   cannot state it, and reports every byte as admitted there. A superset keeps
+   an exclusivity argument sound; a subset would not.
+
+### Domains by shape
+
+| Shape | Positions | Each position admits |
+|---|---|---|
+| Zoned, unsigned | `digits` | the charset's `'0'`–`'9'` (`F0`–`F9` EBCDIC, `30`–`39` ASCII) |
+| Zoned, `SIGN TRAILING` / `LEADING` | `digits` | the charset's digits, except the overpunched byte, which admits every byte the [sign convention](#zoned-sign-conventions) reads: positive, negative, the unsigned zone, and under `SignEBCDIC` the [lenient zones](#lenient-reading-ebcdic-only) |
+| Zoned, `SEPARATE` | `digits + 1` | the charset's digits, and at the sign byte the charset's `'+'` and `'-'` |
+| Packed (`COMP-3`) | `ceil((digits+1)/2)` | digit nibbles `0`–`9`, the sign nibble `A`–`F`, and at an even digit count a pad nibble of `0` |
+| `COMP-6` | `ceil(digits/2)` | digit nibbles `0`–`9`, and at an odd digit count a pad nibble of `0` |
+| Binary (`COMP`, `COMP-4`, `BINARY`, `COMP-5`) | the [width staircase](#binary-widths-by-digit-count)'s | every byte value |
+| Floating point (`COMP-1`, `COMP-2`) | 4, 8 | every byte value |
+| Alphanumeric, raw bytes | `n` | every byte value ([any byte may appear](#alphanumeric-and-alphabetic-items)) |
+
+A packed domain takes no signedness, because a reader consults none: a `C` or
+`D` sign nibble in an item whose PICTURE has no `S` is read, not rejected, so a
+well-formed record can hold one.
+
+---
+
 ## Out of Scope
 
 ### Numeric-edited de-editing
@@ -1146,6 +1210,7 @@ Two collisions worth naming so they are not mistaken for errors:
 | [Binary](#binary-comp--comp-4--binary--comp-5) | #75 `codec` |
 | [Binary widths by digit count](#binary-widths-by-digit-count) | #94 `copybook`, #128 `codec` |
 | [Floating Point](#floating-point-comp-1--comp-2) | #76 `codec` |
+| [Byte Domains](#byte-domains) | #134 `codec` |
 | Record tree, offsets, `OCCURS DEPENDING ON` | #78, #79, #80 `copybook` |
 
 ## Appendix D: Related Standards
