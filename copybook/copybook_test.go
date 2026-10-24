@@ -6,6 +6,8 @@
 package copybook
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1024,6 +1026,76 @@ func TestPictureErrorUnwraps(t *testing.T) {
 
 	var placement picture.SymbolPlacementError
 	require.ErrorAs(t, err, &placement, "the picture error underneath stays reachable")
+}
+
+func TestPositioned(t *testing.T) {
+	t.Parallel()
+
+	pos := at(9, 8)
+
+	testCases := []struct {
+		name string
+		err  error
+	}{
+		{name: "level", err: LevelError{Pos: pos, Level: 50}},
+		{name: "level sequence", err: LevelSequenceError{Pos: pos, Level: 5, Name: "ORPHAN", Reason: "has no containing record"}},
+		{name: "renames", err: RenamesError{Pos: pos, Name: "ALIAS", Reason: "no such field"}},
+		{name: "picture", err: PictureError{Pos: pos, Name: "A", Source: "SS9", Err: picture.CategoryError{Source: "SS9"}}},
+		{name: "usage", err: UsageError{Pos: pos, Name: "A", Usage: "COMP-7"}},
+		{name: "layout", err: LayoutError{Pos: pos, Name: "A", Reason: "has no PICTURE"}},
+		{name: "occurs", err: OccursError{Pos: pos, Name: "T", Reason: "states no count"}},
+		{name: "redefines", err: RedefinesError{Pos: pos, Name: "B", Target: "A", Reason: "names no item"}},
+		{name: "occurrence", err: OccurrenceError{Pos: pos, Name: "T", Occurs: 3, Index: 3}},
+		{name: "depending", err: DependingError{Pos: pos, Name: "T", DependsOn: "N", Reason: "names no item"}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			wrapped := fmt.Errorf("building definitions: %w", tc.err)
+
+			var p cobol.Positioned
+			require.ErrorAs(t, wrapped, &p)
+			require.Equal(t, pos, p.Position())
+			require.Equal(t, tc.err.Error(), p.Error())
+		})
+	}
+}
+
+// TestPositionedFromBuild reaches the position of a real Build failure through
+// one errors.As, without naming the error's type.
+func TestPositionedFromBuild(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		src  string
+		pos  cobol.Pos
+	}{
+		{name: "subordinate item with no record", src: "05 ORPHAN PIC X.\n", pos: at(1, 1)},
+		{name: "picture that does not parse", src: "01 REC.\n   05 A PIC SS9.\n", pos: at(2, 9)},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := Build(parseFragment(t, tc.src))
+			wrapped := fmt.Errorf("building definitions: %w", err)
+
+			var p cobol.Positioned
+			require.ErrorAs(t, wrapped, &p)
+			require.Equal(t, tc.pos, p.Position())
+		})
+	}
+}
+
+func TestDialectErrorIsNotPositioned(t *testing.T) {
+	t.Parallel()
+
+	var p cobol.Positioned
+	require.False(t, errors.As(DialectError{Field: "ByteOrder"}, &p), "a dialect has no source position")
 }
 
 func TestKindString(t *testing.T) {

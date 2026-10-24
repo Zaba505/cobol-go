@@ -172,6 +172,9 @@ type CopyBookNotFoundError struct {
 	Err     error
 }
 
+// Position implements [Positioned], returning Pos.
+func (e CopyBookNotFoundError) Position() Pos { return e.Pos }
+
 // Error implements the [error] interface.
 func (e CopyBookNotFoundError) Error() string {
 	return fmt.Sprintf("cannot resolve copybook %q at line %d, column %d: %v",
@@ -194,6 +197,9 @@ type CopyBookCycleError struct {
 	Stack   []string
 }
 
+// Position implements [Positioned], returning Pos.
+func (e CopyBookCycleError) Position() Pos { return e.Pos }
+
 // Error implements the [error] interface.
 func (e CopyBookCycleError) Error() string {
 	return fmt.Sprintf("copybook cycle at line %d, column %d: %s",
@@ -214,6 +220,9 @@ type MissingCopyBookResolverError struct {
 	Name    string
 	Library string
 }
+
+// Position implements [Positioned], returning Pos.
+func (e MissingCopyBookResolverError) Position() Pos { return e.Pos }
 
 // Error implements the [error] interface.
 func (e MissingCopyBookResolverError) Error() string {

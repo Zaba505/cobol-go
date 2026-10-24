@@ -515,6 +515,9 @@ type DependingError struct {
 	Reason    string
 }
 
+// Position implements [cobol.Positioned], returning Pos.
+func (e DependingError) Position() cobol.Pos { return e.Pos }
+
 // Error implements the [error] interface.
 func (e DependingError) Error() string {
 	return fmt.Sprintf("OCCURS DEPENDING ON %s on item %s at line %d, column %d: %s",

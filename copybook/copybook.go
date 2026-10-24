@@ -537,6 +537,9 @@ type LevelError struct {
 	Level int
 }
 
+// Position implements [cobol.Positioned], returning Pos.
+func (e LevelError) Position() cobol.Pos { return e.Pos }
+
 // Error implements the [error] interface.
 func (e LevelError) Error() string {
 	return fmt.Sprintf("invalid level number %d at line %d, column %d: valid levels are 01-49, 66, 77, and 88",
@@ -553,6 +556,9 @@ type LevelSequenceError struct {
 	Name   string
 	Reason string
 }
+
+// Position implements [cobol.Positioned], returning Pos.
+func (e LevelSequenceError) Position() cobol.Pos { return e.Pos }
 
 // Error implements the [error] interface.
 func (e LevelSequenceError) Error() string {
@@ -575,6 +581,9 @@ type RenamesError struct {
 	Reason string
 }
 
+// Position implements [cobol.Positioned], returning Pos.
+func (e RenamesError) Position() cobol.Pos { return e.Pos }
+
 // Error implements the [error] interface.
 func (e RenamesError) Error() string {
 	return fmt.Sprintf("level-66 entry %q at line %d, column %d: %s",
@@ -589,6 +598,9 @@ type PictureError struct {
 	Source string
 	Err    error
 }
+
+// Position implements [cobol.Positioned], returning Pos.
+func (e PictureError) Position() cobol.Pos { return e.Pos }
 
 // Error implements the [error] interface.
 func (e PictureError) Error() string {
@@ -608,6 +620,9 @@ type UsageError struct {
 	Name  string
 	Usage string
 }
+
+// Position implements [cobol.Positioned], returning Pos.
+func (e UsageError) Position() cobol.Pos { return e.Pos }
 
 // Error implements the [error] interface.
 func (e UsageError) Error() string {

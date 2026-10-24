@@ -23,6 +23,32 @@ type Pos struct {
 	Column int
 }
 
+// Positioned is implemented by every error this module returns that carries a
+// source position: the position of the token or entry the fault was reported
+// against. Position returns it.
+//
+// It lets a caller report a fault at its position without naming every error
+// type in an errors.As chain of its own, and without such a chain silently
+// missing an error type added later:
+//
+//	var p cobol.Positioned
+//	if errors.As(err, &p) {
+//		report(p.Position(), p.Error())
+//	}
+//
+// A position is a line and column and names no file. A fault inside text a
+// COPY statement brought in is positioned within that copybook, as the nodes
+// built from it are, so a caller printing it against the source it handed to
+// [Parse] must allow that it may belong to a copybook instead.
+//
+// Errors that carry no source position do not implement it — a byte offset
+// within a PICTURE character-string, or within a record, is not a position in
+// the source.
+type Positioned interface {
+	error
+	Position() Pos
+}
+
 // Token represents a single lexical token in the COBOL source.
 type Token struct {
 	Pos   Pos
@@ -1261,6 +1287,9 @@ type UnexpectedCharacterError struct {
 	R   rune
 }
 
+// Position implements [Positioned], returning Pos.
+func (e UnexpectedCharacterError) Position() Pos { return e.Pos }
+
 // Error implements the [error] interface.
 func (e UnexpectedCharacterError) Error() string {
 	return fmt.Sprintf("unexpected character '%c' at line %d, column %d", e.R, e.Pos.Line, e.Pos.Column)
@@ -1271,6 +1300,9 @@ func (e UnexpectedCharacterError) Error() string {
 type UnterminatedStringError struct {
 	Pos Pos // position of the opening delimiter
 }
+
+// Position implements [Positioned], returning Pos.
+func (e UnterminatedStringError) Position() Pos { return e.Pos }
 
 // Error implements the [error] interface.
 func (e UnterminatedStringError) Error() string {
@@ -1284,6 +1316,9 @@ func (e UnterminatedStringError) Error() string {
 type UnterminatedPseudoTextError struct {
 	Pos Pos // position of the opening ==
 }
+
+// Position implements [Positioned], returning Pos.
+func (e UnterminatedPseudoTextError) Position() Pos { return e.Pos }
 
 // Error implements the [error] interface.
 func (e UnterminatedPseudoTextError) Error() string {
