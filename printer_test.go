@@ -1740,7 +1740,9 @@ func TestRoundTripFromTestdata(t *testing.T) {
 		// format is the reference format the fixture is written in. The zero
 		// value (FreeFormat) leaves the free-format fixtures unchanged; fixed-format
 		// fixtures set it to FixedFormat so the first parse reads the column-oriented
-		// layout. The printer always emits free format, so the re-parse stays free.
+		// layout. The re-parse stays free, because Print always writes free format
+		// (SPEC.md "Reference format independence"; pinned by
+		// TestPrintWritesFreeFormat).
 		format SourceFormat
 		// fragment reads the fixture as a standalone copybook (WithFragment)
 		// rather than as a whole source file. The printer emits a fragment as a
@@ -1800,9 +1802,10 @@ func TestRoundTripFromTestdata(t *testing.T) {
 			var buf bytes.Buffer
 			require.NoError(t, Print(&buf, first))
 
-			// The printer always emits free format, so the re-parse uses the
-			// default (free) format regardless of the fixture's source format. A
-			// fragment stays a fragment, though, so that option is kept.
+			// Print always writes free format (SPEC.md "Reference format
+			// independence"), so the re-parse uses the default (free) format
+			// regardless of the fixture's source format. A fragment stays a
+			// fragment, though, so that option is kept.
 			var reparse []ParseOption
 			if tc.fragment {
 				reparse = append(reparse, WithFragment())
@@ -1814,6 +1817,95 @@ func TestRoundTripFromTestdata(t *testing.T) {
 			// fixture and the printed output; compare structure only (SPEC.md
 			// "Reference format independence").
 			require.Equal(t, withoutPos(first), withoutPos(second))
+		})
+	}
+}
+
+// TestPrintWritesFreeFormat pins the reference format Print writes: free format,
+// whichever format the source was parsed from, because a File records no source
+// format to reproduce (SPEC.md "Reference format independence"). A fragment read
+// from fixed format — sequence area, identification area, "*" and "/" comment
+// lines, a column-7 continuation, and every data description clause the parser
+// reads — is printed, the output is pinned byte for byte as free format, and
+// re-reading it with Parse(WithFragment()) in the default free format gives back
+// an equal AST with positions and comments cleared. That last comparison is the
+// contract a caller checking its own copybooks relies on.
+func TestPrintWritesFreeFormat(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		src     string
+		printed string
+	}{
+		{
+			name: "every data description clause",
+			src: "" +
+				"000100* CUSTREC - every data description clause, in fixed format.\n" +
+				"000200 01  CUSTOMER-RECORD.                                             CUSTREC1\n" +
+				"000300     05  CUST-ID           PIC 9(6) COMP-3.                       CUSTREC1\n" +
+				"000400/ A page-eject comment line.\n" +
+				"000500     05  CUST-NAME         PIC X(20) JUSTIFIED RIGHT.\n" +
+				"000600     05  CUST-COUNT        PIC 9(2).\n" +
+				"000700     05  CUST-ITEM         OCCURS 1 TO 10 TIMES\n" +
+				"000800             DEPENDING ON CUST-COUNT\n" +
+				"000900             ASCENDING KEY IS CUST-ITEM-KEY\n" +
+				"001000             INDEXED BY CUST-IDX.\n" +
+				"001100         10  CUST-ITEM-KEY PIC 9(4).\n" +
+				"001200     05  CUST-BAL          PIC S9(7)V99 SIGN IS LEADING SEPARATE.\n" +
+				"001300     05  CUST-AMT          PIC 9(5) BLANK WHEN ZERO SYNC LEFT.\n" +
+				"001400     05  CUST-NOTE        PIC X(80) VALUE \"A literal long enough tCUSTREC1\n" +
+				"001500-    \"o continue.\".\n" +
+				"001600     05  CUST-ALT          REDEFINES CUST-NOTE PIC X(80).\n" +
+				"001700     05  CUST-STATUS       PIC X USAGE IS DISPLAY.\n" +
+				"001800         88  CUST-ACTIVE   VALUE \"A\".\n" +
+				"001900         88  CUST-RANGE    VALUES ARE \"R\" THROUGH \"Z\".\n" +
+				"002000 66  CUST-KEY RENAMES CUST-ID THROUGH CUST-NAME.\n" +
+				"002100 77  CUST-SHARED           PIC X GLOBAL.\n" +
+				"002200 77  CUST-EXT              PIC X EXTERNAL.\n" +
+				"002300* End of CUSTREC.\n",
+			// No sequence or identification area, no indicator column, the
+			// continued literal joined, and both comment kinds as "*>" lines.
+			printed: "" +
+				"*> CUSTREC - every data description clause, in fixed format.\n" +
+				"01 CUSTOMER-RECORD.\n" +
+				"    05 CUST-ID PIC 9(6) USAGE COMP-3.\n" +
+				"    *> A page-eject comment line.\n" +
+				"    05 CUST-NAME PIC X(20) JUSTIFIED RIGHT.\n" +
+				"    05 CUST-COUNT PIC 9(2).\n" +
+				"    05 CUST-ITEM OCCURS 1 TO 10 TIMES DEPENDING ON CUST-COUNT ASCENDING KEY IS CUST-ITEM-KEY INDEXED BY CUST-IDX.\n" +
+				"        10 CUST-ITEM-KEY PIC 9(4).\n" +
+				"    05 CUST-BAL PIC S9(7)V99 SIGN IS LEADING SEPARATE CHARACTER.\n" +
+				"    05 CUST-AMT PIC 9(5) BLANK WHEN ZERO SYNCHRONIZED LEFT.\n" +
+				"    05 CUST-NOTE PIC X(80) VALUE \"A literal long enough to continue.\".\n" +
+				"    05 CUST-ALT REDEFINES CUST-NOTE PIC X(80).\n" +
+				"    05 CUST-STATUS PIC X USAGE DISPLAY.\n" +
+				"        88 CUST-ACTIVE VALUE \"A\".\n" +
+				"        88 CUST-RANGE VALUE \"R\" THROUGH \"Z\".\n" +
+				"66 CUST-KEY RENAMES CUST-ID THROUGH CUST-NAME.\n" +
+				"77 CUST-SHARED PIC X GLOBAL.\n" +
+				"77 CUST-EXT PIC X EXTERNAL.\n" +
+				"*> End of CUSTREC.\n",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			first, err := Parse(strings.NewReader(tc.src), WithSourceFormat(FixedFormat), WithFragment())
+			require.NoError(t, err)
+
+			var buf bytes.Buffer
+			require.NoError(t, Print(&buf, first))
+			require.Equal(t, tc.printed, buf.String())
+
+			// Re-read under the stated format: free, the default. No
+			// WithSourceFormat option is passed.
+			second, err := Parse(&buf, WithFragment())
+			require.NoError(t, err)
+
+			require.Equal(t, withoutComments(withoutPos(first)), withoutComments(withoutPos(second)))
 		})
 	}
 }
@@ -2216,6 +2308,21 @@ func withoutPos(f *File) *File {
 		clearProgramPos(prog)
 	}
 	clearFragmentPos(f.Fragment)
+	return f
+}
+
+// withoutComments drops every comment from a fragment — each entry's leading
+// comments and the fragment's trailing ones — and returns f, so a round trip can
+// be compared the way a caller that ignores comments compares it. Only fragments
+// are handled; a File holding programs is returned unchanged.
+func withoutComments(f *File) *File {
+	if f.Fragment == nil {
+		return f
+	}
+	for _, entry := range f.Fragment.Entries {
+		entry.Comments = nil
+	}
+	f.Fragment.Trailing = nil
 	return f
 }
 

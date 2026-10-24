@@ -1541,11 +1541,22 @@ parse).
   breaks and indentation are insignificant beyond separating tokens, so the
   printer is free to choose layout (this is what makes free-format round-trips
   robust). Fixed format adds column significance (Area A / Area B, the indicator
-  area, column-7 continuation) on *input*; on *output* the printer must place
-  tokens in their required column areas. The source format is therefore selected
-  by the caller (#22) and reproduced by the printer, so the round-trip
-  property holds **per format**: a fixed-format source prints back as fixed
-  format, a free-format source as free format.
+  area, column-7 continuation) on *input* only. The source format is selected by
+  the caller (#22) when parsing, and is not recorded in the AST: `File` carries no
+  format, and `Print` takes no option naming one.
+
+  **`Print` always writes free format.** Having no format to reproduce, the
+  printer emits the one layout that needs none: no sequence area, no indicator
+  column, no Area A / Area B placement, no column-72 limit — and every comment,
+  including a fixed-format `*` or `/` comment line, as a free-format `*>` line.
+  So the round-trip property is stated against free format whatever the source
+  was written in: `Parse` a source in either format, `Print` it, and `Parse` the
+  output **in free format** (the default; with `WithFragment()` kept when the
+  source was a copybook fragment), and the two ASTs are equal with positions
+  cleared. A fixed-format source therefore prints back as free format, not as
+  fixed format; a caller that needs fixed-format output must lay it out itself.
+  Emitting fixed format would need the caller to name the format to `Print`, and
+  free format would remain what it writes when none is named.
 
 ## Examples
 
