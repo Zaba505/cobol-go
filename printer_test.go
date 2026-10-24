@@ -2204,6 +2204,16 @@ func TestEntryDepths(t *testing.T) {
 			expected: []int{0, 1, 0, 0, 2},
 		},
 		{
+			name:     "level 0 closes every open group, by the 01–49 rule",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(10), entry(0), entry(5)},
+			expected: []int{0, 1, 2, 0, 1},
+		},
+		{
+			name:     "level 50 nests under the open groups, by the 01–49 rule",
+			entries:  []*DataDescriptionEntry{entry(1), entry(5), entry(50), entry(88), entry(5)},
+			expected: []int{0, 1, 2, 3, 1},
+		},
+		{
 			name:     "a nil entry is at depth 0",
 			entries:  []*DataDescriptionEntry{entry(1), entry(5), nil, entry(10)},
 			expected: []int{0, 1, 0, 2},
@@ -2290,9 +2300,12 @@ func TestPrintIndentsToEntryDepths(t *testing.T) {
 				if len(fields) < 2 || !strings.HasPrefix(fields[1], "ITEM-") {
 					continue
 				}
+				// EntryDepths' doc comment promises four spaces per depth, so the
+				// width is pinned here rather than read back from indentUnit.
+				const spacesPerDepth = 4
 				indentWidth := len(line) - len(trimmed)
-				require.Zero(t, indentWidth%len(indentUnit), "line %q", line)
-				got[strings.TrimSuffix(fields[1], ".")] = indentWidth / len(indentUnit)
+				require.Zero(t, indentWidth%spacesPerDepth, "line %q", line)
+				got[strings.TrimSuffix(fields[1], ".")] = indentWidth / spacesPerDepth
 			}
 			require.Len(t, got, len(tc.entries))
 			for i, e := range tc.entries {

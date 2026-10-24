@@ -594,16 +594,17 @@ func printDataSection(header string, sec *DataSection, next printerAction) print
 //     open above it. A group stays open until an entry at its own level number
 //     or a lower one closes it, so a later 01 closes every open group and sits
 //     at depth 0.
-//   - An 88 condition-name is one deeper than the nearest entry before it that
-//     is not an 88 — the item it qualifies, which may be a 66 or 77 as well as
-//     an 01–49 item. An 88 with no such entry before it is at depth 1.
+//   - An 88 condition-name is one deeper than the nearest non-nil entry before
+//     it that is not an 88 — the item it qualifies, which may be a 66 or 77 as
+//     well as an 01–49 item. An 88 with no such entry before it is at depth 1.
 //   - A 66 (RENAMES) or 77 (independent item) sits at the record level, depth 0.
 //     Neither closes the open 01–49 groups: an 01–49 entry after one nests as
 //     though the 66 or 77 were not there.
 //   - A nil entry is at depth 0 and changes nothing for the entries after it.
 //     (Print rejects one with an [UnsupportedNodeError].)
 //
-// Any other level number is nested by the 01–49 rule. EntryDepths does not
+// Any other level number is nested by the 01–49 rule, so a level 0 closes every
+// open group as an 01 does and a level 50 nests under them. EntryDepths does not
 // validate the list: depths are reported for entries the parser would reject.
 // The result has the length of entries and is never nil.
 func EntryDepths(entries []*DataDescriptionEntry) []int {
