@@ -41,6 +41,7 @@ func TestPositioned(t *testing.T) {
 		{name: "invalid level number", err: InvalidLevelNumberError{Pos: pos, Value: "50"}},
 		{name: "invalid word", err: InvalidWordError{Pos: pos, Word: "1000-2000"}},
 		{name: "search all constraint", err: SearchAllConstraintError{Pos: pos, Reason: "two WHENs"}},
+		{name: "all literal", err: AllLiteralError{Pos: pos, Reason: "nothing follows it"}},
 		{name: "unexpected token", err: UnexpectedTokenError{Expected: []TokenType{TokenSymbol}, Actual: tok}},
 		{name: "unexpected keyword", err: UnexpectedKeywordError{Expected: []string{"PIC"}, Actual: tok}},
 		{name: "trailing token", err: TrailingTokenError{Actual: tok}},
@@ -85,6 +86,11 @@ func TestPositionedFromParse(t *testing.T) {
 			name: "invalid word",
 			src:  "01 REC.\n   05 1000-2000 PIC X.\n",
 			pos:  Pos{Line: 2, Column: 7},
+		},
+		{
+			name: "all literal",
+			src:  "01 REC PIC X(5) VALUE ALL ALL '*'.\n",
+			pos:  Pos{Line: 1, Column: 23},
 		},
 		{
 			name: "trailing token",

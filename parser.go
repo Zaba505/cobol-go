@@ -1188,10 +1188,61 @@ type NumericLiteral struct {
 func (*NumericLiteral) cobol() {}
 func (*NumericLiteral) expr()  {}
 
+// AllLiteral is the figurative constant ALL literal (SPEC §Literals): the
+// literal repeated to fill the receiving field. Pos is the position of the ALL
+// keyword; Literal is the literal ALL repeats.
+//
+// The AST says a value is an ALL form by giving it its own node rather than a
+// flag on [StringLiteral]: ALL may precede a figurative constant as well as a
+// delimited literal, and a node that wraps either keeps the two readings in one
+// place. Literal is therefore exactly one of
+//
+//   - a [StringLiteral] of any kind that is not numeric — ALL '*', ALL X'FF',
+//     ALL N'A' — never a [LiteralHexadecimalNumeric] or [LiteralOctalNumeric]
+//     one; or
+//   - a [Word] spelling a figurative constant other than ALL — ALL SPACES,
+//     ALL ZERO — with its source spelling, as a figurative constant is
+//     everywhere else.
+//
+// A numeric literal is never one: SPEC.md admits ALL only before a nonnumeric
+// literal or a figurative constant, and [Parse] refuses the rest with an
+// [AllLiteralError]. The printer refuses a hand-built node that breaks the rule
+// rather than print source Parse would not read back.
+type AllLiteral struct {
+	Pos     Pos
+	Literal Type
+}
+
+func (*AllLiteral) cobol() {}
+func (*AllLiteral) expr()  {}
+
+// figurativeConstants are the reserved words that stand for a literal value
+// (SPEC §Literals, "Figurative constants"), every spelling, ALL excepted: ALL is
+// the prefix of the ALL literal form, not a value of its own.
+var figurativeConstants = []string{
+	"ZERO", "ZEROS", "ZEROES",
+	"SPACE", "SPACES",
+	"HIGH-VALUE", "HIGH-VALUES",
+	"LOW-VALUE", "LOW-VALUES",
+	"QUOTE", "QUOTES",
+	"NULL", "NULLS",
+}
+
+// isFigurativeConstant reports whether word spells a figurative constant other
+// than ALL, in any letter case.
+func isFigurativeConstant(word string) bool {
+	for _, fc := range figurativeConstants {
+		if strings.EqualFold(word, fc) {
+			return true
+		}
+	}
+	return false
+}
+
 // Expr is implemented by the arithmetic-expression AST nodes (SPEC.md
 // "arithmetic-expression"): the operator nodes [BinaryExpr], [UnaryExpr], and
 // [ParenExpr], plus the value-leaf nodes [Identifier], [NumericLiteral],
-// [StringLiteral], and [FunctionReference].
+// [StringLiteral], [AllLiteral], and [FunctionReference].
 type Expr interface {
 	expr()
 }
@@ -2320,6 +2371,54 @@ func valueNode(tok Token) Type {
 	}
 }
 
+// parseLiteral parses a literal where SPEC.md's literal production is admitted
+// in a VALUE clause: an alphanumeric or numeric literal, a figurative constant,
+// or the ALL literal form. A word other than ALL becomes a [Word], as
+// [valueNode] makes it.
+func parseLiteral(p *parser) (Type, error) {
+	tok, err := p.expect(TokenString, TokenNumber, TokenIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	if keywordIs(tok, "ALL") {
+		return parseAllLiteral(p, tok)
+	}
+	return valueNode(tok), nil
+}
+
+// parseAllLiteral parses the literal of an ALL literal whose ALL keyword all has
+// already been read: a nonnumeric literal, or a figurative constant other than
+// ALL (SPEC §Literals). Anything else — a numeric literal, a second ALL, any
+// other word or symbol, or the end of input — is an [AllLiteralError] at the ALL
+// keyword.
+func parseAllLiteral(p *parser, all Token) (*AllLiteral, error) {
+	tok, err, ok := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, AllLiteralError{Pos: all.Pos, Reason: "nothing follows it"}
+	}
+	switch {
+	case tok.Type == TokenString:
+		lit := stringLiteral(tok)
+		if lit.Kind.Numeric() {
+			return nil, AllLiteralError{Pos: all.Pos, Actual: &tok, Reason: fmt.Sprintf("it is followed by the %s literal %s, and ALL repeats only a nonnumeric literal", lit.Kind, tok.Value)}
+		}
+		p.consume()
+		return &AllLiteral{Pos: all.Pos, Literal: lit}, nil
+	case tok.Type == TokenNumber:
+		return nil, AllLiteralError{Pos: all.Pos, Actual: &tok, Reason: fmt.Sprintf("it is followed by the numeric literal %s, and ALL repeats only a nonnumeric literal", tok.Value)}
+	case keywordIs(tok, "ALL"):
+		return nil, AllLiteralError{Pos: all.Pos, Actual: &tok, Reason: fmt.Sprintf("it is followed by ALL at line %d, column %d, and ALL may not repeat an ALL literal", tok.Pos.Line, tok.Pos.Column)}
+	case tok.Type == TokenIdentifier && isFigurativeConstant(string(tok.Value)):
+		p.consume()
+		return &AllLiteral{Pos: all.Pos, Literal: &Word{Pos: tok.Pos, Value: string(tok.Value)}}, nil
+	default:
+		return nil, AllLiteralError{Pos: all.Pos, Actual: &tok, Reason: fmt.Sprintf("it is followed by %s, which is neither a nonnumeric literal nor a figurative constant (a symbolic character is not read here)", tok)}
+	}
+}
+
 // parserAction is one step of the parser state machine, generic over the AST
 // node T currently being built. Returning (nil, nil) completes successfully;
 // returning (nil, err) terminates with an error.
@@ -3429,11 +3528,11 @@ func parseValueClause(p *parser, entry *DataDescriptionEntry) (parserAction[*Dat
 	if err := p.skipOptionalKeyword("IS"); err != nil {
 		return nil, err
 	}
-	lit, err := p.expect(TokenString, TokenNumber, TokenIdentifier)
+	lit, err := parseLiteral(p)
 	if err != nil {
 		return nil, err
 	}
-	entry.Clauses = append(entry.Clauses, &ValueClause{Pos: hdr.Pos, Values: []ValueSpec{{From: valueNode(lit)}}})
+	entry.Clauses = append(entry.Clauses, &ValueClause{Pos: hdr.Pos, Values: []ValueSpec{{From: lit}}})
 	return parseDataClause, nil
 }
 
@@ -3636,11 +3735,11 @@ func parseConditionValueClause(p *parser, entry *DataDescriptionEntry) (parserAc
 
 	clause := &ValueClause{Pos: hdr.Pos}
 	for {
-		lit, err := p.expect(TokenString, TokenNumber, TokenIdentifier)
+		lit, err := parseLiteral(p)
 		if err != nil {
 			return nil, err
 		}
-		spec := ValueSpec{From: valueNode(lit)}
+		spec := ValueSpec{From: lit}
 
 		isThrough, err := p.peekKeyword("THROUGH", "THRU")
 		if err != nil {
@@ -3648,11 +3747,11 @@ func parseConditionValueClause(p *parser, entry *DataDescriptionEntry) (parserAc
 		}
 		if isThrough {
 			p.consume() // THROUGH/THRU
-			hi, err := p.expect(TokenString, TokenNumber, TokenIdentifier)
+			hi, err := parseLiteral(p)
 			if err != nil {
 				return nil, err
 			}
-			spec.Through = valueNode(hi)
+			spec.Through = hi
 		}
 		clause.Values = append(clause.Values, spec)
 
@@ -7810,7 +7909,8 @@ func stopAtSearchBranch(p *parser) (bool, error) {
 
 // parseOperand parses an operand: an identifier or a literal (SPEC.md "operand").
 // A figurative constant (ZERO, SPACES, …) tokenizes as an identifier and so parses
-// as a single-name [Identifier]; its identity is its spelling.
+// as a single-name [Identifier]; its identity is its spelling. ALL opens the ALL
+// literal form and parses as an [AllLiteral].
 func parseOperand(p *parser) (Type, error) {
 	if isFn, err := p.peekKeyword("FUNCTION"); err != nil {
 		return nil, err
@@ -7827,9 +7927,11 @@ func parseOperand(p *parser) (Type, error) {
 		return stringLiteral(tok), nil
 	case TokenNumber:
 		return &NumericLiteral{Pos: tok.Pos, Value: string(tok.Value)}, nil
-	default:
-		return parseIdentifier(p, tok)
 	}
+	if keywordIs(tok, "ALL") {
+		return parseAllLiteral(p, tok)
+	}
+	return parseIdentifier(p, tok)
 }
 
 // parseIdentifierToken consumes one identifier token and parses the data
@@ -8113,7 +8215,8 @@ func parseFactor(p *parser) (Expr, error) {
 	}
 }
 
-// parsePrimary parses a primary: a parenthesized expression or an operand.
+// parsePrimary parses a primary: a parenthesized expression or an operand. As in
+// [parseOperand], ALL opens the ALL literal form and parses as an [AllLiteral].
 func parsePrimary(p *parser) (Expr, error) {
 	if isFn, err := p.peekKeyword("FUNCTION"); err != nil {
 		return nil, err
@@ -8146,9 +8249,11 @@ func parsePrimary(p *parser) (Expr, error) {
 		return stringLiteral(tok), nil
 	case TokenNumber:
 		return &NumericLiteral{Pos: tok.Pos, Value: string(tok.Value)}, nil
-	default:
-		return parseIdentifier(p, tok)
 	}
+	if keywordIs(tok, "ALL") {
+		return parseAllLiteral(p, tok)
+	}
+	return parseIdentifier(p, tok)
 }
 
 // procedureNameFromOperand extracts a procedure-name word from an operand, for the
@@ -8176,6 +8281,8 @@ func exprPos(e Expr) Pos {
 	case *NumericLiteral:
 		return n.Pos
 	case *StringLiteral:
+		return n.Pos
+	case *AllLiteral:
 		return n.Pos
 	case *BinaryExpr:
 		return n.Pos
@@ -8602,6 +8709,31 @@ func (e InvalidWordError) Position() Pos { return e.Pos }
 // Error implements the [error] interface.
 func (e InvalidWordError) Error() string {
 	return fmt.Sprintf("invalid word %q at line %d, column %d: a user-defined word other than a procedure-name must contain a letter", e.Word, e.Pos.Line, e.Pos.Column)
+}
+
+// AllLiteralError is returned when the ALL of an ALL literal is not followed by
+// a literal it may repeat: a nonnumeric literal, or a figurative constant other
+// than ALL (SPEC §Literals). A numeric literal, a second ALL, any other word or
+// symbol, and the end of input are all refused. Pos is the position of the ALL
+// keyword; Reason says what followed it, in words.
+//
+// Actual is the token that followed ALL, or nil when the input ended there, so a
+// caller can tell the refusals apart without matching on Reason: a nil Actual is
+// truncated source; a [TokenNumber], or a [TokenString] whose prefix names a
+// numeric kind, is a numeric literal; an identifier spelling ALL is ALL ALL; and
+// anything else is a token that is neither a literal nor a figurative constant.
+type AllLiteralError struct {
+	Pos    Pos
+	Actual *Token
+	Reason string
+}
+
+// Position implements [Positioned], returning Pos.
+func (e AllLiteralError) Position() Pos { return e.Pos }
+
+// Error implements the [error] interface.
+func (e AllLiteralError) Error() string {
+	return fmt.Sprintf("invalid ALL literal at line %d, column %d: %s", e.Pos.Line, e.Pos.Column, e.Reason)
 }
 
 // SearchAllConstraintError is returned when a SEARCH ALL statement violates the

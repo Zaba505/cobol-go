@@ -2955,6 +2955,8 @@ func valueText(v Type) (string, bool) {
 			return "", false
 		}
 		return literalText(n)
+	case *AllLiteral:
+		return allLiteralText(n)
 	case *NumericLiteral:
 		if n == nil {
 			return "", false
@@ -3000,6 +3002,37 @@ func literalText(l *StringLiteral) (string, bool) {
 	return l.Kind.Prefix() + l.Value, true
 }
 
+// allLiteralText returns the source text of an ALL literal — the ALL keyword, a
+// space, then the literal it repeats — and whether it can be printed. Only what
+// [Parse] reads back can: a [StringLiteral] that literalText can print and whose
+// kind is not numeric, or a [Word] spelling a figurative constant other than ALL.
+// Anything else in Literal — nil, a numeric literal, a data-name, a second ALL —
+// would print source Parse refuses, so the caller reports an
+// [UnsupportedNodeError] instead.
+func allLiteralText(a *AllLiteral) (string, bool) {
+	if a == nil {
+		return "", false
+	}
+	switch l := a.Literal.(type) {
+	case *StringLiteral:
+		if l == nil || l.Kind.Numeric() {
+			return "", false
+		}
+		text, ok := literalText(l)
+		if !ok {
+			return "", false
+		}
+		return "ALL " + text, true
+	case *Word:
+		if l == nil || !isFigurativeConstant(l.Value) {
+			return "", false
+		}
+		return "ALL " + l.Value, true
+	default:
+		return "", false
+	}
+}
+
 // exprText returns the canonical source text of an arithmetic expression and
 // whether it could be rendered. Binary operators are surrounded by single spaces,
 // a unary sign is attached to its operand, and parenthesized groups are preserved
@@ -3020,6 +3053,8 @@ func exprText(e Expr) (string, bool) {
 			return "", false
 		}
 		return literalText(n)
+	case *AllLiteral:
+		return allLiteralText(n)
 	case *BinaryExpr:
 		if n == nil {
 			return "", false

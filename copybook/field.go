@@ -196,7 +196,9 @@ type Field struct {
 // here. A prefixed literal — X'00', N'A', H'FF' — is one [cobol.StringLiteral]
 // whose Kind names the prefix and whose Value is its delimited body, so a
 // caller comparing a value against data must consult Kind: X'00' is one byte
-// 0x00, not the two characters 00.
+// 0x00, not the two characters 00. An ALL value — ALL '*', ALL SPACES — is one
+// [cobol.AllLiteral] whose Literal is the literal it repeats to fill the field,
+// never a [cobol.Word] named ALL beside that literal.
 type Condition struct {
 	// Pos is the position of the entry's level-number.
 	Pos cobol.Pos
