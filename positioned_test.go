@@ -100,11 +100,14 @@ func TestPositionedFromParse(t *testing.T) {
 }
 
 // TestEveryPositionedErrorHasPosition reads every package of this module and
-// fails for an exported error type that carries a source position — a field of
-// type Pos or Token, cobol.Pos or cobol.Token outside the root package — and
-// has no Position method, so an error type added later cannot miss it. It also
-// fails for one that carries no position and has the method anyway, which is
-// what keeps "errors with no source position are unchanged" true.
+// fails for an exported error type that carries a source position and has no
+// Position method satisfying [Positioned], so an error type added later cannot
+// miss it. A type carries a position when it has a field of type Pos or Token —
+// cobol.Pos or cobol.Token outside the root package — directly, through a
+// pointer, slice or array of one, or through an embedded struct of its own
+// package that does. It also fails for an error type that carries no position
+// and has a Position method anyway, which is what keeps "errors with no source
+// position are unchanged" true.
 func TestEveryPositionedErrorHasPosition(t *testing.T) {
 	t.Parallel()
 
@@ -115,6 +118,7 @@ func TestEveryPositionedErrorHasPosition(t *testing.T) {
 		if et.carriesPos {
 			positioned = append(positioned, et.name)
 			require.Truef(t, et.hasPosition, "%s carries a source position and has no Position method", et.name)
+			require.Truef(t, et.positionOK, "%s has a Position method that does not satisfy Positioned: want Position() Pos", et.name)
 			continue
 		}
 		require.Falsef(t, et.hasPosition, "%s carries no source position and has a Position method", et.name)
@@ -128,12 +132,75 @@ func TestEveryPositionedErrorHasPosition(t *testing.T) {
 	require.NotContains(t, positioned, "codec.OffsetError")
 }
 
+// TestCarriesPos pins the scanner's reading of a struct, so the guard above
+// cannot weaken unnoticed.
+func TestCarriesPos(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		pkg  string
+		src  string
+		want bool
+	}{
+		{name: "root pos field", pkg: "cobol", src: "type E struct{ Pos Pos }", want: true},
+		{name: "root token field", pkg: "cobol", src: "type E struct{ Actual Token }", want: true},
+		{name: "root token slice", pkg: "cobol", src: "type E struct{ Tokens []Token }", want: true},
+		{name: "root token pointer", pkg: "cobol", src: "type E struct{ Actual *Token }", want: true},
+		{name: "qualified pos field", pkg: "copybook", src: "type E struct{ Pos cobol.Pos }", want: true},
+		{name: "embedded base carrying pos", pkg: "copybook", src: "type base struct{ Pos cobol.Pos }\ntype E struct{ base }", want: true},
+		{name: "local pos type outside the root", pkg: "picture", src: "type Pos int\ntype E struct{ Pos Pos }", want: false},
+		{name: "byte offset", pkg: "picture", src: "type E struct{ Offset int }", want: false},
+		{name: "qualified from another package", pkg: "codec", src: "type E struct{ Pos other.Pos }", want: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f, err := goparser.ParseFile(token.NewFileSet(), "e.go", "package "+tc.pkg+"\n"+tc.src, goparser.SkipObjectResolution)
+			require.NoError(t, err)
+			structs := structTypes(f)
+			require.Equal(t, tc.want, carriesPos(tc.pkg, structs["E"], structs, map[string]bool{}))
+		})
+	}
+}
+
+func TestIsPositionMethod(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		pkg  string
+		src  string
+		want bool
+	}{
+		{name: "root", pkg: "cobol", src: "func (e E) Position() Pos { return e.Pos }", want: true},
+		{name: "qualified", pkg: "copybook", src: "func (e E) Position() cobol.Pos { return e.Pos }", want: true},
+		{name: "wrong result type", pkg: "copybook", src: "func (e E) Position() int { return 0 }", want: false},
+		{name: "two results", pkg: "cobol", src: "func (e E) Position() (Pos, bool) { return e.Pos, true }", want: false},
+		{name: "takes a parameter", pkg: "cobol", src: "func (e E) Position(n int) Pos { return e.Pos }", want: false},
+		{name: "unqualified outside the root", pkg: "copybook", src: "func (e E) Position() Pos { return e.Pos }", want: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f, err := goparser.ParseFile(token.NewFileSet(), "e.go", "package "+tc.pkg+"\n"+tc.src, goparser.SkipObjectResolution)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, isPositionMethod(tc.pkg, f.Decls[0].(*ast.FuncDecl)))
+		})
+	}
+}
+
 // errorType is one exported type, declared in a package of this module, that has
 // an Error method.
 type errorType struct {
 	name        string // package-qualified outside the root package
 	carriesPos  bool
-	hasPosition bool
+	hasPosition bool // a method named Position exists
+	positionOK  bool // and its signature is Position() Pos
 }
 
 // scanErrorTypes parses the non-test Go files of every package under root,
@@ -171,7 +238,7 @@ func scanPackageErrorTypes(dir string) ([]errorType, error) {
 
 	fset := token.NewFileSet()
 	structs := map[string]*ast.StructType{}
-	methods := map[string]map[string]bool{}
+	methods := map[string]map[string]*ast.FuncDecl{}
 	var pkg string
 	for _, e := range entries {
 		name := e.Name()
@@ -183,48 +250,61 @@ func scanPackageErrorTypes(dir string) ([]errorType, error) {
 			return nil, err
 		}
 		pkg = f.Name.Name
+		for name, st := range structTypes(f) {
+			structs[name] = st
+		}
 		for _, decl := range f.Decls {
-			switch decl := decl.(type) {
-			case *ast.GenDecl:
-				for _, spec := range decl.Specs {
-					ts, ok := spec.(*ast.TypeSpec)
-					if !ok || !ts.Name.IsExported() {
-						continue
-					}
-					if st, ok := ts.Type.(*ast.StructType); ok {
-						structs[ts.Name.Name] = st
-					}
-				}
-			case *ast.FuncDecl:
-				if decl.Recv == nil || len(decl.Recv.List) != 1 {
-					continue
-				}
-				recv := receiverName(decl.Recv.List[0].Type)
-				if methods[recv] == nil {
-					methods[recv] = map[string]bool{}
-				}
-				methods[recv][decl.Name.Name] = true
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || len(fn.Recv.List) != 1 {
+				continue
 			}
+			recv := receiverName(fn.Recv.List[0].Type)
+			if methods[recv] == nil {
+				methods[recv] = map[string]*ast.FuncDecl{}
+			}
+			methods[recv][fn.Name.Name] = fn
 		}
 	}
 
 	var out []errorType
 	for name, st := range structs {
-		if !methods[name]["Error"] {
+		if !ast.IsExported(name) || methods[name]["Error"] == nil {
 			continue
 		}
 		qualified := name
 		if pkg != "cobol" {
 			qualified = pkg + "." + name
 		}
+		position := methods[name]["Position"]
 		out = append(out, errorType{
 			name:        qualified,
-			carriesPos:  carriesPos(st),
-			hasPosition: methods[name]["Position"],
+			carriesPos:  carriesPos(pkg, st, structs, map[string]bool{}),
+			hasPosition: position != nil,
+			positionOK:  position != nil && isPositionMethod(pkg, position),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out, nil
+}
+
+// structTypes returns every struct type a file declares, exported or not, so an
+// embedded unexported base struct can be followed.
+func structTypes(f *ast.File) map[string]*ast.StructType {
+	out := map[string]*ast.StructType{}
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			if ts, ok := spec.(*ast.TypeSpec); ok {
+				if st, ok := ts.Type.(*ast.StructType); ok {
+					out[ts.Name.Name] = st
+				}
+			}
+		}
+	}
+	return out
 }
 
 func receiverName(expr ast.Expr) string {
@@ -237,28 +317,66 @@ func receiverName(expr ast.Expr) string {
 	return ""
 }
 
-// carriesPos reports whether a struct has a field of type Pos or Token (or a
-// pointer to one), in the root package or as cobol.Pos / cobol.Token.
-func carriesPos(st *ast.StructType) bool {
+// rootTypeName returns the name of the root package type expr denotes — an
+// unqualified identifier inside the root package, a cobol-qualified selector
+// outside it — or "" when it denotes no root package type.
+func rootTypeName(pkg string, expr ast.Expr) string {
+	switch expr := expr.(type) {
+	case *ast.Ident:
+		if pkg == "cobol" {
+			return expr.Name
+		}
+	case *ast.SelectorExpr:
+		if x, ok := expr.X.(*ast.Ident); ok && x.Name == "cobol" && pkg != "cobol" {
+			return expr.Sel.Name
+		}
+	}
+	return ""
+}
+
+// carriesPos reports whether a struct has a field of type Pos or Token — or a
+// pointer, slice or array of one — or embeds a struct of its own package that
+// does.
+func carriesPos(pkg string, st *ast.StructType, structs map[string]*ast.StructType, seen map[string]bool) bool {
 	for _, field := range st.Fields.List {
 		typ := field.Type
-		if star, ok := typ.(*ast.StarExpr); ok {
-			typ = star.X
-		}
-		var name string
-		switch typ := typ.(type) {
-		case *ast.Ident:
-			name = typ.Name
-		case *ast.SelectorExpr:
-			if x, ok := typ.X.(*ast.Ident); ok && x.Name == "cobol" {
-				name = typ.Sel.Name
+		for unwrapped := false; !unwrapped; {
+			switch t := typ.(type) {
+			case *ast.StarExpr:
+				typ = t.X
+			case *ast.ArrayType:
+				typ = t.Elt
+			default:
+				unwrapped = true
 			}
 		}
-		if name == "Pos" || name == "Token" {
+		if name := rootTypeName(pkg, typ); name == "Pos" || name == "Token" {
 			return true
+		}
+		if len(field.Names) != 0 {
+			continue
+		}
+		if id, ok := typ.(*ast.Ident); ok && !seen[id.Name] {
+			seen[id.Name] = true
+			if base, ok := structs[id.Name]; ok && carriesPos(pkg, base, structs, seen) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// isPositionMethod reports whether fn has the signature [Positioned] requires:
+// no parameters and a single Pos result.
+func isPositionMethod(pkg string, fn *ast.FuncDecl) bool {
+	typ := fn.Type
+	if typ.Params != nil && len(typ.Params.List) != 0 {
+		return false
+	}
+	if typ.Results == nil || len(typ.Results.List) != 1 || len(typ.Results.List[0].Names) > 1 {
+		return false
+	}
+	return rootTypeName(pkg, typ.Results.List[0].Type) == "Pos"
 }
 
 func TestPositionedErrorsWithoutPosition(t *testing.T) {

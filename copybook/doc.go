@@ -95,7 +95,9 @@
 // # Errors
 //
 // Every error this package returns that carries a source position — the
-// position of the data description entry it was reported against — implements
+// position of the data description entry, or of the clause within it, that the
+// fault was found in (a [PictureError] is reported at its PICTURE clause, a
+// [LevelError] at its entry) — implements
 // [cobol.Positioned], so one errors.As reaches the position of a [LevelError], a
 // [RedefinesError] or any other of them without naming each type:
 //

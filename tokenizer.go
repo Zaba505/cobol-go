@@ -36,6 +36,11 @@ type Pos struct {
 //		report(p.Position(), p.Error())
 //	}
 //
+// A position is a line and column and names no file. A fault inside text a
+// COPY statement brought in is positioned within that copybook, as the nodes
+// built from it are, so a caller printing it against the source it handed to
+// [Parse] must allow that it may belong to a copybook instead.
+//
 // Errors that carry no source position do not implement it — a byte offset
 // within a PICTURE character-string, or within a record, is not a position in
 // the source.
