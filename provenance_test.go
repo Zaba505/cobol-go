@@ -8,6 +8,9 @@ package cobol
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	goparser "go/parser"
+	"go/token"
 	"strings"
 	"testing"
 
@@ -152,6 +155,17 @@ func TestReplacingPositionsAsWritten(t *testing.T) {
 			replacements: []copyReplacement{{From: "VALUE 1", To: ""}},
 			expected: []tokenAt{
 				{"05", 1, 1}, {"A", 1, 4}, {"PIC", 1, 14}, {"X", 1, 18}, {".", 1, 19},
+			},
+		},
+		{
+			// An empty replacement produces no text, so a token beginning
+			// where it deleted words begins after the substitution and is
+			// positioned where it begins as written — here, at the hyphen.
+			name:         "a deletion welded to the word after it",
+			written:      "05 :T:-ID PIC X.\n",
+			replacements: []copyReplacement{{From: ":T:", To: ""}},
+			expected: []tokenAt{
+				{"05", 1, 1}, {"-", 1, 7}, {"ID", 1, 8}, {"PIC", 1, 11}, {"X", 1, 15}, {".", 1, 16},
 			},
 		},
 		{
@@ -402,4 +416,97 @@ func TestTokenizerErrorsRelocate(t *testing.T) {
 			require.IsType(t, tc.err, moved)
 		})
 	}
+}
+
+// An identity substitution records a span for every match while changing no
+// text, so every token must keep exactly the position the tokenizer gives it
+// with no REPLACING at all. That holds the position arithmetic in asWritten to
+// the tokenizer's own column model across the inputs most likely to split them:
+// CRLF line endings, tabs, multibyte text, and fixed format with sequence and
+// identification areas.
+func TestReplacingIdentityKeepsPositions(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		written string
+		from    string
+		opts    []TokenizeOption
+	}{
+		{name: "crlf", written: "05 A PIC X.\r\n05 B PIC X.\r\n", from: "A"},
+		{name: "tabs", written: "05\tA\tPIC X.\n\t05 B PIC X.\n", from: "A"},
+		{name: "multibyte", written: "05 A VALUE 'ééé' PIC X. 05 B PIC X.\n", from: "VALUE"},
+		{name: "a clause spanning lines", written: "05 A PIC\n   X(4).\n05 A-B PIC X.\n", from: "A"},
+		{
+			name: "fixed format",
+			written: "000100     05  A   PIC\n" +
+				"000200         X(4).                                                  TAG00200\n" +
+				"000300     05  B   REDEFINES A PIC X(4).\n",
+			from: "A",
+			opts: []TokenizeOption{WithFixedFormat()},
+		},
+	}
+
+	collect := func(t *testing.T, src string, m func(Pos) Pos, opts []TokenizeOption) []Token {
+		t.Helper()
+		var toks []Token
+		for tok, err := range relocateTokens(Tokenize(strings.NewReader(src), opts...), m) {
+			require.NoError(t, err)
+			toks = append(toks, tok)
+		}
+		return toks
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			origin := &LibraryText{Name: "BOOK"}
+			replaced, spans := applyReplacing(tc.written, []copyReplacement{{From: tc.from, To: tc.from}})
+			require.Equal(t, tc.written, replaced)
+			require.NotEmpty(t, spans)
+
+			got := collect(t, replaced, asWritten(tc.written, replaced, spans, origin), tc.opts)
+			want := collect(t, tc.written, func(p Pos) Pos { p.Text = origin; return p }, tc.opts)
+			require.Equal(t, want, got)
+		})
+	}
+}
+
+// Every positioned error type the tokenizer or the listing-directive pass
+// declares has a relocate method, so none can reach a caller from copied text
+// still positioned in the substituted text with no Text. relocateTokens moves an
+// error only when it is relocatable, and this is what keeps that set complete as
+// error types are added.
+func TestEveryTokenizerErrorIsRelocatable(t *testing.T) {
+	t.Parallel()
+
+	var checked []string
+	for _, file := range []string{"tokenizer.go", "directive.go"} {
+		f, err := goparser.ParseFile(token.NewFileSet(), file, nil, goparser.SkipObjectResolution)
+		require.NoError(t, err)
+
+		methods := map[string]map[string]bool{}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || len(fn.Recv.List) != 1 {
+				continue
+			}
+			recv := receiverName(fn.Recv.List[0].Type)
+			if methods[recv] == nil {
+				methods[recv] = map[string]bool{}
+			}
+			methods[recv][fn.Name.Name] = true
+		}
+		for name, m := range methods {
+			if !m["Error"] || !m["Position"] {
+				continue
+			}
+			checked = append(checked, name)
+			require.Truef(t, m["relocate"], "%s in %s is positioned and has no relocate method", name, file)
+		}
+	}
+	// Guard the guard: a scan that found nothing would pass vacuously.
+	require.Contains(t, checked, "UnexpectedCharacterError")
+	require.Contains(t, checked, "InvalidLiteralError")
 }

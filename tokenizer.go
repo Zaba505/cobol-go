@@ -73,6 +73,13 @@ type Pos struct {
 // colon, and when one substitution produces several tokens, every one of them is
 // positioned there.
 //
+// Which tokens count as produced is decided by where a token begins: one that
+// begins inside the substituted text was produced by it, and one that begins
+// after it was not, whatever it ends up welded to. An empty replacement
+// produces no text, so the token beginning where it deleted words is positioned
+// where that token begins as written: with REPLACING ==:TAG:== BY == ==, the
+// -CUSTOMER-ID left of :TAG:-CUSTOMER-ID is positioned at its hyphen.
+//
 // # Errors and printing
 //
 // Every error carrying a Pos carries its Text, so a [Positioned] error raised

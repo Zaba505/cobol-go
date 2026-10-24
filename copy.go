@@ -803,6 +803,13 @@ func asWritten(written, replaced string, spans []replacedSpan, origin *LibraryTe
 		writtenStart, writtenEnd   Pos
 		replacedStart, replacedEnd Pos
 	}
+	if len(spans) == 0 {
+		// No REPLACING, or one that matched nothing: the texts are the same.
+		return func(p Pos) Pos {
+			p.Text = origin
+			return p
+		}
+	}
 	ps := make([]posSpan, len(spans))
 	writtenAt, replacedAt := positionsIn(written), positionsIn(replaced)
 	for i, s := range spans {
